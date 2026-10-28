@@ -24,6 +24,12 @@
 
 ### Fixed
 
+- In `1.1.1-dev.2`, splice-tail and run-through rescue require both sides to
+  meet at the declared query and reference boundaries before accepting a
+  stitched CIGAR. Invalid local-extension seams fall back to the original
+  placement; valid outer soft clips and indels are retained. Right-tail
+  reextension also updates the alignment start and uses that start for the
+  short-tail mismatch gate. See `docs/cigar-rescue-contract.md`.
 - Score-stage likelihood quadrature no longer stalls on ultra-high-coverage sites. Sites with more than 63 observations were integrated with an adaptive Simpson rule whose refinement cost grows unpredictably on the sharply peaked likelihoods produced by extreme coverage (millions of observations at a single position), leaving affected runs effectively stuck in the score stage. All sites now use fixed 32-point Gauss-Legendre quadrature, so per-site cost scales linearly with observation count and extreme-coverage sites finish in well under a second. Site scores and VCF output are bit-identical to 1.1.0 on full-depth human RNA-seq runs.
 
 ## [1.1.0] - 2026-09-29

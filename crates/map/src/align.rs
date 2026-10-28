@@ -1553,7 +1553,8 @@ impl<'a> Aligner<'a> {
                     // junction match is accepted.
                     let t3_reject = r_tail < 12 && {
                         let contig = &self.index.reference.contigs[out.contig as usize];
-                        let mm = count_tail_mismatches(&rescue.cigar, out.pos, contig, query, true);
+                        let mm =
+                            count_tail_mismatches(&rescue.cigar, rescue.pos, contig, query, true);
                         if rescue.junction.known_support < 2 {
                             mm > 0 || rescue.junction.signal == SpliceSignal::NonCanonical
                         } else {
@@ -1561,6 +1562,7 @@ impl<'a> Aligner<'a> {
                         }
                     };
                     if !t3_reject {
+                        out.pos = rescue.pos;
                         out.cigar = rescue.cigar;
                         out.junctions.push(rescue.junction);
                         out.score += rescue.score;
@@ -2140,6 +2142,77 @@ mod tests {
             0,
             100,
         )
+    }
+
+    #[test]
+    fn right_split_rescue_updates_position_and_short_tail_gate() {
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        for tail_len in [10, 40] {
+            let seq = format!(
+                "{}{}GT{}AG{}{}",
+                "A".repeat(20),
+                "C".repeat(40),
+                "T".repeat(96),
+                "G".repeat(tail_len),
+                "T".repeat(60 - tail_len)
+            );
+            let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+            let read = format!("{}{}", "C".repeat(40), "G".repeat(tail_len));
+            // Reextension shifts the body start from 23 to 20. The short-tail
+            // mismatch gate must also use that new start.
+            let aln = ReadAlignment {
+                pos: 23,
+                cigar: vec![CigarOp::Match(40), CigarOp::SoftClip(tail_len as u32)],
+                ..Default::default()
+            };
+            let rescued = aligner.apply_split_rescue(read.as_bytes(), aln);
+            assert_eq!(rescued.pos, 20, "tail length {tail_len}: {rescued:?}");
+            assert_eq!(
+                rescued.cigar,
+                vec![
+                    CigarOp::Match(40),
+                    CigarOp::RefSkip(100),
+                    CigarOp::Match(tail_len as u32)
+                ]
+            );
+            assert_eq!(rescued.junctions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_split_keeps_original_primary() {
+        let seq = format!(
+            "{}{}GT{}AG{}",
+            "A".repeat(20),
+            "C".repeat(40),
+            "T".repeat(96),
+            "G".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}AAAA{}", "C".repeat(40), "G".repeat(40));
+        let original = vec![CigarOp::Match(40), CigarOp::SoftClip(44)];
+        let aln = ReadAlignment {
+            pos: 20,
+            cigar: original.clone(),
+            score: 80,
+            ..Default::default()
+        };
+        let result = aligner.apply_split_rescue(read.as_bytes(), aln);
+        assert_eq!(result.pos, 20);
+        assert_eq!(result.cigar, original);
+        assert_eq!(result.score, 80);
+        assert!(result.junctions.is_empty());
     }
 
     #[test]
