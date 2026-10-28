@@ -1,35 +1,48 @@
 # ESPERANTO
 
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://github.com/Zhazhupai603/esperanto/releases)
+[![CI](https://github.com/intell-biol-lab/esperanto/actions/workflows/ci.yml/badge.svg)](https://github.com/intell-biol-lab/esperanto/actions/workflows/ci.yml)
+[![Development](https://img.shields.io/badge/version-1.1.1--dev.1-orange.svg)](CHANGELOG.md)
 ![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ESPERANTO identifies and scores candidate A-to-I RNA editing sites from RNA sequencing reads using read-level and reference-aware molecular evidence.
 
+Development is maintained at **[intell-biol-lab/esperanto](https://github.com/intell-biol-lab/esperanto)**,
+forked from [Zhazhupai603/esperanto](https://github.com/Zhazhupai603/esperanto).
+This organization development line has no binary release yet. See the
+[development contract](docs/development.md), [contribution guide](CONTRIBUTING.md)
+and [baseline audit](docs/provenance/2026-10-29-adoption.json).
+
+**Known qualification failure:** inherited mapper output can contain internal
+soft clips in primary CIGARs. The initial human development pilot failed strict
+SAM interface qualification. The organization foundation does not repair this
+issue or establish benchmark superiority. See [known issues](docs/known-issues.md).
+
 ## Installation
 
-Linux x86-64 packages include the executable and unified scoring model. No GPU is required.
+Build from source with the pinned Rust toolchain in `rust-toolchain.toml`.
+Requires Linux x86-64, a C/C++ toolchain, CMake, pkg-config, libclang, and the
+OpenSSL, zlib, bzip2 and xz development libraries. No GPU is required.
 
 ```sh
-curl -fsSL https://github.com/Zhazhupai603/esperanto/releases/latest/download/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-esperanto --version
-```
-
-The installer selects a compatible CPU build and installs under `~/.local/`. Precompiled packages are available from [Releases](https://github.com/Zhazhupai603/esperanto/releases).
-
-<details>
-<summary>Build from source</summary>
-
-Requires Rust, a C/C++ toolchain, CMake, pkg-config, libclang, and the OpenSSL, zlib, bzip2, and xz development libraries.
-
-```sh
-git clone https://github.com/Zhazhupai603/esperanto.git
+git clone https://github.com/intell-biol-lab/esperanto.git
 cd esperanto
-cargo build --release --locked
+# For an analysis, check out its recorded, reviewed commit before building.
+cargo build --release --locked -p esperanto-cli
+./target/release/esperanto --version
+export PATH="$PWD/target/release:$PATH"
+# Keep model selection explicit, especially on hosts with an existing install.
+export ESPERANTO_BUNDLE="$PWD/bundle/human/esperanto-model-v1.1.0/rust"
 ```
 
-</details>
+The inherited Cargo configuration targets x86-64-v3 (AVX2). For a portable
+x86-64 executable, set `RUSTFLAGS="-C target-cpu=x86-64"` when building; CI uses
+that portable target. Record this choice with each experiment.
+
+`--version` reports the organization repository, exact source commit and build
+worktree state; `-V` reports the short software version. Development self-update
+is disabled. `install.sh` explains source installation and exits without
+installing an upstream binary.
 
 ## Quick start
 
@@ -106,7 +119,11 @@ See [CHANGELOG.md](CHANGELOG.md) for release updates and [technical specificatio
 
 ## Citation
 
-Please cite the software release used in the analysis: [ESPERANTO releases](https://github.com/Zhazhupai603/esperanto/releases).
+Cite the exact organization commit or organization release used in the analysis,
+the inherited upstream software, and the model SHA-256 / threshold separately.
+Historical upstream releases remain at
+[Zhazhupai603/esperanto](https://github.com/Zhazhupai603/esperanto/releases);
+organization release policy is in [docs/development.md](docs/development.md).
 
 ## License
 
