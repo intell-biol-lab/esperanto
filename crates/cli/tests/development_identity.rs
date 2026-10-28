@@ -17,11 +17,23 @@ fn long_version_identifies_the_repository_and_exact_source_commit() {
             || version.contains("worktree: unknown")
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let is_checkout = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|git| git.status.success())
+        .is_some_and(|git| {
+            std::path::Path::new(String::from_utf8_lossy(&git.stdout).trim())
+                .canonicalize()
+                .ok()
+                == root.canonicalize().ok()
+        });
     let git = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
         .output();
-    if let Ok(git) = git {
+    if let Some(git) = git.ok().filter(|_| is_checkout) {
         if git.status.success() {
             let sha = String::from_utf8(git.stdout).unwrap();
             assert!(version.contains(&format!("commit: {}", sha.trim())));

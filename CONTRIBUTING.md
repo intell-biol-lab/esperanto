@@ -10,6 +10,7 @@ have passed.
 git clone https://github.com/intell-biol-lab/esperanto.git
 cd esperanto
 git remote add upstream https://github.com/Zhazhupai603/esperanto.git
+git remote set-url --push upstream DISABLED
 git config remote.pushDefault origin
 git fetch upstream --tags
 git switch -c fix/descriptive-name origin/master

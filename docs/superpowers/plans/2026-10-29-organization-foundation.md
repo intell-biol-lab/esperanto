@@ -31,6 +31,6 @@ Keep mapping semantics and the inherited model fixed.
   pull request and issue templates, baseline identity manifest and fork README.
 - [x] Run workspace tests, formatting, locked release build and CLI smoke checks;
   verify model files and mapping behavior source were not semantically changed.
-- [ ] Commit and push the topic branch, open a draft PR and inspect remote CI.
-- [ ] Configure master protection using the observed CI check name and verify
+- [x] Commit and push the topic branch, open a draft PR and inspect remote CI.
+- [x] Configure master protection using the observed CI check name and verify
   settings. Record the verified result in the research workspace handoff.

@@ -62,5 +62,15 @@ repositories and source directories:
 These checks exercise the build script with actual Git state; they do not
 establish bit-identical builds or scientific mapping qualification.
 
-Remote CI and branch protection are verified after pushing the foundation
-branch. A draft PR is an integration review point, not a stable release.
+## Remote integration
+
+Foundation PR: https://github.com/intell-biol-lab/esperanto/pull/1
+
+The GitHub API confirmed master requires a PR and up-to-date `verify` status,
+including for admins; force pushes and deletion are disabled and conversations
+must be resolved. Additional reviewer count is zero for the initial
+single-maintainer workflow.
+
+Remote CI is inspected on the current PR head after pushing. Its final result
+and exact run/commit identities are retained in the research workspace handoff.
+A draft PR is an integration review point, not a stable release.
