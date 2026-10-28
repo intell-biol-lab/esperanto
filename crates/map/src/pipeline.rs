@@ -114,8 +114,7 @@ pub fn run_se(
             line: 0,
             msg: format!("thread pool: {e}"),
         })?;
-    let mut sinks =
-        crate::sinks::RecordSinks::new(out.bam.take(), out.index, threads)?;
+    let mut sinks = crate::sinks::RecordSinks::new(out.bam.take(), out.index, threads)?;
     let mut unm = crate::sinks::UnmappedFq::new(&mut out.unmapped_fq);
     let mut stats = StatsAcc::new();
     let mut discoveries: Discoveries = Vec::new();
@@ -260,8 +259,7 @@ pub fn run_pe(
             line: 0,
             msg: format!("thread pool: {e}"),
         })?;
-    let mut sinks =
-        crate::sinks::RecordSinks::new(out.bam.take(), out.index, threads)?;
+    let mut sinks = crate::sinks::RecordSinks::new(out.bam.take(), out.index, threads)?;
     let mut unm = crate::sinks::UnmappedFq::new(&mut out.unmapped_fq);
     let mut stats = StatsAcc::new();
     let mut discoveries: Discoveries = Vec::new();
@@ -305,17 +303,18 @@ pub fn run_pe(
         //      primary of its two sequences and runs the existing rescue
         //      logic unchanged.
         let (unique_seqs, uid1_of_pair, uid2_of_pair) = dedup_pe(&chunk);
-        let unique_alns: Vec<(Option<ReadAlignment>, Option<CachedPlacements>)> = pool.install(|| {
-            let lib = lib.clone();
-            let l1_clone = l1_clone.clone();
-            unique_seqs
-                .par_iter()
-                .map_init(
-                    move || make_aligner(index, cfg, &lib, &l1_clone),
-                    |aligner, &seq| aligner.align_read_full(seq),
-                )
-                .collect()
-        });
+        let unique_alns: Vec<(Option<ReadAlignment>, Option<CachedPlacements>)> =
+            pool.install(|| {
+                let lib = lib.clone();
+                let l1_clone = l1_clone.clone();
+                unique_seqs
+                    .par_iter()
+                    .map_init(
+                        move || make_aligner(index, cfg, &lib, &l1_clone),
+                        |aligner, &seq| aligner.align_read_full(seq),
+                    )
+                    .collect()
+            });
         // Parallel per-pair rescue arbitration reads the uid-indexed primary
         // results (order preserved by collect); BAM records are built in the
         // serial write section.
@@ -367,8 +366,7 @@ pub fn run_pe(
             // (MAPQ, proper-pair flag, tlen) — one derivation per field,
             // no re-computation from the alignment.
             let (ra, rb) = pair_records(
-                &a.name, &a.seq, &a.qual, aln1,
-                &b.name, &b.seq, &b.qual, aln2,
+                &a.name, &a.seq, &a.qual, aln1, &b.name, &b.seq, &b.qual, aln2,
             );
             if let Some(x) = aln1 {
                 stats.push_junctions(x.junctions.len() as u64);
@@ -514,7 +512,6 @@ fn pair_records(
         mk(n2, s2, q2, a2, a1, flag::READ2, -tlen),
     )
 }
-
 
 /// SE 2-pass (same semantics as the PE version). Runs pass-1 discovery even
 /// with the L1 engine on: the annotation covers only ~75% of the junctions
@@ -748,8 +745,14 @@ mod tests {
         let a1 = aln(Strand::Plus, 100);
         let a2 = aln(Strand::Minus, 400);
         let (ra, rb) = pair_records(
-            b"t/1", &seq, &qual, &Some(a1.clone()),
-            b"t/2", &seq, &qual, &Some(a2.clone()),
+            b"t/1",
+            &seq,
+            &qual,
+            &Some(a1.clone()),
+            b"t/2",
+            &seq,
+            &qual,
+            &Some(a2.clone()),
         );
         let proper = relate(&a1, &a2) == PairRelation::Proper;
         let expected_tlen = if proper { template_length(&a1, &a2) } else { 0 };
@@ -772,10 +775,7 @@ mod tests {
         assert_eq!(rb.mapq, mapq_of(&a2));
 
         // mate unmapped: MATE_UNMAPPED on the partner, no mate coords, tlen 0
-        let (rc, rd) = pair_records(
-            b"t/1", &seq, &qual, &Some(a1),
-            b"t/2", &seq, &qual, &None,
-        );
+        let (rc, rd) = pair_records(b"t/1", &seq, &qual, &Some(a1), b"t/2", &seq, &qual, &None);
         assert!(rc.flag & flag::MATE_UNMAPPED != 0);
         assert_eq!(rc.mate, Some((-1, -1, 0)));
         assert!(rd.flag & flag::UNMAPPED != 0);
@@ -796,12 +796,16 @@ mod tests {
         let mut seq = Vec::with_capacity(n);
         let mut state: u64 = 0x9E3779B97F4A7C15;
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             seq.push(b"ACGT"[(state >> 33) as usize & 3]);
         }
         // novel intron [8000, 9000): GT donor, AG acceptor (plus strand)
-        seq[8000] = b'G'; seq[8001] = b'T';
-        seq[8998] = b'A'; seq[8999] = b'G';
+        seq[8000] = b'G';
+        seq[8001] = b'T';
+        seq[8998] = b'A';
+        seq[8999] = b'G';
         let dir = std::env::temp_dir().join(format!("esp-2pass-l1-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fa = dir.join("ref.fa");
@@ -835,8 +839,26 @@ mod tests {
             span.extend_from_slice(&seq[9000..9075]);
             let mate = &seq[9100 + i * 200..9250 + i * 200];
             let q = b"I".repeat(150);
-            r1_txt.extend_from_slice(&[&format!("@novel{i}/1\n").into_bytes()[..], &span, b"\n+\n", &q, b"\n"].concat());
-            r2_txt.extend_from_slice(&[&format!("@novel{i}/2\n").into_bytes()[..], mate, b"\n+\n", &q, b"\n"].concat());
+            r1_txt.extend_from_slice(
+                &[
+                    &format!("@novel{i}/1\n").into_bytes()[..],
+                    &span,
+                    b"\n+\n",
+                    &q,
+                    b"\n",
+                ]
+                .concat(),
+            );
+            r2_txt.extend_from_slice(
+                &[
+                    &format!("@novel{i}/2\n").into_bytes()[..],
+                    mate,
+                    b"\n+\n",
+                    &q,
+                    b"\n",
+                ]
+                .concat(),
+            );
         }
         let r1 = dir.join("r1.fq");
         let r2 = dir.join("r2.fq");
@@ -854,8 +876,11 @@ mod tests {
         let (_stats, kept, _merged, _removed) = run_pe_2pass(&mut out, &r1, &r2, 2).unwrap();
         assert!(
             kept.iter().any(|(j, support, fate)| {
-                *support >= 2 && *fate != DiscoveryFate::OutvotedByAnnotated && !j.minus_strand &&
-                (j.start as i64 - 8000).abs() <= 2 && (j.end as i64 - 9000).abs() <= 2
+                *support >= 2
+                    && *fate != DiscoveryFate::OutvotedByAnnotated
+                    && !j.minus_strand
+                    && (j.start as i64 - 8000).abs() <= 2
+                    && (j.end as i64 - 9000).abs() <= 2
             }),
             "novel junction [8000, 9000) must be discovered under L1; kept = {kept:?}"
         );
@@ -982,7 +1007,9 @@ mod tests {
         let mut seq = Vec::with_capacity(n);
         let mut state: u64 = 0x9E3779B97F4A7C15;
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             seq.push(b"ACGT"[(state >> 33) as usize & 3]);
         }
         // GT..AG intron [8000, 9000) so one pair exercises the junction path
@@ -994,7 +1021,9 @@ mod tests {
         // bytes, so non-matching is a fixed fact, not a flake)
         let mut absent = Vec::with_capacity(150);
         for _ in 0..150 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             absent.push(b"ACGT"[(state >> 33) as usize & 3]);
         }
         // pairs: (R1, R2). p1's R1 duplicates p0's R1; p2's short R1 makes
@@ -1122,5 +1151,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

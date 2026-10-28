@@ -275,12 +275,9 @@ mod tests {
         }
         let new_bam_cell = Arc::new(Mutex::new(Vec::new()));
         {
-            let mut sinks = RecordSinks::new(
-                Some(Box::new(SharedSink(new_bam_cell.clone()))),
-                &index,
-                1,
-            )
-            .expect("sinks");
+            let mut sinks =
+                RecordSinks::new(Some(Box::new(SharedSink(new_bam_cell.clone()))), &index, 1)
+                    .expect("sinks");
             for r in &records {
                 sinks.write(r).expect("sink write");
             }

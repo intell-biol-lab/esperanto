@@ -418,8 +418,7 @@ pub fn align_read(
     }
     stats.branch = Branch::NoHit;
 
-    let (mut fulls, parts, read_rc) =
-        collect_extensions(read, tidx, txseqs, cfg, stats);
+    let (mut fulls, parts, read_rc) = collect_extensions(read, tidx, txseqs, cfg, stats);
     if fulls.is_empty() && parts.is_empty() {
         stats.branch = Branch::NoHit;
         return L1Outcome::Fallback;
@@ -427,9 +426,7 @@ pub fn align_read(
 
     // EA-Myers infix distance of one candidate against its anchored
     // transcript window (None when the window is empty).
-    let verify = |e: &ExtEntry| -> Option<u32> {
-        verify_dist(read, &read_rc, txseqs, e, cfg)
-    };
+    let verify = |e: &ExtEntry| -> Option<u32> { verify_dist(read, &read_rc, txseqs, e, cfg) };
     stats.fulls_count = fulls.len() as u32;
     stats.parts_count = parts.len() as u32;
 
@@ -437,7 +434,11 @@ pub fn align_read(
     if !fulls.is_empty() {
         stats.branch = Branch::Full;
         fulls.sort_by(|a, b| {
-            (a.strand.sam_flag(), a.tx_id, a.diagonal).cmp(&(b.strand.sam_flag(), b.tx_id, b.diagonal))
+            (a.strand.sam_flag(), a.tx_id, a.diagonal).cmp(&(
+                b.strand.sam_flag(),
+                b.tx_id,
+                b.diagonal,
+            ))
         });
         let mut placed: Vec<placement::Placed> = fulls
             .iter()
@@ -447,9 +448,7 @@ pub fn align_read(
             stats.branch = Branch::GateFail;
             return L1Outcome::Fallback;
         }
-        placed.sort_by(|a, b| {
-            (a.score, a.tx_id, a.diagonal).cmp(&(b.score, b.tx_id, b.diagonal))
-        });
+        placed.sort_by(|a, b| (a.score, a.tx_id, a.diagonal).cmp(&(b.score, b.tx_id, b.diagonal)));
         let Some((best, mapq)) = placement::finalize_candidates(&placed, false) else {
             stats.branch = Branch::GateFail;
             return L1Outcome::Fallback;
@@ -586,8 +585,8 @@ pub fn align_read(
         strand: bestp.strand,
         cigar: bestp.cigar.clone(),
         score: bestp.score,
-mapq,
-}
+        mapq,
+    }
 }
 
 /// Seed a read against the transcriptome index and greedily extend every
@@ -770,10 +769,7 @@ pub fn align_read_candidates(
                 break;
             }
             if out.iter().any(|x| {
-                x.contig == p.contig
-                    && x.pos == p.pos
-                    && x.strand == p.strand
-                    && x.cigar == p.cigar
+                x.contig == p.contig && x.pos == p.pos && x.strand == p.strand && x.cigar == p.cigar
             }) {
                 continue;
             }
@@ -825,10 +821,7 @@ pub fn align_read_candidates(
             continue;
         };
         if out.iter().any(|x| {
-            x.contig == p.contig
-                && x.pos == p.pos
-                && x.strand == p.strand
-                && x.cigar == p.cigar
+            x.contig == p.contig && x.pos == p.pos && x.strand == p.strand && x.cigar == p.cigar
         }) {
             continue;
         }
@@ -877,4 +870,3 @@ fn verify_dist(
         myers::long::infix(oriented, &tx_seq[wlo..whi])
     })
 }
-

@@ -20,8 +20,8 @@ use crate::index::{collect_anchors_into, Index};
 use crate::mapq::ReadAlignment;
 use crate::seed::{minimizers_into, Minimizer, SeedParams, SeedScratch, Strand};
 use crate::splice::{
-    align_spliced, intron_length_penalty, refine_junction_read, segment_chain,
-    splice_signal, SpliceParams,
+    align_spliced, intron_length_penalty, refine_junction_read, segment_chain, splice_signal,
+    SpliceParams,
 };
 
 /// Aligner configuration (`default` = DNA preset; `rna_default` = RNA production).
@@ -337,8 +337,7 @@ impl<'a> Aligner<'a> {
         &mut self,
         seq: &[u8],
     ) -> (Option<ReadAlignment>, Option<CachedPlacements>) {
-        let Some((placements, n_seeds, genomic_any)) = self.scored_placements(seq)
-        else {
+        let Some((placements, n_seeds, genomic_any)) = self.scored_placements(seq) else {
             return (None, None);
         };
         let cache = CachedPlacements {
@@ -346,15 +345,15 @@ impl<'a> Aligner<'a> {
             n_seeds,
             genomic_any,
         };
-        (self.arbitrate(seq, placements, n_seeds, genomic_any), Some(cache))
+        (
+            self.arbitrate(seq, placements, n_seeds, genomic_any),
+            Some(cache),
+        )
     }
 
     /// Collect, strictly rescore, dedup and order the candidate placements of
     /// a read from both layers. Returns None when no layer produced any candidate.
-    fn scored_placements(
-        &mut self,
-        seq: &[u8],
-    ) -> Option<(Vec<Placement>, usize, bool)> {
+    fn scored_placements(&mut self, seq: &[u8]) -> Option<(Vec<Placement>, usize, bool)> {
         let mut placements: Vec<Placement> = Vec::new();
 
         // 1. Candidate generation — transcriptome layer.
@@ -415,7 +414,12 @@ impl<'a> Aligner<'a> {
     /// plainly. When found, every unspliced genomic candidate is re-extended
     /// and every candidate rescored under that direction, then dedup and
     /// order are recomputed. No-op otherwise.
-    fn hyper_rearbitrate(&mut self, seq: &[u8], rc_storage: &[u8], placements: &mut Vec<Placement>) {
+    fn hyper_rearbitrate(
+        &mut self,
+        seq: &[u8],
+        rc_storage: &[u8],
+        placements: &mut Vec<Placement>,
+    ) {
         let Some(dir) = placements.iter().find_map(hyper_direction) else {
             return;
         };
@@ -464,10 +468,9 @@ impl<'a> Aligner<'a> {
             // Reuse the caller's own scored candidates: the read was just
             // aligned once already.
             Some(c) => (c.placements.clone(), c.n_seeds, c.genomic_any),
-            None => {
-                self.scored_placements(seq)
-                    .unwrap_or((Vec::new(), 0, false))
-            }
+            None => self
+                .scored_placements(seq)
+                .unwrap_or((Vec::new(), 0, false)),
         };
         placements.push(win);
         dedup_by_footprint(&mut placements);
@@ -713,11 +716,7 @@ impl<'a> Aligner<'a> {
                     }
                     for k in 0..*n as usize {
                         let qb = query.get(ro as usize + k).copied().unwrap_or(b'N');
-                        let rb = if k < scratch.len() {
-                            scratch[k]
-                        } else {
-                            b'N'
-                        };
+                        let rb = if k < scratch.len() { scratch[k] } else { b'N' };
                         if qb == b'N' || rb == b'N' {
                             continue; // 0 score, uncounted
                         }
@@ -915,7 +914,6 @@ impl<'a> Aligner<'a> {
         count
     }
 
-
     /// Genomic layer driver, in candidate form: seed → anchor → chain →
     /// build a locus-deduplicated chain list → extend each chain
     /// (intron-chain / spliced / EA-Myers / fast lane / banded DP) into
@@ -1057,7 +1055,7 @@ impl<'a> Aligner<'a> {
                 return GenomicBatch {
                     placements: Vec::new(),
                     n_seeds,
-                }
+                };
             }
         };
 
@@ -1190,14 +1188,7 @@ impl<'a> Aligner<'a> {
                     Strand::Minus => rc_storage,
                 };
                 let mut ic_anchors = std::mem::take(&mut self.scratch.anchors);
-                collect_anchors_into(
-                    self.index,
-                    mins,
-                    read_len,
-                    k,
-                    MID_OCC_CAP,
-                    &mut ic_anchors,
-                );
+                collect_anchors_into(self.index, mins, read_len, k, MID_OCC_CAP, &mut ic_anchors);
                 ic_anchors.retain(|a| a.contig == chain.contig && a.strand == chain.strand);
                 let ic_hit = crate::intron_chain::try_intron_chain_placement(
                     self.index.reference,
@@ -1447,7 +1438,12 @@ impl<'a> Aligner<'a> {
     /// Splice path: segment → junction refine → pseudo-reference extend →
     /// N CIGAR. splice gate: <2 segments ⇒ None (align_spliced would
     /// return None anyway — skip the revcomp + entry cost).
-    fn try_spliced(&mut self, seq: &[u8], rc_storage: &[u8], best: &Chain) -> Option<ReadAlignment> {
+    fn try_spliced(
+        &mut self,
+        seq: &[u8],
+        rc_storage: &[u8],
+        best: &Chain,
+    ) -> Option<ReadAlignment> {
         let min_intron = SpliceParams::default().min_intron;
         let segs = segment_chain(best, self.config.seed.k, min_intron);
         if segs.len() < 2 {
@@ -1598,13 +1594,8 @@ impl<'a> Aligner<'a> {
                     // zero tail-vs-ref mismatch.
                     let t3_reject = read_start < 12 && {
                         let contig = &self.index.reference.contigs[out.contig as usize];
-                        let mm = count_tail_mismatches(
-                            &rescue.cigar,
-                            rescue.pos,
-                            contig,
-                            query,
-                            false,
-                        );
+                        let mm =
+                            count_tail_mismatches(&rescue.cigar, rescue.pos, contig, query, false);
                         if rescue.junction.known_support < 2 {
                             mm > 0 || rescue.junction.signal == SpliceSignal::NonCanonical
                         } else {
@@ -1875,7 +1866,6 @@ impl<'a> Aligner<'a> {
         Some(RoundOutcome { chains, second })
     }
 }
-
 
 /// Set `aln.mm_count` / `aln.ea_count` by walking the CIGAR base-by-base
 /// against `reference`. `query` must already be in the alignment's frame
@@ -2222,7 +2212,11 @@ mod tests {
         let mut ins_read: Vec<u8> = read[..24].to_vec();
         ins_read.extend_from_slice(b"TT");
         ins_read.extend_from_slice(&read[24..48]);
-        let mut p = placement(0, 0, &[CigarOp::Match(24), CigarOp::Ins(2), CigarOp::Match(24)]);
+        let mut p = placement(
+            0,
+            0,
+            &[CigarOp::Match(24), CigarOp::Ins(2), CigarOp::Match(24)],
+        );
         aln.rescore_strict(&ins_read, &mut p);
         assert_eq!(p.strict.score, 48 * 2 - (4 + 2 * 2));
         assert_eq!(p.strict.ins, 1);
@@ -2245,10 +2239,13 @@ mod tests {
             r
         };
         let n = intron.len() as u32;
-        let mut p = placement(0, start, &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)]);
+        let mut p = placement(
+            0,
+            start,
+            &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)],
+        );
         aln.rescore_strict(&read, &mut p);
-        let expected = 40 * 2 + SpliceParams::default().gt_ag_bonus
-            - intron_length_penalty(n);
+        let expected = 40 * 2 + SpliceParams::default().gt_ag_bonus - intron_length_penalty(n);
         assert_eq!(p.strict.score, expected);
         assert_eq!(p.strict.n_splice, 1);
         assert_eq!(p.strict.aligned, 40);
@@ -2256,7 +2253,11 @@ mod tests {
         // (seen as CT..AC from its side); the strict score must not depend
         // on which strand the read was sequenced from.
         let read_rc = revcomp(&read);
-        let mut pm = placement(0, start, &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)]);
+        let mut pm = placement(
+            0,
+            start,
+            &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)],
+        );
         pm.strand = Strand::Minus;
         aln.rescore_strict(&revcomp(&read_rc), &mut pm);
         assert_eq!(pm.strict.score, expected);
@@ -2268,7 +2269,7 @@ mod tests {
         let read: Vec<u8> = b"ACGT".repeat(13)[..50].to_vec();
         let p = placement(0, 0, &[CigarOp::Match(50)]);
         assert_eq!(aln.exact_kmer_support(&read, &p), 3); // 0,15,30
-        // One mismatch in the second 15-mer window pushes the scan past it.
+                                                          // One mismatch in the second 15-mer window pushes the scan past it.
         let mut r2 = read.clone();
         r2[20] = if r2[20] == b'A' { b'C' } else { b'A' };
         let n = aln.exact_kmer_support(&r2, &p);
@@ -2289,7 +2290,15 @@ mod tests {
         other_strand.strand = Strand::Minus;
         assert_eq!(footprint_overlap(&a, &other_strand), 0.0);
         // Spliced placements overlap on M blocks only.
-        let spliced = placement(0, 0, &[CigarOp::Match(50), CigarOp::RefSkip(1000), CigarOp::Match(50)]);
+        let spliced = placement(
+            0,
+            0,
+            &[
+                CigarOp::Match(50),
+                CigarOp::RefSkip(1000),
+                CigarOp::Match(50),
+            ],
+        );
         let head = placement(0, 0, &[CigarOp::Match(50)]);
         assert!(footprint_overlap(&spliced, &head) > 0.9);
     }
@@ -2388,6 +2397,4 @@ mod tests {
         assert_eq!(hit.junctions[0].junction.start, 57);
         assert_eq!(hit.junctions[0].junction.end, 117);
     }
-
 }
-

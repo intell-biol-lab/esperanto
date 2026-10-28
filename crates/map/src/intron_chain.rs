@@ -10,9 +10,7 @@
 //! guarded for read-length conservation. Any failing stage returns `None`;
 //! the caller falls through to later paths.
 
-use crate::extend::{
-    CigarOp, ExtendBuffer, ExtendParams, Extension,
-};
+use crate::extend::{CigarOp, ExtendBuffer, ExtendParams, Extension};
 use crate::fasta::Reference;
 use crate::gtf::{Junction, JunctionLib, RefinedJunction};
 use crate::myers_ea::{infix_best_end, infix_best_start};
@@ -245,10 +243,7 @@ pub fn best_frag_pair(frags: &[Frag], intron_max: u32) -> Option<FragPair> {
             let (a, b) = (&frags[i], &frags[j]);
             // MEM edges may overlap by a couple of chance-matching bases at
             // the seam; tolerate up to 3bp.
-            if a.contig != b.contig
-                || a.strand != b.strand
-                || a.q_hi > b.q_lo + 3
-            {
+            if a.contig != b.contig || a.strand != b.strand || a.q_hi > b.q_lo + 3 {
                 continue;
             }
             // Split at the earlier fragment edge so both segments stay
@@ -347,8 +342,6 @@ pub fn refine_acceptor_start(
     lo + start as u32
 }
 
-
-
 /// Per-fragment EA-Myers split-read verification : returns
 /// (dist_donor, dist_acceptor) — real junctions score low, spurious high.
 fn verify_split_read(
@@ -363,7 +356,9 @@ fn verify_split_read(
     let d_start = (frag1.off_lo() - 30).max(0) as u32;
     let d_end = (donor_end + 1 + 30).max(1).min(ctg.len as i64) as u32;
     let a_start = (acceptor_start - 30).max(0).min(ctg.len as i64) as u32;
-    let a_end = (frag2.r_hi as i64 + 30).max(a_start as i64 + 1).min(ctg.len as i64) as u32;
+    let a_end = (frag2.r_hi as i64 + 30)
+        .max(a_start as i64 + 1)
+        .min(ctg.len as i64) as u32;
     if d_start >= d_end || a_start >= a_end || mid == 0 || mid >= read.len() {
         return (i32::MAX, i32::MAX);
     }
@@ -438,8 +433,10 @@ pub fn try_intron_chain_placement(
     } else {
         j_est.clamp(left.q_hi, right.q_lo)
     };
-    let donor_end = refine_donor_end(ctg, read, junction_off, left.r_hi, left.off_lo(), params) as i64;
-    let acceptor_start = refine_acceptor_start(ctg, read, junction_off, right.r_lo, right.off_lo(), params) as i64;
+    let donor_end =
+        refine_donor_end(ctg, read, junction_off, left.r_hi, left.off_lo(), params) as i64;
+    let acceptor_start =
+        refine_acceptor_start(ctg, read, junction_off, right.r_lo, right.off_lo(), params) as i64;
     let intron_len = acceptor_start - donor_end - 1;
 
     // Split-read verification (dual threshold).
@@ -490,7 +487,11 @@ pub fn try_intron_chain_placement(
     let read_len32 = read.len() as u32;
     let exon_bounds = vec![
         (0u32, pos, pos + frag1_len as u32),
-        (frag1_len as u32, acceptor_start as u32, acceptor_start as u32 + frag2_len as u32),
+        (
+            frag1_len as u32,
+            acceptor_start as u32,
+            acceptor_start as u32 + frag2_len as u32,
+        ),
     ];
     Some(SplicedAlignment {
         extension: Extension {
@@ -505,4 +506,3 @@ pub fn try_intron_chain_placement(
         exon_bounds,
     })
 }
-

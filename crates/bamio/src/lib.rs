@@ -206,7 +206,14 @@ pub fn write_record_slow<W: IoWrite>(
                 noodles::sam::alignment::record::MappingQuality::try_from(rec.mapq)
                     .expect("mapq <= 60"),
             )
-            .set_cigar(aln.cigar.iter().map(noodles_op).collect::<Vec<_>>().into_iter().collect());
+            .set_cigar(
+                aln.cigar
+                    .iter()
+                    .map(noodles_op)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .collect(),
+            );
         use noodles::sam::alignment::record::data::field::Tag;
         use noodles::sam::alignment::record_buf::data::field::Value;
         let mut data = noodles::sam::alignment::record_buf::Data::default();

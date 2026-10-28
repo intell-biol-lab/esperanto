@@ -109,13 +109,10 @@ pub fn minimizers_into(
 ) {
     let SeedScratch { codes, keys, dq } = scratch;
     codes.clear();
-    codes.extend(
-        seq.iter()
-            .map(|&b| match Base::from_ascii(b).code() {
-                Some(c) => c as u64,
-                None => N_CODE,
-            }),
-    );
+    codes.extend(seq.iter().map(|&b| match Base::from_ascii(b).code() {
+        Some(c) => c as u64,
+        None => N_CODE,
+    }));
     minimizers_core(codes, params.k, params.w, keys, dq, out);
 }
 
@@ -126,14 +123,7 @@ pub fn minimizers_into(
  */
 pub fn minimizers_from_codes(codes: &[u64], k: u32, w: u32) -> Vec<Minimizer> {
     let mut out = Vec::new();
-    minimizers_core(
-        codes,
-        k,
-        w,
-        &mut Vec::new(),
-        &mut VecDeque::new(),
-        &mut out,
-    );
+    minimizers_core(codes, k, w, &mut Vec::new(), &mut VecDeque::new(), &mut out);
     out
 }
 
@@ -158,7 +148,11 @@ fn minimizers_core(
     let mut fwd: u64 = 0;
     let mut rev: u64 = 0;
     let mut valid_run = 0usize; // current N-free run length
-    let mask: u64 = if k == 32 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
+    let mask: u64 = if k == 32 {
+        u64::MAX
+    } else {
+        (1u64 << (2 * k)) - 1
+    };
     for (i, &c) in codes.iter().enumerate() {
         if c == N_CODE {
             valid_run = 0;
