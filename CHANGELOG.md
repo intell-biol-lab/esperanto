@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Organization development
+
+- Adopt `intell-biol-lab/esperanto` as the continuing development repository,
+  preserving upstream history, attribution and release tags.
+- Identify development builds as `1.1.1-dev.1`, with repository, source commit
+  and dirty-state information in `--version`. The software version change
+  intentionally prevents silent resume of runs stamped with upstream 1.1.0.
+- Pin Rust 1.94.0 and establish CI for formatting, locked workspace tests,
+  portable CLI release builds and bundled model integrity.
+- Disable self-update for development builds and replace the inherited binary
+  installer with source installation guidance. Future stable update endpoints
+  name the organization; stable release hardening is still required.
+- Record source/model adoption identities, contribution / release contracts
+  and the unresolved internal-soft-clip qualification failure. No mapper
+  repair or model change is included.
+
 ### Changed
 
 - Updated the human model bundle. The classifier is retrained on an expanded, donor-partitioned panel (64 training, 16 calibration, and 20 held-out evaluation donors), and the decision threshold is recalibrated on the calibration donors. The 27-feature contract, input requirements, and output formats are unchanged.

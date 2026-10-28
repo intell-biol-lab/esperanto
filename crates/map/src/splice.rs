@@ -560,7 +560,10 @@ pub fn prepare_spliced(
             reference,
             read,
             contig,
-                w[0].r_end, w[1].r_start, w[0].q_end, w[1].q_start,
+            w[0].r_end,
+            w[1].r_start,
+            w[0].q_end,
+            w[1].q_start,
             minus,
             lib,
             params,
@@ -764,9 +767,7 @@ pub fn resolve_split_right(
         if !tail_gate(&ext, tail.len()) {
             continue;
         }
-        let total = ext.score
-            + signal.score(params)
-            + lib_bonus(support)
+        let total = ext.score + signal.score(params) + lib_bonus(support)
             - SPLIT_COST
             - intron_length_penalty(intron_len);
         if best.as_ref().is_none_or(|b| total > b.total) {
@@ -836,9 +837,7 @@ pub fn resolve_split_left(
         if !tail_gate(&ext, tail.len()) {
             continue;
         }
-        let total = ext.score
-            + signal.score(params)
-            + lib_bonus(support)
+        let total = ext.score + signal.score(params) + lib_bonus(support)
             - SPLIT_COST
             - intron_length_penalty(intron_len);
         if best.as_ref().is_none_or(|b| total > b.total) {

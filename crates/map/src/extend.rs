@@ -323,7 +323,14 @@ fn run_dispatch(
         if let Some((offset, num, den, half)) = band_spec {
             if num == 1 && den.max(1) == 1 {
                 return avx2_band::run(
-                    read, ref_window, &core, &mut buf.packed, offset, num, den, half,
+                    read,
+                    ref_window,
+                    &core,
+                    &mut buf.packed,
+                    offset,
+                    num,
+                    den,
+                    half,
                 );
             }
         }
@@ -403,7 +410,12 @@ pub fn extend_hint(
         ref_window,
         params,
         buf,
-        Some((hint.offset, hint.num as i64, hint.den.max(1) as i64, INITIAL_BAND)),
+        Some((
+            hint.offset,
+            hint.num as i64,
+            hint.den.max(1) as i64,
+            INITIAL_BAND,
+        )),
     );
     // Escalation: the band held the maximum on its edge, so a wider band can
     // still improve the path; or the score is under 85% of perfect.
@@ -699,7 +711,6 @@ fn run_band<T: Acc>(
         let mut row_max = T::NEG;
         let mut row_max_cell = 0i64;
 
-
         for jj in lo..=hi {
             let cidx = (jj - lo) as usize;
 
@@ -792,9 +803,19 @@ fn run_band<T: Acc>(
         let right_strict = hi < n;
         if !touch.touched {
             if left_strict && T::same(buf.h_cur[0], row_max) {
-                touch = TouchRec { touched: true, row: i, left: true, clamped: lo <= 1 };
+                touch = TouchRec {
+                    touched: true,
+                    row: i,
+                    left: true,
+                    clamped: lo <= 1,
+                };
             } else if right_strict && T::same(buf.h_cur[len - 1], row_max) {
-                touch = TouchRec { touched: true, row: i, left: false, clamped: hi >= n };
+                touch = TouchRec {
+                    touched: true,
+                    row: i,
+                    left: false,
+                    clamped: hi >= n,
+                };
             }
         }
 
@@ -871,10 +892,9 @@ fn finish_extension(
         match state {
             Tb::H => match cell & 3 {
                 H_DIAG => {
-                    let s = core.lut.score(
-                        read_codes[(i - 1) as usize],
-                        ref_codes[(j - 1) as usize],
-                    );
+                    let s = core
+                        .lut
+                        .score(read_codes[(i - 1) as usize], ref_codes[(j - 1) as usize]);
                     steps.push((CigarOp::Match(1), s as i32));
                     i -= 1;
                     j -= 1;
@@ -1107,15 +1127,15 @@ mod avx2_full {
         buf.avx_row_h1.clear();
         buf.avx_row_h1.resize(m as usize + 1, NEG);
         buf.avx_read.clear();
-        buf.avx_read.extend(buf.read_codes.iter().map(|&c| c as i16));
+        buf.avx_read
+            .extend(buf.read_codes.iter().map(|&c| c as i16));
         buf.avx_read.resize(m as usize + 16, 0);
         // Ref codes reversed: lane i (ascending) reads ref column d − i, so
         // `refrev[q] = ref_codes[n − 1 − q]` turns the descending gather
         // into the contiguous load at `i + n − d`.
         buf.avx_refrev.clear();
-        buf.avx_refrev.extend(
-            (0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16),
-        );
+        buf.avx_refrev
+            .extend((0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16));
         buf.avx_refrev.resize(n as usize + 16, 0);
 
         let hp = [
@@ -1269,8 +1289,7 @@ mod avx2_full {
                 // Lane i covers cell (i, d − i): read code [i − 1], ref code
                 // [d − i − 1] via the reversed array at [i + n − d].
                 let rc = _mm256_loadu_si256(read_i16.add((v - 1) as usize) as *const __m256i);
-                let rfc =
-                    _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
+                let rfc = _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
                 // Substitution LUT as blends: match (equal codes < 4) beats
                 // the exempt cells (G/A, C/T), which beat mismatch.
                 let eq = _mm256_cmpeq_epi16(rc, rfc);
@@ -1316,19 +1335,28 @@ mod avx2_full {
                 let mut hv = zero_v;
                 let mut hd = three_v;
                 let fmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(f_val, neg_v), _mm256_cmpgt_epi16(hv, f_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(f_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, f_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, f_val, fmask);
                 hd = _mm256_blendv_epi8(hd, two_v, fmask);
                 let emask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(e_val, neg_v), _mm256_cmpgt_epi16(hv, e_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(e_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, e_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, e_val, emask);
                 hd = _mm256_blendv_epi8(hd, one_v, emask);
                 let dmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(diag, neg_v), _mm256_cmpgt_epi16(hv, diag)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(diag, neg_v),
+                        _mm256_cmpgt_epi16(hv, diag),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, diag, dmask);
@@ -1496,7 +1524,11 @@ mod avx2_band {
         buf.rows_flat.clear();
         let lo0 = (offset - half).max(0);
         let hi0 = (offset + half).min(n);
-        let len0 = if lo0 <= hi0 { (hi0 - lo0 + 1) as usize } else { 0 };
+        let len0 = if lo0 <= hi0 {
+            (hi0 - lo0 + 1) as usize
+        } else {
+            0
+        };
         buf.rows_flat.resize(len0, H_START);
         buf.rows.push(RowTrace {
             lo: lo0,
@@ -1565,14 +1597,14 @@ mod avx2_band {
         buf.avx_row_hr.clear();
         buf.avx_row_hr.resize(m_us + 1, NEG);
         buf.avx_read.clear();
-        buf.avx_read.extend(buf.read_codes.iter().map(|&c| c as i16));
+        buf.avx_read
+            .extend(buf.read_codes.iter().map(|&c| c as i16));
         buf.avx_read.resize(m_us + 16, 0);
         // Ref codes reversed (lane i of diagonal d reads ref column d−i):
         // refrev[q] = ref_codes[n−1−q] turns the gather into a load.
         buf.avx_refrev.clear();
-        buf.avx_refrev.extend(
-            (0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16),
-        );
+        buf.avx_refrev
+            .extend((0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16));
         buf.avx_refrev.resize(n as usize + 16, 0);
 
         let hp = [
@@ -1769,8 +1801,7 @@ mod avx2_band {
                 // Lane i covers cell (i, d − i); all lanes in [blo, bhi]
                 // are in-band, so no per-lane validity check is needed.
                 let rc = _mm256_loadu_si256(read_i16.add((v - 1) as usize) as *const __m256i);
-                let rfc =
-                    _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
+                let rfc = _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
                 let eq = _mm256_cmpeq_epi16(rc, rfc);
                 let is_match = _mm256_and_si256(eq, _mm256_cmpgt_epi16(four_v, rc));
                 let ga = _mm256_and_si256(
@@ -1813,19 +1844,28 @@ mod avx2_band {
                 let mut hv = zero_v;
                 let mut hd = three_v;
                 let fmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(f_val, neg_v), _mm256_cmpgt_epi16(hv, f_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(f_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, f_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, f_val, fmask);
                 hd = _mm256_blendv_epi8(hd, two_v, fmask);
                 let emask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(e_val, neg_v), _mm256_cmpgt_epi16(hv, e_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(e_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, e_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, e_val, emask);
                 hd = _mm256_blendv_epi8(hd, one_v, emask);
                 let dmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(diag, neg_v), _mm256_cmpgt_epi16(hv, diag)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(diag, neg_v),
+                        _mm256_cmpgt_epi16(hv, diag),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, diag, dmask);
@@ -1934,12 +1974,21 @@ mod tests {
     #[test]
     fn i16_sentinel_clamp_semantics() {
         type A = i16;
-        assert_eq!(<A as Acc>::NEG.add(<A as Acc>::from_i32(6)), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::NEG.add(<A as Acc>::from_i32(6)),
+            <A as Acc>::NEG
+        );
         assert_eq!(<A as Acc>::NEG.add(<A as Acc>::NEG), <A as Acc>::NEG);
-        assert_eq!(<A as Acc>::from_i32(0).add(<A as Acc>::NEG), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::from_i32(0).add(<A as Acc>::NEG),
+            <A as Acc>::NEG
+        );
         assert_eq!(<A as Acc>::from_i32(300).add(<A as Acc>::from_i32(2)), 302);
         // Deep chains clamp to the sentinel, not saturate below it.
-        assert_eq!(<A as Acc>::from_i32(-31000).add(<A as Acc>::from_i32(-6)), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::from_i32(-31000).add(<A as Acc>::from_i32(-6)),
+            <A as Acc>::NEG
+        );
     }
 
     // ---- AVX2 full-matrix kernel vs scalar kernel (bit-identity) ----
@@ -2034,8 +2083,12 @@ mod tests {
             return;
         }
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        let lens_m = [1usize, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 100, 150, 151, 200];
-        let lens_n = [1, 2, 3, 7, 8, 15, 16, 17, 31, 48, 63, 64, 100, 127, 255, 257, 1000, 3000];
+        let lens_m = [
+            1usize, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 100, 150, 151, 200,
+        ];
+        let lens_n = [
+            1, 2, 3, 7, 8, 15, 16, 17, 31, 48, 63, 64, 100, 127, 255, 257, 1000, 3000,
+        ];
         let dirs = [EditDir::Off, EditDir::Ag, EditDir::Tc];
         let mut cases = 0usize;
         for &m in lens_m.iter() {
@@ -2051,7 +2104,12 @@ mod tests {
                         rand_window(&mut rng, &read, n)
                     };
                     let dir = dirs[rng.below(3) as usize];
-                    cmp_case(&read, &win, dir, &format!("m={m} n={n} rep={rep} dir={dir:?}"));
+                    cmp_case(
+                        &read,
+                        &win,
+                        dir,
+                        &format!("m={m} n={n} rep={rep} dir={dir:?}"),
+                    );
                     cases += 1;
                 }
             }
@@ -2083,7 +2141,8 @@ mod tests {
         }
         let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
         for m in 14usize..=20 {
-            for n in m..=20 { // production contract: read fits the window (m <= n)
+            for n in m..=20 {
+                // production contract: read fits the window (m <= n)
                 for rep in 0..4 {
                     let read = rand_seq(&mut rng, m);
                     let win = if rep & 1 == 0 {
@@ -2136,7 +2195,6 @@ mod tests {
         }
     }
 
-
     // ---- AVX2 banded kernel vs scalar kernel (bit-identity) ----
 
     #[cfg(target_arch = "x86_64")]
@@ -2149,8 +2207,13 @@ mod tests {
         let mut buf = ExtendBuffer::new();
         let (sim_ext, sim_touch) =
             avx2_band::run(read, win, &core, &mut buf.packed, offset, 1, 1, half);
-        let (sca_ext, sca_touch) =
-            run_band(read, win, &core, &mut buf.packed, Some((offset, 1, 1, half)));
+        let (sca_ext, sca_touch) = run_band(
+            read,
+            win,
+            &core,
+            &mut buf.packed,
+            Some((offset, 1, 1, half)),
+        );
         assert_ext_same(&sim_ext, &sca_ext, ctx);
         assert_touch_same(&sim_touch, &sca_touch, ctx);
     }
@@ -2182,7 +2245,7 @@ mod tests {
             (100, 300),
             (150, 151),
             (150, 1000),
-            (40, 20),  // m > n: scalar supports it; kernel must too
+            (40, 20), // m > n: scalar supports it; kernel must too
             (17, 9),
         ];
         let dirs = [EditDir::Off, EditDir::Ag, EditDir::Tc];
@@ -2204,14 +2267,14 @@ mod tests {
                 for &half in halfs.iter() {
                     let hh = half.min(mn);
                     for &offset in [
-                        -hh - 5,             // row 0 empty (left)
+                        -hh - 5, // row 0 empty (left)
                         -1i64,
                         0,
                         5,
                         (n as i64 - m as i64), // band along the read diagonal
-                        n as i64,           // right window edge
-                        n as i64 + hh + 5,  // row 0 empty (right)
-                        4 * n as i64,       // huge
+                        n as i64,              // right window edge
+                        n as i64 + hh + 5,     // row 0 empty (right)
+                        4 * n as i64,          // huge
                     ]
                     .iter()
                     {
@@ -2333,8 +2396,13 @@ mod tests {
                 let (dsp_ext, dsp_touch) =
                     run_dispatch(&read, &win, &params, &mut buf, Some((offset, 1, 1, half)));
                 let core = CoreParams::new(&params);
-                let (sca_ext, sca_touch) =
-                    run_band(&read, &win, &core, &mut buf.packed, Some((offset, 1, 1, half)));
+                let (sca_ext, sca_touch) = run_band(
+                    &read,
+                    &win,
+                    &core,
+                    &mut buf.packed,
+                    Some((offset, 1, 1, half)),
+                );
                 assert_ext_same(
                     &dsp_ext,
                     &sca_ext,
@@ -2371,9 +2439,16 @@ mod tests {
                 win,
                 &ExtendParams::default(),
                 &mut buf,
-                DiagHint { offset: 3, num: 1, den: 1 },
+                DiagHint {
+                    offset: 3,
+                    num: 1,
+                    den: 1,
+                },
             );
-            assert!(h.score > 0, "scalar banded fallback must still align: {h:?}");
+            assert!(
+                h.score > 0,
+                "scalar banded fallback must still align: {h:?}"
+            );
             return;
         }
         let exe = std::env::current_exe().unwrap();
@@ -2387,5 +2462,4 @@ mod tests {
             .unwrap();
         assert!(st.success());
     }
-
 }

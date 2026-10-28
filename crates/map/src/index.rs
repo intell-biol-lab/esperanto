@@ -96,7 +96,6 @@ impl Index {
         all.sort_unstable();
         all.dedup();
 
-
         let mut kmers: Vec<u64> = Vec::new();
         let mut offsets: Vec<u64> = Vec::new();
         let mut counts: Vec<u32> = Vec::new();

@@ -19,8 +19,8 @@ use crate::index::Index;
 use crate::intron_chain::cigar_conserving;
 use crate::seed::{minimizers, SeedParams, Strand};
 use crate::splice::{
-    junction_signal, lib_window_candidates, refine_junction, splice_support_pass, splice_signal, tail_gate,
-    SpliceParams, SPLIT_COST, SPLIT_LIB_WINDOW,
+    junction_signal, lib_window_candidates, refine_junction, splice_signal, splice_support_pass,
+    tail_gate, SpliceParams, SPLIT_COST, SPLIT_LIB_WINDOW,
 };
 
 /// Library-driven tail lower bound.
@@ -435,7 +435,10 @@ fn dinuc_before(win: &[u8], lo: u32, p: u32) -> [u8; 2] {
     if i > win.len() {
         return *b"NN";
     }
-    [win[i - 2].to_ascii_uppercase(), win[i - 1].to_ascii_uppercase()]
+    [
+        win[i - 2].to_ascii_uppercase(),
+        win[i - 1].to_ascii_uppercase(),
+    ]
 }
 
 fn dinuc_after(win: &[u8], lo: u32, p: u32) -> [u8; 2] {
@@ -563,7 +566,9 @@ fn channel_b(ctx: &SplitContext, right: bool, buf: &mut ExtendBuffer) -> Option<
             }
             let probe_end = (ctx.read_start + over) as usize;
             let probe_d = &ctx.read[probe_end - probe_len..probe_end];
-            let s_lo = ((a as i64 - DIRECT_SCAN_SPAN as i64).max(scan_lo as i64).max(0)) as u64;
+            let s_lo = ((a as i64 - DIRECT_SCAN_SPAN as i64)
+                .max(scan_lo as i64)
+                .max(0)) as u64;
             let s_hi = a as u64 - min_intron as u64;
             for s in s_lo..=s_hi {
                 if s < probe_len as u64 {

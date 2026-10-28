@@ -173,7 +173,11 @@ mod tests {
         let a = aln(
             1000,
             Strand::Plus,
-            vec![CigarOp::Match(100), CigarOp::RefSkip(5000), CigarOp::Match(50)],
+            vec![
+                CigarOp::Match(100),
+                CigarOp::RefSkip(5000),
+                CigarOp::Match(50),
+            ],
         );
         let b = aln(6200, Strand::Minus, vec![CigarOp::Match(150)]);
         assert_eq!(transcript_span(&a, &b), 350);

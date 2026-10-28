@@ -265,7 +265,8 @@ impl Tidx {
                 }));
             }
             for h in handles {
-                h.join().map_err(|_| io::Error::other("read thread panicked"))??;
+                h.join()
+                    .map_err(|_| io::Error::other("read thread panicked"))??;
             }
             Ok(())
         })?;

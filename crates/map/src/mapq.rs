@@ -338,7 +338,11 @@ fn scored_mapq(aln: &ReadAlignment) -> u8 {
     let v = base * margin_term;
     let q = if v.is_finite() { v as i32 } else { 0 };
     // minimap2's floor: a strictly better best than second is worth at least 1.
-    let mut q = if q <= 0 && second < best { 1 } else { q.clamp(0, 60) };
+    let mut q = if q <= 0 && second < best {
+        1
+    } else {
+        q.clamp(0, 60)
+    };
     // A sufficiently separated runner-up permits the pileup floor when
     // identity, anchor support and length also clear that floor.
     if second > 0
