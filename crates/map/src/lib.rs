@@ -5,6 +5,7 @@
 pub mod align;
 pub mod bam;
 pub mod chain;
+pub mod diagnostics;
 pub mod error;
 pub mod evidence;
 pub mod extend;

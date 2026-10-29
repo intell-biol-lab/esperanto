@@ -28,11 +28,14 @@ pub struct MapArgs {
     /// Worker threads (0 = all cores).
     #[arg(long, default_value_t = 0)]
     threads: usize,
+    /// Write pass2 candidate_diagnostics.jsonl before collapsed rescue (evidence only).
+    #[arg(long)]
+    candidate_diagnostics: bool,
 }
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_diagnostics(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -40,6 +43,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         a.r2.as_deref(),
         &a.out,
         crate::resolve::threads(a.threads),
+        a.candidate_diagnostics,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())

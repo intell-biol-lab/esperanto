@@ -149,7 +149,7 @@ impl Placement {
     /// Query evidence, not reference span: strict.aligned historically also
     /// includes deleted reference columns. Preserve that score bookkeeping
     /// for MAPQ/edit-density consumers, but never credit D/N as read coverage.
-    fn informative_query_coverage(&self) -> u32 {
+    pub(crate) fn informative_query_coverage(&self) -> u32 {
         let deleted: u32 = self
             .cigar
             .iter()
@@ -166,7 +166,7 @@ impl Placement {
         read_len > 0 && f64::from(covered) >= REFUSE_MIN_ALIGNED_FRAC * read_len as f64
     }
 
-    fn primary_eligible(&self, read_len: usize) -> bool {
+    pub(crate) fn primary_eligible(&self, read_len: usize) -> bool {
         self.strict.score > 0 && self.coverage_eligible(read_len)
     }
 
@@ -270,6 +270,17 @@ pub struct CachedPlacements {
     placements: Vec<Placement>,
     n_seeds: usize,
     genomic_any: bool,
+}
+
+impl CachedPlacements {
+    pub(crate) fn diagnostic_pool(
+        &self,
+        index: &Index,
+        read_len: usize,
+        stage: &'static str,
+    ) -> crate::diagnostics::CandidatePool {
+        crate::diagnostics::CandidatePool::capture(index, read_len, &self.placements, stage)
+    }
 }
 
 impl<'a> Aligner<'a> {
@@ -507,6 +518,25 @@ impl<'a> Aligner<'a> {
         mate_pos: u32,
         cached: Option<&CachedPlacements>,
     ) -> Option<ReadAlignment> {
+        self.align_read_with_mate_observed(seq, mate_contig, mate_pos, cached, None)
+    }
+
+    pub(crate) fn align_read_with_mate_observed(
+        &mut self,
+        seq: &[u8],
+        mate_contig: u32,
+        mate_pos: u32,
+        cached: Option<&CachedPlacements>,
+        mut diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
+    ) -> Option<ReadAlignment> {
+        if let Some(slot) = diagnostic.as_mut() {
+            **slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &[],
+                "mate_window_no_proposal",
+            ));
+        }
         let mut win = self.mate_window_placement(seq, mate_contig, mate_pos)?;
         let rc_storage = self.take_rc(seq);
         let q: &[u8] = if win.strand == Strand::Minus {
@@ -527,6 +557,14 @@ impl<'a> Aligner<'a> {
         placements.push(win);
         dedup_by_footprint(&mut placements, seq.len());
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
+        if let Some(slot) = diagnostic.as_mut() {
+            **slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &placements,
+                "mate_window_rejected",
+            ));
+        }
         // The mate-window candidate must have won an eligible locus (dedup keeps the
         // better-scored of two same-locus candidates, so compare footprints).
         if !placements
@@ -545,6 +583,14 @@ impl<'a> Aligner<'a> {
         // resolves a repeat copy by its pair (STAR, BWA-MEM).
         let reach = 2 * (MATE_WINDOW_INSERT + MATE_WINDOW_INSERT / 2 + seq.len() as u32);
         placements.retain(|p| p.contig == mate_contig && p.pos.abs_diff(mate_pos) <= reach);
+        if let Some(slot) = diagnostic {
+            *slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &placements,
+                "mate_window_arbitration",
+            ));
+        }
         // The genomic layer was consulted (the window search is genomic), so
         // the L1-only last-resort policy does not apply here.
         let mut aln = self.arbitrate(seq, placements, n_seeds, true)?;
@@ -2297,6 +2343,146 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_96_98_99_preserves_evidence_without_promoting_either_mate() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [96, 98, 99] {
+                let mut p = placement(
+                    0,
+                    100,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(150 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(150), &mut p);
+                let cache = CachedPlacements {
+                    placements: vec![p],
+                    n_seeds: 5,
+                    genomic_any: true,
+                };
+                let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+                assert_eq!(pool.candidates.len(), 1);
+                assert_eq!(pool.candidates[0].informative_query_bases, covered);
+                assert_eq!(
+                    pool.candidates[0].eligibility,
+                    if covered == 99 {
+                        "eligible"
+                    } else {
+                        "below_coverage"
+                    }
+                );
+                let query = vec![if strand == Strand::Plus { b'A' } else { b'T' }; 150];
+                let result = aligner.arbitrate(&query, cache.placements.clone(), 5, true);
+                assert_eq!(result.is_some(), covered == 99);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_geometry_scores_and_informative_coverage_are_not_primary_overrides() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        let mut read = b"A".repeat(98);
+        read.extend_from_slice(&b"N".repeat(52));
+        let mut ambiguous = placement(0, 100, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut ambiguous);
+        let mut deleted = placement(
+            0,
+            100,
+            &[CigarOp::Match(98), CigarOp::Del(20), CigarOp::SoftClip(52)],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut deleted);
+        let mut skipped = placement(
+            0,
+            100,
+            &[
+                CigarOp::Match(49),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(49),
+                CigarOp::SoftClip(52),
+            ],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut skipped);
+        let mut nonpositive = ambiguous.clone();
+        nonpositive.strict.score = 0;
+        let mut internal_clip = ambiguous.clone();
+        internal_clip.cigar = vec![
+            CigarOp::Match(70),
+            CigarOp::SoftClip(10),
+            CigarOp::Match(70),
+        ];
+        let mut out_of_bounds = ambiguous.clone();
+        out_of_bounds.pos = 1950;
+        let mut wrong_length = ambiguous.clone();
+        wrong_length.cigar = vec![CigarOp::Match(149)];
+        let mut insertion_only = ambiguous.clone();
+        insertion_only.cigar = vec![CigarOp::Ins(150)];
+        let cache = CachedPlacements {
+            placements: vec![
+                ambiguous,
+                deleted,
+                skipped,
+                nonpositive,
+                internal_clip,
+                out_of_bounds,
+                wrong_length,
+                insertion_only,
+            ],
+            n_seeds: 5,
+            genomic_any: true,
+        };
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert_eq!(pool.candidates.len(), 3);
+        assert_eq!(pool.excluded_nonpositive, 1);
+        assert_eq!(pool.excluded_invalid_geometry, 4);
+        assert!(pool
+            .candidates
+            .iter()
+            .all(|c| c.informative_query_bases == 98 && c.eligibility == "below_coverage"));
+    }
+
+    #[test]
+    fn diagnostic_different_locus_short_leader_preserves_eligible_fallback_and_ambiguity() {
+        let mut genome = b"A".repeat(2000);
+        genome[1000..1020].fill(b'C');
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let query = b"A".repeat(150);
+        let mut short = placement(0, 100, &[CigarOp::Match(98), CigarOp::SoftClip(52)]);
+        let mut eligible = placement(0, 1000, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&query, &mut short);
+        aligner.rescore_strict(&query, &mut eligible);
+        let mut placements = vec![eligible, short];
+        sort_placements(&mut placements);
+        let cache = CachedPlacements {
+            placements: placements.clone(),
+            n_seeds: 10,
+            genomic_any: true,
+        };
+        let before = aligner
+            .arbitrate(&query, placements.clone(), 10, true)
+            .unwrap();
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert_eq!(pool.candidates[0].eligibility, "below_coverage");
+        assert_eq!(pool.candidates[1].eligibility, "eligible");
+        let after = aligner.arbitrate(&query, placements, 10, true).unwrap();
+        assert_eq!(
+            (
+                before.pos,
+                before.score,
+                before.second_score,
+                before.mapq_of_checked()
+            ),
+            (
+                after.pos,
+                after.score,
+                after.second_score,
+                after.mapq_of_checked()
+            )
+        );
+        assert_eq!(after.pos, 1000);
+        assert_eq!(after.second_score, 196);
+        assert_eq!(after.mapq_of_checked(), 0);
+    }
+
+    #[test]
     fn right_split_rescue_updates_position_and_short_tail_gate() {
         let j = Junction {
             contig: 0,
@@ -2917,12 +3103,44 @@ mod tests {
         assert!(aligner
             .align_read_with_mate(&read, 0, 100, Some(&cache))
             .is_none());
+        let mut evidence = None;
+        assert!(aligner
+            .align_read_with_mate_observed(&read, 0, 100, Some(&cache), Some(&mut evidence))
+            .is_none());
+        let pool = evidence.unwrap();
+        assert_eq!(pool.stage, "mate_window_rejected");
+        assert!(!pool.candidates.is_empty());
+        assert!(pool
+            .candidates
+            .iter()
+            .all(|p| p.eligibility == "below_coverage"));
         let good = aligner
             .align_read_with_mate(&b"A".repeat(150), 0, 100, Some(&cache))
             .expect("eligible mate-window placements still work");
         assert!(good.rescued);
         assert_eq!(good.cigar, vec![CigarOp::Match(150)]);
         assert!(good.mapq_of_checked() <= crate::mapq::PILEUP_GATE);
+        let mut evidence = None;
+        let observed = aligner
+            .align_read_with_mate_observed(
+                &b"A".repeat(150),
+                0,
+                100,
+                Some(&cache),
+                Some(&mut evidence),
+            )
+            .unwrap();
+        assert_eq!(observed.cigar, good.cigar);
+        assert_eq!(observed.pos, good.pos);
+        assert_eq!(observed.mapq_of_checked(), good.mapq_of_checked());
+        assert_eq!(evidence.unwrap().stage, "mate_window_arbitration");
+        let mut evidence = None;
+        assert!(aligner
+            .align_read_with_mate_observed(&[], 0, 100, Some(&cache), Some(&mut evidence))
+            .is_none());
+        let pool = evidence.unwrap();
+        assert_eq!(pool.stage, "mate_window_no_proposal");
+        assert!(pool.candidates.is_empty());
     }
 
     #[test]

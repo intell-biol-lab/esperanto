@@ -4,6 +4,12 @@
 
 ### Organization development
 
+- In `1.1.1-dev.9`, add opt-in `map --candidate-diagnostics` JSONL evidence
+  for positive legal independent and mate-window candidates, including those
+  below primary coverage. Preserve input/mate identities and pass2 ordering;
+  label the phase before collapsed rescue. Mapping, MAPQ and the 0.66
+  coverage policy are unchanged. See the executable diagnostics contract.
+
 - Adopt `intell-biol-lab/esperanto` as the continuing development repository,
   preserving upstream history, attribution and release tags.
 - Identify development builds as `1.1.1-dev.1`, with repository, source commit

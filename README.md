@@ -1,5 +1,11 @@
 # ESPERANTO
 
+For candidate inspection, `esperanto map --candidate-diagnostics` additionally
+writes `candidate_diagnostics.jsonl` in the output directory. It records pass2
+candidate evidence before collapsed rescue, including legal candidates below
+primary coverage. See [the executable contract](docs/subthreshold-candidate-diagnostics.md)
+for the schema and interpretation.
+
 [![CI](https://github.com/intell-biol-lab/esperanto/actions/workflows/ci.yml/badge.svg)](https://github.com/intell-biol-lab/esperanto/actions/workflows/ci.yml)
 [![Development](https://img.shields.io/badge/version-1.1.1--dev.1-orange.svg)](CHANGELOG.md)
 ![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)

@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Optional `map --candidate-diagnostics` retains legal positive candidates below
+primary coverage for inspection. This adds observability, not recall recovery:
+96/98 bp candidates in 150 bp reads remain below the unchanged 99 bp minimum.
+The sidecar is captured before collapsed rescue and must be joined with final
+BAM for final placement status. See
+[the executable diagnostics contract](subthreshold-candidate-diagnostics.md).
+
 ## Internal soft clipping in primary CIGARs
 
 Status at organization adoption (2026-10-29): **unfixed**. The

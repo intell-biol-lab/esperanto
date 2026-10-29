@@ -359,6 +359,28 @@ pub fn map_stage(
     ),
     FlowError,
 > {
+    map_stage_with_diagnostics(paidx, gtf_path, l1_bundle, r1, r2, out_dir, threads, false)
+}
+
+/// Map with an optional pass2 candidate sidecar, before collapsed rescue.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_diagnostics(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -395,6 +417,13 @@ pub fn map_stage(
     let mut out = PipelineOut {
         bam: Some(Box::new(File::create(&raw_bam)?)),
         unmapped_fq: Box::new(File::create(dir.join("unmapped.fq.gz"))?),
+        diagnostics: if candidate_diagnostics {
+            Some(Box::new(std::io::BufWriter::new(File::create(
+                dir.join("candidate_diagnostics.jsonl"),
+            )?)))
+        } else {
+            None
+        },
         index,
         config,
         jlib,

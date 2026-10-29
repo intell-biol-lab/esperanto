@@ -35,6 +35,8 @@ pub const CHUNK: usize = 100_000;
 pub struct PipelineOut<'a> {
     pub bam: Option<Box<dyn Write + Send>>,
     pub unmapped_fq: Box<dyn Write + Send>,
+    /// Optional pass2-only candidate evidence, never an alignment source.
+    pub diagnostics: Option<Box<dyn Write + Send>>,
     pub index: &'a Index,
     pub config: AlignConfig,
     /// Junction library (sjdb; RNA mode).
@@ -136,12 +138,16 @@ pub fn run_se(
         let cfg = out.config;
         let lib = out.jlib.clone();
         let l1_clone = out.l1.clone();
+        let diagnostics_enabled = out.diagnostics.is_some();
         // align_read(seq) depends only on seq, not qual/name.
         // Within-chunk dedup: align each unique seq once, fan out to all reads
         // sharing it (each keeps its own name/qual). Deterministic algorithm +
         // ordered write ⇒ byte-identical.
         let (unique_seqs, uid_of_read) = dedup_se(&chunk);
-        let cached_alns: Vec<Option<ReadAlignment>> = {
+        let cached: Vec<(
+            Option<ReadAlignment>,
+            Option<crate::diagnostics::CandidatePool>,
+        )> = {
             let miss_seqs: Vec<&[u8]> = unique_seqs.to_vec();
             pool.install(|| {
                 let lib = lib.clone();
@@ -149,7 +155,14 @@ pub fn run_se(
                     .par_iter()
                     .map_init(
                         move || make_aligner(index, cfg, &lib, &l1_clone),
-                        |aligner, &seq| aligner.align_read(seq),
+                        |aligner, &seq| {
+                            if diagnostics_enabled {
+                                let (aln, cache) = aligner.align_read_full(seq);
+                                (aln, Some(diagnostic_pool(index, seq.len(), cache.as_ref())))
+                            } else {
+                                (aligner.align_read(seq), None)
+                            }
+                        },
                     )
                     .collect()
             })
@@ -162,11 +175,21 @@ pub fn run_se(
                 &rec.name,
                 &rec.seq,
                 &rec.qual,
-                cached_alns[uid_of_read[i]].as_ref(),
+                cached[uid_of_read[i]].0.as_ref(),
             ));
         }
         for (i, (rec, br)) in chunk.iter().zip(&results).enumerate() {
-            let aln = &cached_alns[uid_of_read[i]];
+            let (aln, diagnostic) = &cached[uid_of_read[i]];
+            if let (Some(sink), Some(pool)) = (out.diagnostics.as_mut(), diagnostic) {
+                crate::diagnostics::write_row(
+                    &mut **sink,
+                    rec,
+                    None,
+                    aln.is_some(),
+                    pool.clone(),
+                    None,
+                )?;
+            }
             stats.push_read(aln.is_some(), br.mapq);
             if let Some(x) = aln {
                 if x.origin == crate::mapq::Origin::Decoy {
@@ -188,6 +211,9 @@ pub fn run_se(
     }
     sinks.finish()?;
     unm.finish()?;
+    if let Some(sink) = out.diagnostics.as_mut() {
+        crate::diagnostics::flush(&mut **sink)?;
+    }
     let mode = if out.config.rna { "rna-se" } else { "dna-se" };
     Ok((
         stats.finalize(mode, false, t0.elapsed().as_secs_f64()),
@@ -241,6 +267,17 @@ fn intern_seq<'a>(
         unique_seqs.push(seq);
         next_uid
     })
+}
+
+fn diagnostic_pool(
+    index: &Index,
+    read_len: usize,
+    cache: Option<&CachedPlacements>,
+) -> crate::diagnostics::CandidatePool {
+    match cache {
+        Some(cache) => cache.diagnostic_pool(index, read_len, "independent"),
+        None => crate::diagnostics::CandidatePool::capture(index, read_len, &[], "independent"),
+    }
 }
 
 /// Paired-end pipeline (returns stats + pass1 discoveries, empty in DNA mode).
@@ -318,7 +355,14 @@ pub fn run_pe(
         // Parallel per-pair rescue arbitration reads the uid-indexed primary
         // results (order preserved by collect); BAM records are built in the
         // serial write section.
-        let results: Vec<(Option<ReadAlignment>, Option<ReadAlignment>)> = pool.install(|| {
+        let diagnostics_enabled = out.diagnostics.is_some();
+        type PairResult = (
+            Option<ReadAlignment>,
+            Option<ReadAlignment>,
+            Option<crate::diagnostics::CandidatePool>,
+            Option<crate::diagnostics::CandidatePool>,
+        );
+        let results: Vec<PairResult> = pool.install(|| {
             let lib = lib.clone();
             let l1_clone = l1_clone.clone();
             chunk
@@ -331,6 +375,8 @@ pub fn run_pe(
                         let (base2, cache2) = &unique_alns[uid2_of_pair[i]];
                         let mut r1 = base1.clone();
                         let mut r2 = base2.clone();
+                        let mut diag1 = None;
+                        let mut diag2 = None;
                         // Pair-anchored arbitration: a mate whose own
                         // placement is poor (unplaced, mostly clipped, or
                         // below the pileup gate) is re-arbitrated with the
@@ -342,26 +388,49 @@ pub fn run_pe(
                         };
                         if placement_poor(&r1, a.seq.len()) && confident(&r2) {
                             let (mc, mp) = r2.as_ref().map(|m| (m.contig, m.pos)).unwrap();
-                            if let Some(n) =
-                                aligner.align_read_with_mate(&a.seq, mc, mp, cache1.as_ref())
-                            {
+                            if let Some(n) = aligner.align_read_with_mate_observed(
+                                &a.seq,
+                                mc,
+                                mp,
+                                cache1.as_ref(),
+                                diagnostics_enabled.then_some(&mut diag1),
+                            ) {
                                 r1 = Some(n);
                             }
                         }
                         if placement_poor(&r2, b.seq.len()) && confident(&r1) {
                             let (mc, mp) = r1.as_ref().map(|m| (m.contig, m.pos)).unwrap();
-                            if let Some(n) =
-                                aligner.align_read_with_mate(&b.seq, mc, mp, cache2.as_ref())
-                            {
+                            if let Some(n) = aligner.align_read_with_mate_observed(
+                                &b.seq,
+                                mc,
+                                mp,
+                                cache2.as_ref(),
+                                diagnostics_enabled.then_some(&mut diag2),
+                            ) {
                                 r2 = Some(n);
                             }
                         }
-                        (r1, r2)
+                        (r1, r2, diag1, diag2)
                     },
                 )
                 .collect()
         });
-        for ((a, b), (aln1, aln2)) in chunk.iter().zip(&results) {
+        for (i, ((a, b), (aln1, aln2, diag1, diag2))) in chunk.iter().zip(&results).enumerate() {
+            if let Some(sink) = out.diagnostics.as_mut() {
+                for (read, mate, aln, uid, attempt) in [
+                    (a, 1, aln1, uid1_of_pair[i], diag1),
+                    (b, 2, aln2, uid2_of_pair[i], diag2),
+                ] {
+                    crate::diagnostics::write_row(
+                        &mut **sink,
+                        read,
+                        Some(mate),
+                        aln.is_some(),
+                        diagnostic_pool(index, read.seq.len(), unique_alns[uid].1.as_ref()),
+                        attempt.clone(),
+                    )?;
+                }
+            }
             // Records carry every number the stats/discovery section needs
             // (MAPQ, proper-pair flag, tlen) — one derivation per field,
             // no re-computation from the alignment.
@@ -424,6 +493,9 @@ pub fn run_pe(
     }
     sinks.finish()?;
     unm.finish()?;
+    if let Some(sink) = out.diagnostics.as_mut() {
+        crate::diagnostics::flush(&mut **sink)?;
+    }
     let mode = if out.config.rna { "rna-pe" } else { "dna-pe" };
     Ok((
         stats.finalize(mode, true, t0.elapsed().as_secs_f64()),
@@ -527,10 +599,12 @@ pub fn run_se_2pass(
     let real_bam = out.bam.take();
     out.bam = Some(Box::new(std::io::sink()));
     let real_unm = std::mem::replace(&mut out.unmapped_fq, Box::new(std::io::sink()));
+    let real_diagnostics = out.diagnostics.take();
     let pass1 = run_se(out, r1, threads);
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
+    out.diagnostics = real_diagnostics;
     let (_, discovered) = pass1?;
     // Merge: full sjdb + discoveries with ≥2 support.
     let mut merged: Vec<(Junction, u32)> = match &base_lib {
@@ -582,10 +656,12 @@ pub fn run_pe_2pass(
     let real_bam = out.bam.take();
     out.bam = Some(Box::new(std::io::sink()));
     let real_unm = std::mem::replace(&mut out.unmapped_fq, Box::new(std::io::sink()));
+    let real_diagnostics = out.diagnostics.take();
     let pass1 = run_pe(out, r1, r2, threads);
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
+    out.diagnostics = real_diagnostics;
     let (_, discovered) = pass1?;
     let mut merged: Vec<(Junction, u32)> = match &base_lib {
         Some(lib) => lib
@@ -712,6 +788,160 @@ fn placement_poor(r: &Option<ReadAlignment>, read_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_diagnostics_are_pass2_only_ordered_and_do_not_change_primary_outputs() {
+        let mut state = 0xc7735ab3u64;
+        let seq: Vec<u8> = (0..4000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let reference =
+            crate::fasta::parse_fasta_bytes(&[b">chrT\n".as_slice(), &seq, b"\n"].concat())
+                .unwrap();
+        let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+        let dir =
+            std::env::temp_dir().join(format!("esp-candidate-diagnostics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (r1, r2) = (dir.join("r1.fq"), dir.join("r2.fq"));
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (i, covered) in [96, 98, 99, 98].into_iter().enumerate() {
+            // Duplicate 98-base sequences must retain distinct read/mate identities.
+            let mut read = seq[1000..1000 + covered].to_vec();
+            read.extend(vec![b'N'; 150 - covered]);
+            let mut reverse = read.clone();
+            reverse.reverse();
+            for x in &mut reverse {
+                *x = match *x {
+                    b'A' => b'T',
+                    b'C' => b'G',
+                    b'G' => b'C',
+                    b'T' => b'A',
+                    _ => b'N',
+                };
+            }
+            for (sink, name, query) in [
+                (&mut a, format!("pair{i}/1"), &read),
+                (&mut b, format!("pair{i}/2"), &reverse),
+            ] {
+                sink.extend_from_slice(format!("@{name}\n").as_bytes());
+                sink.extend_from_slice(query);
+                sink.extend_from_slice(b"\n+\n");
+                sink.extend(vec![b'I'; 150]);
+                sink.push(b'\n');
+            }
+        }
+        std::fs::write(&r1, a).unwrap();
+        std::fs::write(&r2, b).unwrap();
+        let run = |enabled: bool, threads: usize| {
+            let diag = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let raw = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let unm = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut out = PipelineOut {
+                bam: Some(Box::new(SharedSink(raw.clone()))),
+                unmapped_fq: Box::new(SharedSink(unm.clone())),
+                diagnostics: enabled
+                    .then(|| Box::new(SharedSink(diag.clone())) as Box<dyn Write + Send>),
+                index: &index,
+                config: AlignConfig::rna_default(),
+                jlib: None,
+                l1: None,
+            };
+            let (stats, discoveries, library, removed) =
+                run_pe_2pass(&mut out, &r1, &r2, threads).unwrap();
+            drop(out);
+            let result = (
+                serde_json::to_value(stats).unwrap(),
+                discoveries,
+                library,
+                removed,
+                raw.lock().unwrap().clone(),
+                unm.lock().unwrap().clone(),
+                diag.lock().unwrap().clone(),
+            );
+            result
+        };
+        let off = run(false, 1);
+        let on = run(true, 1);
+        let threaded = run(true, 2);
+        assert_eq!(off.0["mapped_reads"], on.0["mapped_reads"]);
+        assert_eq!(off.1, on.1);
+        assert_eq!(off.2, on.2);
+        assert_eq!(
+            off.4, on.4,
+            "diagnostics must not change BAM bytes at fixed thread count"
+        );
+        assert_eq!(off.5, on.5, "diagnostics must not change unmapped FASTQ");
+        assert_eq!(
+            on.6, threaded.6,
+            "JSONL must be deterministic across threads"
+        );
+        let rows: Vec<serde_json::Value> = std::str::from_utf8(&on.6)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 8, "discovery pass must not duplicate rows");
+        for (i, row) in rows.iter().enumerate() {
+            let covered = [96, 98, 99, 98][i / 2];
+            assert_eq!(row["read_name"], format!("pair{}/{}", i / 2, i % 2 + 1));
+            assert_eq!(row["mate"], i % 2 + 1);
+            assert_eq!(row["pass2_primary_placed"], covered == 99);
+            assert_eq!(row["minimum_primary_query_bases"], 99);
+            assert!(row["independent"]["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["informative_query_bases"] == covered));
+        }
+        let run_single = |enabled: bool| {
+            let diag = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let raw = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let unm = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut out = PipelineOut {
+                bam: Some(Box::new(SharedSink(raw.clone()))),
+                unmapped_fq: Box::new(SharedSink(unm.clone())),
+                diagnostics: enabled
+                    .then(|| Box::new(SharedSink(diag.clone())) as Box<dyn Write + Send>),
+                index: &index,
+                config: AlignConfig::rna_default(),
+                jlib: None,
+                l1: None,
+            };
+            let (_, discoveries, _, _) = run_se_2pass(&mut out, &r1, 2).unwrap();
+            drop(out);
+            let result = (
+                discoveries,
+                raw.lock().unwrap().clone(),
+                unm.lock().unwrap().clone(),
+                diag.lock().unwrap().clone(),
+            );
+            result
+        };
+        let single_off = run_single(false);
+        let single_on = run_single(true);
+        assert_eq!(single_off.0, single_on.0);
+        assert_eq!(single_off.1, single_on.1);
+        assert_eq!(single_off.2, single_on.2);
+        let single_rows: Vec<serde_json::Value> = std::str::from_utf8(&single_on.3)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(single_rows.len(), 4);
+        for (i, row) in single_rows.iter().enumerate() {
+            assert_eq!(row["read_name"], format!("pair{i}/1"));
+            assert!(row["mate"].is_null());
+            assert!(row["mate_attempt"].is_null());
+            assert_eq!(row["pass2_primary_placed"], i == 2);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// pair_records field equality after the borrow-only refactor: flags,
     /// mate coordinates, tlen sign and MAPQ must match the relation
@@ -868,6 +1098,7 @@ mod tests {
         let mut out = PipelineOut {
             bam: None,
             unmapped_fq: Box::new(std::io::sink()),
+            diagnostics: None,
             index: &index,
             config: crate::align::AlignConfig::rna_default(),
             jlib: None,
@@ -1094,6 +1325,7 @@ mod tests {
             let mut out = PipelineOut {
                 bam: None,
                 unmapped_fq: Box::new(SharedSink(cell.clone())),
+                diagnostics: None,
                 index: &index,
                 config: crate::align::AlignConfig::rna_default(),
                 jlib: None,

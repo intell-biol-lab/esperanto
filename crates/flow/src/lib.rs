@@ -16,7 +16,7 @@ pub mod vcf;
 
 pub use error::FlowError;
 pub use params::{Entry, RunParams};
-pub use stages::{map_stage, run_from};
+pub use stages::{map_stage, map_stage_with_diagnostics, run_from};
 
 /// Run the pipeline selected by `params.entry()`.
 pub fn run_pipeline(params: &RunParams) -> Result<(), FlowError> {
