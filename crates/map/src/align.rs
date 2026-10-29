@@ -23,6 +23,32 @@ use crate::splice::{
     align_spliced, intron_length_penalty, segment_chain, splice_signal, SpliceParams,
 };
 
+/// Keep uncovered query ends available without increasing the maximum
+/// continuous-reference window width. Both verification paths use this geometry.
+fn continuous_extension_window(
+    chain: &Chain,
+    k: u32,
+    read_len: u32,
+    contig_len: u32,
+) -> (u32, u32) {
+    let flank = read_len / 2 + 30;
+    let (rs, re) = chain.ref_span(k);
+    let (qs, qe) = chain.read_span(k);
+    let head = flank.max(qs);
+    let tail = flank.max(read_len.saturating_sub(qe));
+    let start = rs.saturating_sub(head).min(contig_len);
+    let end = re
+        .saturating_add(tail)
+        .min(contig_len)
+        .min(rs.saturating_add(read_len).saturating_add(flank))
+        .min(
+            start
+                .saturating_add(read_len)
+                .saturating_add(flank.saturating_mul(2)),
+        );
+    (start, end.max(start))
+}
+
 /// Aligner configuration (`default` = DNA preset; `rna_default` = RNA production).
 #[derive(Debug, Clone, Copy)]
 pub struct AlignConfig {
@@ -1533,11 +1559,7 @@ impl<'a> Aligner<'a> {
             let mm_s = cfg.extend.mismatch;
             let threshold = ((read_len as i32) / 3).max(10);
             let contig = &self.index.reference.contigs[chain.contig as usize];
-            let flank = read_len / 2 + 30;
-            let (rs, re) = chain.ref_span(k);
-            let wstart = rs.saturating_sub(flank);
-            let wcap = rs + read_len + flank;
-            let wend = (re + flank).min(contig.len).min(wcap);
+            let (wstart, wend) = continuous_extension_window(chain, k, read_len, contig.len);
             let window = self.take_win(wstart, wend, contig);
             let q: &[u8] = match chain.strand {
                 Strand::Plus => seq,
@@ -1651,11 +1673,8 @@ impl<'a> Aligner<'a> {
         }
         *dp_budget -= 1;
         let contig = &self.index.reference.contigs[chain.contig as usize];
-        let flank = read_len / 2 + 30;
-        let (rs, re) = chain.ref_span(k);
-        let wstart = rs.saturating_sub(flank);
-        let wcap = rs + read_len + flank;
-        let wend = (re + flank).min(contig.len).min(wcap);
+        let (rs, _) = chain.ref_span(k);
+        let (wstart, wend) = continuous_extension_window(chain, k, read_len, contig.len);
         let window = self.take_win(wstart, wend, contig);
         let q: &[u8] = match chain.strand {
             Strand::Plus => seq,
@@ -2459,6 +2478,313 @@ mod tests {
             0,
             100,
         )
+    }
+
+    fn sparse_window_body(n: usize) -> Vec<u8> {
+        let mut state = 0x75bcd15u64;
+        (0..n)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect()
+    }
+
+    fn sparse_window_chain(n: u32, near_head: bool, strand: Strand, pos: u32) -> Chain {
+        let qs = if near_head {
+            [2, 12, 27]
+        } else {
+            [n - 42, n - 32, n - 17]
+        };
+        Chain {
+            contig: 0,
+            strand,
+            score: 40,
+            anchors: qs
+                .into_iter()
+                .map(|qpos| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos,
+                    rpos: pos + qpos,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sparse_window_retains_full_ordinary_body() {
+        for n in [150, 300] {
+            for near_head in [true, false] {
+                for strand in [Strand::Plus, Strand::Minus] {
+                    let oriented = sparse_window_body(n);
+                    let mut genome = vec![b'N'; 2000 + n];
+                    genome[1000..1000 + n].copy_from_slice(&oriented);
+                    let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                    let seq = if strand == Strand::Plus {
+                        oriented.clone()
+                    } else {
+                        revcomp(&oriented)
+                    };
+                    let chain = sparse_window_chain(n as u32, near_head, strand, 1000);
+                    let mut out = Vec::new();
+                    let mut budget = EXTEND_BUDGET;
+                    aligner.extend_unspliced_chain(
+                        &seq,
+                        &chain,
+                        false,
+                        &revcomp(&seq),
+                        &mut budget,
+                        &mut out,
+                    );
+                    assert_eq!(out.len(), 1, "{n} {near_head} {strand:?}");
+                    aligner.rescore_strict(&oriented, &mut out[0]);
+                    assert_eq!(
+                        out[0].cigar,
+                        vec![CigarOp::Match(n as u32)],
+                        "{n} {near_head} {strand:?}"
+                    );
+                    assert_eq!(out[0].pos, 1000);
+                    assert_eq!(out[0].strict.score, 2 * n as i32);
+                    assert_eq!(out[0].strict.aligned, n as u32);
+                    assert!(budget <= EXTEND_BUDGET);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_respects_contig_edges() {
+        for n in [150, 300] {
+            for (left, right) in [(0, 1000), (1000, 0)] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let oriented = sparse_window_body(n);
+                        let mut genome = vec![b'N'; left + n + right];
+                        genome[left..left + n].copy_from_slice(&oriented);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let chain = sparse_window_chain(n as u32, near_head, strand, left as u32);
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, left as u32);
+                        assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_negative_technical_tails_remain_clipped() {
+        for n in [150, 300] {
+            for tail_base in [b'N', b'C'] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let body = sparse_window_body(n);
+                        let oriented =
+                            [vec![tail_base; 8], body.clone(), vec![tail_base; 8]].concat();
+                        let m = oriented.len() as u32;
+                        let mut genome = vec![b'N'; 2000 + n + 16];
+                        genome[1008..1008 + n].copy_from_slice(&body);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let mut chain = sparse_window_chain(m, near_head, strand, 1000);
+                        let qs = if near_head {
+                            [10, 20, 35]
+                        } else {
+                            [m - 50, m - 40, m - 25]
+                        };
+                        for (anchor, q) in chain.anchors.iter_mut().zip(qs) {
+                            anchor.qpos = q;
+                            anchor.rpos = 1000 + q;
+                        }
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, 1008);
+                        assert_eq!(
+                            out[0].cigar,
+                            vec![
+                                CigarOp::SoftClip(8),
+                                CigarOp::Match(n as u32),
+                                CigarOp::SoftClip(8),
+                            ]
+                        );
+                        aligner.rescore_strict(&oriented, &mut out[0]);
+                        assert_eq!(out[0].strict.score, 2 * n as i32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_preserves_neutral_terminal_edits_on_dp_path() {
+        for n in [150, 300] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let mut reference_body = sparse_window_body(n);
+                        let (rb, qb) = if dir == EditDir::Ag {
+                            (b'A', b'G')
+                        } else {
+                            (b'T', b'C')
+                        };
+                        reference_body[0] = rb;
+                        reference_body[n - 1] = rb;
+                        let mut oriented = reference_body.clone();
+                        oriented[0] = qb;
+                        oriented[n - 1] = qb;
+                        // An internal ambiguous query base makes the short
+                        // verification path use DP. Myers endpoint tie policy
+                        // is a separate, pre-existing limitation.
+                        if n <= 256 {
+                            oriented[n / 2] = b'N';
+                        }
+                        let mut genome = vec![b'N'; 2000 + n];
+                        genome[1000..1000 + n].copy_from_slice(&reference_body);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        aligner.config.extend.edit_dir = dir;
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let chain = sparse_window_chain(n as u32, near_head, strand, 1000);
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, 1000);
+                        assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+                        aligner.rescore_with(&oriented, &mut out[0], dir);
+                        let uncounted = usize::from(n <= 256);
+                        assert_eq!(out[0].strict.score, 2 * (n - 2 - uncounted) as i32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_does_not_bypass_shared_dp_budget() {
+        for n in [150, 300] {
+            let seq = sparse_window_body(n);
+            let mut genome = vec![b'N'; 2000 + n];
+            genome[1000..1000 + n].copy_from_slice(&seq);
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+            let chain = sparse_window_chain(n as u32, true, Strand::Plus, 1000);
+            let mut out = Vec::new();
+            let mut budget = 0;
+            aligner.extend_unspliced_chain(
+                &seq,
+                &chain,
+                false,
+                &revcomp(&seq),
+                &mut budget,
+                &mut out,
+            );
+            assert_eq!(budget, 0);
+            if n <= 256 {
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+            } else {
+                assert!(out.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_geometry_preserves_old_windows_and_bounds() {
+        for n in [60u32, 150, 300, 1024] {
+            let flank = n / 2 + 30;
+            for qs in (0..=n - 15).step_by(7) {
+                for qe in (qs + 15..=n).step_by(11) {
+                    for pos in [0, 1, 1000] {
+                        for extra in [0, 1000] {
+                            let chain = Chain {
+                                contig: 0,
+                                strand: Strand::Plus,
+                                score: 40,
+                                anchors: [qs, qe - 15]
+                                    .into_iter()
+                                    .map(|qpos| crate::seed::Anchor {
+                                        contig: 0,
+                                        strand: Strand::Plus,
+                                        qpos,
+                                        rpos: pos + qpos,
+                                    })
+                                    .collect(),
+                            };
+                            let len = pos + n + extra;
+                            let (start, end) = continuous_extension_window(&chain, 15, n, len);
+                            assert!(start <= pos && end >= pos + n);
+                            assert!(start <= end && end <= len);
+                            assert!(end - start <= n + 2 * flank);
+                            let (rs, re) = chain.ref_span(15);
+                            if qs <= flank && n - qe <= flank {
+                                assert_eq!(
+                                    (start, end),
+                                    (
+                                        rs.saturating_sub(flank),
+                                        (re + flank).min(len).min(rs + n + flank),
+                                    )
+                                );
+                            }
+                            // Displaced reference anchors cannot expand the
+                            // continuous window to the entire reference gap.
+                            let mut displaced = chain.clone();
+                            displaced.anchors[1].rpos += 50000;
+                            let (a, b) =
+                                continuous_extension_window(&displaced, 15, n, len + 50000);
+                            assert!(a <= b && b <= len + 50000);
+                            assert!(b - a <= n + 2 * flank);
+                        }
+                    }
+                }
+            }
+        }
+        let mut chain = sparse_window_chain(150, true, Strand::Plus, 0);
+        for anchor in &mut chain.anchors {
+            anchor.rpos += u32::MAX - 100;
+        }
+        let (a, b) = continuous_extension_window(&chain, 15, 150, u32::MAX);
+        assert!(a <= b && b - a <= 360);
     }
 
     // Synthetic rounds isolate scheduling from seed discovery. The complete

@@ -30,6 +30,12 @@
 
 ### Fixed
 
+- In `1.1.1-dev.14`, size both continuous extension windows using uncovered
+  query ends as well as the existing flank. Sparse anchors no longer truncate
+  a physically available full-read diagonal. Share geometry between Myers
+  and DP while preserving the prior maximum width, right cap and DP budget.
+  See the sparse-anchor window contract; independent qualification is required.
+
 - In `1.1.1-dev.13`, preserve the nonempty complete first round's extension
   priority when repeat-seed search is limited. Other rounds still fill remaining
   slots and compete by common sequence score. Keep the eight-chain shortlist,

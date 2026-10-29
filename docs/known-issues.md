@@ -1,5 +1,14 @@
 # Known scientific qualification issues
 
+## Sparse-anchor window qualification and remaining endpoint ties
+
+Dev.14 repairs continuous windows that omit available query ends; see
+[the window contract](sparse-anchor-windows.md). This does not repair the
+separate short-read Myers zero-score endpoint tie policy. Neutral terminal
+editing substitutions may still be clipped there even with sufficient window
+coverage. The new DP controls do not establish Myers endpoint parity.
+Independent full-seed qualification and per-read regression review are required.
+
 ## Limited-search extension priority (dev.13 proposal)
 
 Higher repeat-chain scores can exhaust the shared extension budget before
