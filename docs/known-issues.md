@@ -84,3 +84,18 @@ eight synthetic mechanism tests define these rules. They do not require all
 previously mapped low-confidence reads to be restored. Qualification,
 per-read body/ALT changes and any remaining wrong placements require a new
 complete human development replay and independent review.
+
+## Fast intron proposals suppressing generic candidates (dev.4 review)
+
+Ten refused human pilot reads exposed candidate loss before arbitration. The
+fast intron path searched all anchors, then its caller rewrote only N length
+using another chain's junction and returned early. Common scoring rejected
+that bad explanation, but an independently supported generic splice candidate
+was never offered. Dev.5 removes this geometry rewrite, validates CIGAR/declared
+junction agreement and continues generic generation. The independent scorer
+and coverage threshold remain unchanged.
+
+A generic candidate can still cover only the last two of three true exons:
+the missing first exon lacks chain anchors in this case. Recovery of that
+partial body does not establish full read recall, general accuracy, or MAPQ
+calibration. Human replay results belong in the separate research report.

@@ -85,3 +85,21 @@ strict human interface qualification and scientific per-read/event review
 are separate gates. Search remains heuristic and the footprint relation is
 not a proof of sequence equivalence. This contract does not relax the
 coverage fraction, retrain a model or modify the independent evaluator.
+
+## Intron fast-path candidate independence (dev.5)
+
+An intron-chain fast proposal searches the complete anchor pool. Its exon pair
+can differ from the chain that invoked it. Do not replace its junction with
+that chain's boundary or change only its N length: that does not move the
+CIGAR donor or query breakpoint. Before retaining a fast proposal, reconstruct
+each skipped reference interval from position and CIGAR and require equality
+with the declared junction intervals, including contig and multiplicity.
+
+Whether a fast proposal succeeds or is rejected, continue the independent
+generic spliced path. Both proposals enter existing common rescoring and
+coverage-class dedup. This restores candidate availability without forcing a
+particular locus or lowering eligibility. Synthetic tests cover both strands,
+CIGAR/query-reference consumption, missing and inconsistent junction metadata,
+and an equal-locus-pair editing trigger that must retain MAPQ 0 ambiguity.
+This does not guarantee recovery of an exon with no chain anchors or calibrate
+MAPQ against a population of reads.

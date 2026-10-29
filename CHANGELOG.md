@@ -24,6 +24,12 @@
 
 ### Fixed
 
+- In `1.1.1-dev.5`, intron-chain fast proposals retain their own junction
+  geometry and must agree with their CIGAR reference skips. A fast proposal
+  also permits independent generic spliced candidate generation before common
+  rescoring; it no longer returns early and hides supported alternatives.
+  Scoring constants, coverage fraction, model and evaluator are unchanged.
+
 - In `1.1.1-dev.4`, read-coverage classes protect full candidates from being
   erased by shorter high-scoring explanations. Primary selection continues
   past ineligible score leaders, requires positive score and informative query

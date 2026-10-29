@@ -20,8 +20,7 @@ use crate::index::{collect_anchors_into, Index};
 use crate::mapq::ReadAlignment;
 use crate::seed::{minimizers_into, Minimizer, SeedParams, SeedScratch, Strand};
 use crate::splice::{
-    align_spliced, intron_length_penalty, refine_junction_read, segment_chain, splice_signal,
-    SpliceParams,
+    align_spliced, intron_length_penalty, segment_chain, splice_signal, SpliceParams,
 };
 
 /// Aligner configuration (`default` = DNA preset; `rna_default` = RNA production).
@@ -165,6 +164,31 @@ impl Placement {
 
     fn primary_eligible(&self, read_len: usize) -> bool {
         self.strict.score > 0 && self.coverage_eligible(read_len)
+    }
+
+    /// A fast proposal's skipped intervals must be the junctions it reports.
+    /// Changing N length alone cannot move its donor or read breakpoint.
+    fn has_consistent_junctions(&self) -> bool {
+        let mut observed = Vec::new();
+        let mut rf = self.pos;
+        for op in &self.cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::Del(n) => rf += *n,
+                CigarOp::RefSkip(n) => {
+                    observed.push((self.contig, rf, rf + *n));
+                    rf += *n;
+                }
+                _ => {}
+            }
+        }
+        let mut declared: Vec<_> = self
+            .junctions
+            .iter()
+            .map(|j| (j.junction.contig, j.junction.start, j.junction.end))
+            .collect();
+        observed.sort_unstable();
+        declared.sort_unstable();
+        observed == declared
     }
 
     fn from_genomic(
@@ -1176,9 +1200,9 @@ impl<'a> Aligner<'a> {
         }
     }
 
-    /// Extend one chain into 0..2 placement candidates: the spliced
-    /// interpretation first (RNA), then the unspliced one (EA-Myers window
-    /// extend, with the banded DP as indel fallback while budget lasts).
+    /// Extend one chain into spliced and continuous placement candidates.
+    /// RNA chains also retain segment-wise continuous explanations. The
+    /// unspliced extension uses EA-Myers with banded DP while budget lasts.
     /// `fast_lane_ok` gates the Kadane fast lane (decisive best chain only).
     #[allow(clippy::too_many_arguments)]
     fn extend_chain(
@@ -1234,8 +1258,8 @@ impl<'a> Aligner<'a> {
                 }
             }
             if segs.len() == 2 && is_best {
-                // Intron-chain fast path: verified intra-chain intron
-                // algorithm, with read-aware boundary refinement.
+                // The intron fast path may choose any exon pair supported by
+                // the complete anchor pool; keep its own boundary geometry.
                 let empty_lib = JunctionLib::default();
                 let lib = self.jlib.as_deref().unwrap_or(&empty_lib);
                 let query: &[u8] = match chain.strand {
@@ -1259,7 +1283,7 @@ impl<'a> Aligner<'a> {
                 );
                 self.scratch.anchors = ic_anchors;
                 if let Some(hit) = ic_hit {
-                    let mut placement = Placement::from_genomic(
+                    let placement = Placement::from_genomic(
                         chain.contig,
                         hit.genomic_start(),
                         chain.strand,
@@ -1268,34 +1292,15 @@ impl<'a> Aligner<'a> {
                         chain.score,
                         hit.extension.score,
                     );
-                    // Read-aware boundary refinement (±3bp snap).
-                    if !placement.junctions.is_empty() {
-                        let minus = matches!(chain.strand, Strand::Minus);
-                        let sp = SpliceParams::default();
-                        if let Some(refined) = refine_junction_read(
-                            self.index.reference,
-                            query,
-                            placement.contig,
-                            segs[0].r_end,
-                            segs[1].r_start,
-                            segs[0].q_end,
-                            segs[1].q_start,
-                            minus,
-                            lib,
-                            &sp,
-                        ) {
-                            let new_intron =
-                                refined.junction.end.saturating_sub(refined.junction.start);
-                            for op in &mut placement.cigar {
-                                if let CigarOp::RefSkip(n) = op {
-                                    *n = new_intron;
-                                }
-                            }
-                            placement.junctions[0] = refined;
-                        }
+                    // The fast path searches the whole anchor set and may
+                    // choose a different exon pair from this chain. Its CIGAR
+                    // cannot be refined by rewriting N with this chain's
+                    // junction. Keep only internally consistent proposals.
+                    if placement.has_consistent_junctions() {
+                        out.push(placement);
                     }
-                    out.push(placement);
-                    return;
+                    // A fast proposal never suppresses the generic spliced
+                    // explanation; common rescoring decides between them.
                 }
             }
             if segs.len() >= 2 {
@@ -2942,6 +2947,195 @@ mod tests {
             assert_eq!(result.second_score, 160);
             assert_eq!(result.n_cands, 2);
         }
+    }
+
+    #[test]
+    fn intron_proposal_junctions_must_match_cigar_reference_intervals() {
+        let mut p = placement(
+            0,
+            100,
+            &[
+                CigarOp::SoftClip(5),
+                CigarOp::Match(20),
+                CigarOp::Ins(3),
+                CigarOp::Del(2),
+                CigarOp::RefSkip(50),
+                CigarOp::Match(25),
+            ],
+        );
+        p.junctions.push(RefinedJunction {
+            junction: Junction {
+                contig: 0,
+                start: 122,
+                end: 172,
+                minus_strand: false,
+            },
+            known_support: 1,
+            signal: SpliceSignal::GtAg,
+        });
+        assert!(p.has_consistent_junctions());
+        p.junctions[0].junction.start += 1;
+        assert!(!p.has_consistent_junctions());
+        p.junctions[0].junction.start -= 1;
+        p.junctions[0].junction.contig = 1;
+        assert!(!p.has_consistent_junctions());
+        p.junctions.clear();
+        assert!(!p.has_consistent_junctions());
+        assert!(placement(0, 100, &[CigarOp::Match(25)]).has_consistent_junctions());
+    }
+
+    #[test]
+    fn intron_fast_path_keeps_generic_splicing_and_consistent_seams() {
+        let mut state = 0x243f6a88u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut genome = random(8000);
+        let exons = [(1000, 1032), (4257, 4333), (6144, 6175)];
+        genome[1032..1034].copy_from_slice(b"GT");
+        genome[4255..4257].copy_from_slice(b"AG");
+        genome[4333..4335].copy_from_slice(b"GT");
+        genome[6142..6144].copy_from_slice(b"AG");
+        let mut query = b"N".repeat(11);
+        for (start, end) in exons {
+            query.extend_from_slice(&genome[start..end]);
+        }
+        assert_eq!(query.len(), 150);
+        for strand in [Strand::Plus, Strand::Minus] {
+            let library = JunctionLib::build([
+                Junction {
+                    contig: 0,
+                    start: 1032,
+                    end: 4257,
+                    minus_strand: strand == Strand::Minus,
+                },
+                Junction {
+                    contig: 0,
+                    start: 4333,
+                    end: 6144,
+                    minus_strand: strand == Strand::Minus,
+                },
+            ]);
+            let mut aligner =
+                aligner_on(std::str::from_utf8(&genome).unwrap()).with_lib(Arc::new(library));
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let mut anchors = Vec::new();
+            for (q, r, span) in [(43, 4257, 76), (119, 6144, 31)] {
+                for offset in (3..span - 14).step_by(4) {
+                    anchors.push(crate::seed::Anchor {
+                        contig: 0,
+                        strand,
+                        qpos: q + offset,
+                        rpos: r + offset,
+                    });
+                }
+            }
+            let chain = Chain {
+                contig: 0,
+                strand,
+                anchors,
+                score: 93,
+            };
+            let expected = aligner
+                .try_spliced(&read, &revcomp(&read), &chain)
+                .expect("generic path must have an independent supported explanation");
+            assert_eq!(expected.pos, 4257);
+            assert_eq!(
+                expected.cigar,
+                vec![
+                    CigarOp::SoftClip(43),
+                    CigarOp::Match(76),
+                    CigarOp::RefSkip(1811),
+                    CigarOp::Match(31),
+                ]
+            );
+            let mut candidates = Vec::new();
+            aligner.extend_chain(
+                &read,
+                &crate::seed::minimizers(&read, aligner.config.seed),
+                &chain,
+                true,
+                false,
+                &revcomp(&read),
+                &mut 8,
+                &mut candidates,
+            );
+            assert!(
+                candidates
+                    .iter()
+                    .any(|p| p.pos == expected.pos && p.cigar == expected.cigar),
+                "an intron fast-path proposal must not suppress the generic splice candidate"
+            );
+            for p in &candidates {
+                let mut rf = p.pos;
+                for op in &p.cigar {
+                    match op {
+                        CigarOp::Match(n) | CigarOp::Del(n) => rf += *n,
+                        CigarOp::RefSkip(n) => {
+                            assert!(
+                                p.junctions
+                                    .iter()
+                                    .any(|j| j.junction.start == rf && j.junction.end == rf + n),
+                                "published CIGAR seam must agree with its refined junction"
+                            );
+                            rf += *n;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_short_trigger_rescores_every_competing_locus_in_one_domain() {
+        let mut genome = b"C".repeat(3000);
+        let mut query = b"A".repeat(150);
+        for q in [5, 15, 25, 35, 45, 55] {
+            query[q] = b'C';
+        }
+        for (q, base) in query.iter().enumerate() {
+            genome[100 + q] = *base;
+            genome[1100 + q] = *base;
+        }
+        // Each full candidate has six T>C edits (4%, below trigger density).
+        for q in [5, 15, 25, 35, 45, 55] {
+            genome[100 + q] = b'T';
+            genome[1100 + q] = b'T';
+        }
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut candidates = Vec::new();
+        for pos in [100, 1100] {
+            let mut p = placement(0, pos, &[CigarOp::Match(150)]);
+            p.origin = crate::mapq::Origin::L1; // no reextension, isolates common-domain scoring
+            aligner.rescore_strict(&query, &mut p);
+            assert!(hyper_direction(&p).is_none());
+            candidates.push(p);
+        }
+        let mut short = placement(0, 100, &[CigarOp::Match(84), CigarOp::SoftClip(66)]);
+        short.origin = crate::mapq::Origin::L1;
+        aligner.rescore_strict(&query, &mut short);
+        assert_eq!(hyper_direction(&short), Some(EditDir::Tc));
+        candidates.push(short);
+        dedup_by_footprint(&mut candidates, query.len());
+        aligner.hyper_rearbitrate(&query, &revcomp(&query), &mut candidates);
+        assert!(candidates.iter().all(|p| p.ea_dir == EditDir::Tc));
+        let result = aligner.arbitrate(&query, candidates, 10, true).unwrap();
+        assert_eq!(result.score, 288);
+        assert_eq!(result.second_score, 288);
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert_eq!(result.n_cands, 2);
     }
 
     #[test]
