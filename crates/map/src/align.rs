@@ -2600,7 +2600,9 @@ mod tests {
                         let oriented =
                             [vec![tail_base; 8], body.clone(), vec![tail_base; 8]].concat();
                         let m = oriented.len() as u32;
-                        let mut genome = vec![b'N'; 2000 + n + 16];
+                        // Concrete A reference flanks make C tails ordinary
+                        // negative-score mismatches, not ambiguous columns.
+                        let mut genome = vec![b'A'; 2000 + n + 16];
                         genome[1008..1008 + n].copy_from_slice(&body);
                         let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
                         let seq = if strand == Strand::Plus {

@@ -18,7 +18,8 @@ exhaustive indel search. Fast-lane eligibility, scores, candidate scheduling,
 coverage and the two-DP budget are unchanged.
 
 Six synthetic tests cover both strands, anchors near either end, short and
-long reads, contig edges, negative N/non-N technical tails, DP terminal edits,
+long reads, contig edges, N/non-N technical tails against concrete mismatching
+reference flanks, DP terminal edits,
 zero DP budget, displaced anchors, overflow boundaries, full-diagonal inclusion
 and exact preservation of unaffected windows.
 
