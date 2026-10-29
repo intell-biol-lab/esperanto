@@ -986,7 +986,61 @@ fn finish_extension(
             CigarOp::SoftClip(_) | CigarOp::RefSkip(_) => {}
         }
     }
-    let read_end = read_start + rm;
+    let mut read_end = read_start + rm;
+    if score > 0 {
+        // Local traceback and end trimming choose a shorter path at zero
+        // score. Prefer more informative query coverage when a diagonal
+        // outer flank has exactly the same score. Stop at ambiguous bases;
+        // they must not turn free clipping into fictitious coverage.
+        let mut neutral_left = 0u32;
+        let mut delta = 0i32;
+        for n in 1..=read_start.min(ref_start) {
+            let q = read_codes[(read_start - n) as usize];
+            let r = ref_codes[(ref_start - n) as usize];
+            if q >= 4 || r >= 4 {
+                break;
+            }
+            delta += core.lut.score(q, r) as i32;
+            if delta == 0 {
+                neutral_left = n;
+            }
+        }
+        let used_ref = kept
+            .iter()
+            .filter(|(op, _)| matches!(op, CigarOp::Match(_) | CigarOp::Del(_)))
+            .count() as u32;
+        let ref_end = ref_start + used_ref;
+        let mut neutral_right = 0u32;
+        delta = 0;
+        let available = (m as u32 - read_end).min(ref_codes.len() as u32 - ref_end);
+        for n in 0..available {
+            let q = read_codes[(read_end + n) as usize];
+            let r = ref_codes[(ref_end + n) as usize];
+            if q >= 4 || r >= 4 {
+                break;
+            }
+            delta += core.lut.score(q, r) as i32;
+            if delta == 0 {
+                neutral_right = n + 1;
+            }
+        }
+        if neutral_left > 0 || neutral_right > 0 {
+            let mut expanded = Vec::with_capacity(ops.len() + 2);
+            if neutral_left > 0 {
+                push_op(&mut expanded, CigarOp::Match(neutral_left));
+            }
+            for op in ops {
+                push_op(&mut expanded, op);
+            }
+            if neutral_right > 0 {
+                push_op(&mut expanded, CigarOp::Match(neutral_right));
+            }
+            ops = expanded;
+            read_start -= neutral_left;
+            ref_start -= neutral_left;
+            read_end += neutral_right;
+        }
+    }
     let mut cigar = Vec::new();
     if read_start > 0 {
         cigar.push(CigarOp::SoftClip(read_start));
@@ -1967,6 +2021,76 @@ mod avx2_band {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neutral_outer_flanks_keep_edit_evidence_without_score_gain() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        for (reference_flank, query_flank) in [(b"AAT", b"AAC"), (b"CCA", b"CCG")] {
+            for left in [true, false] {
+                let (mut reference, mut query) = (b"NN".to_vec(), Vec::new());
+                if left {
+                    reference.extend_from_slice(reference_flank);
+                    query.extend_from_slice(b"NN");
+                    query.extend_from_slice(query_flank);
+                }
+                reference.extend_from_slice(core);
+                query.extend_from_slice(core);
+                if !left {
+                    reference.extend_from_slice(
+                        &reference_flank.iter().rev().copied().collect::<Vec<_>>(),
+                    );
+                    query.extend_from_slice(&query_flank.iter().rev().copied().collect::<Vec<_>>());
+                    query.extend_from_slice(b"NN");
+                }
+                reference.extend_from_slice(b"NN");
+                let ext = extend_hint(
+                    &query,
+                    &reference,
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                    DiagHint {
+                        offset: if left { 0 } else { 2 },
+                        num: 1,
+                        den: 1,
+                    },
+                );
+                assert_eq!(ext.score, core.len() as i32 * 2);
+                assert_eq!(ext.ref_start, 2);
+                assert_eq!(
+                    ext.cigar,
+                    if left {
+                        vec![CigarOp::SoftClip(2), CigarOp::Match(23)]
+                    } else {
+                        vec![CigarOp::Match(23), CigarOp::SoftClip(2)]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_outer_flanks_do_not_absorb_negative_or_ambiguous_clips() {
+        let reference = b"AATGACGATCGGATACGCTAGCA";
+        for prefix in [b"NNN".as_slice(), b"ACC".as_slice()] {
+            let mut query = prefix.to_vec();
+            query.extend_from_slice(&reference[3..]);
+            let ext = extend_hint(
+                &query,
+                reference,
+                &ExtendParams::default(),
+                &mut ExtendBuffer::default(),
+                DiagHint {
+                    offset: 0,
+                    num: 1,
+                    den: 1,
+                },
+            );
+            assert_eq!(ext.score, 40);
+            assert_eq!(ext.read_start, 3);
+            assert_eq!(ext.ref_start, 3);
+            assert_eq!(ext.cigar, vec![CigarOp::SoftClip(3), CigarOp::Match(20)]);
+        }
+    }
 
     /// The i16 sentinel contract: exact-equality NEG with a max() clamp —
     /// deep E/F chains on long windows all collapse to NEG (load-bearing for

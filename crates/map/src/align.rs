@@ -149,7 +149,7 @@ impl Placement {
     /// Query evidence, not reference span: strict.aligned historically also
     /// includes deleted reference columns. Preserve that score bookkeeping
     /// for MAPQ/edit-density consumers, but never credit D/N as read coverage.
-    fn coverage_eligible(&self, read_len: usize) -> bool {
+    fn informative_query_coverage(&self) -> u32 {
         let deleted: u32 = self
             .cigar
             .iter()
@@ -158,7 +158,11 @@ impl Placement {
                 _ => None,
             })
             .sum();
-        let covered = self.strict.aligned.saturating_sub(deleted);
+        self.strict.aligned.saturating_sub(deleted)
+    }
+
+    fn coverage_eligible(&self, read_len: usize) -> bool {
+        let covered = self.informative_query_coverage();
         read_len > 0 && f64::from(covered) >= REFUSE_MIN_ALIGNED_FRAC * read_len as f64
     }
 
@@ -2204,14 +2208,18 @@ fn footprint_overlap(a: &Placement, b: &Placement) -> f64 {
     f64::from(inter) / f64::from(la.min(lb))
 }
 
-/// Decision order: score desc, then fewer ordinary mismatches, then the
-/// genomic layer, then coordinates (deterministic).
+/// Decision order: score desc, then fewer ordinary mismatches, more
+/// informative query coverage, origin and coordinates (deterministic).
 fn sort_placements(ps: &mut [Placement]) {
     ps.sort_by(|a, b| {
         b.strict
             .score
             .cmp(&a.strict.score)
             .then(a.strict.mm.cmp(&b.strict.mm))
+            .then(
+                b.informative_query_coverage()
+                    .cmp(&a.informative_query_coverage()),
+            )
             .then(a.origin.rank().cmp(&b.origin.rank()))
             .then(a.contig.cmp(&b.contig))
             .then(a.pos.cmp(&b.pos))
@@ -2946,6 +2954,145 @@ mod tests {
             assert_eq!(result.pos, 500);
             assert_eq!(result.second_score, 160);
             assert_eq!(result.n_cands, 2);
+        }
+    }
+
+    #[test]
+    fn neutral_same_locus_ties_keep_more_query_evidence_in_any_order() {
+        let mut genome = b"A".repeat(1000);
+        genome[649] = b'T';
+        let mut query = b"A".repeat(150);
+        query[149] = b'C';
+        for strand in [Strand::Plus, Strand::Minus] {
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let mut full = placement(0, 500, &[CigarOp::Match(150)]);
+            let mut clipped = placement(0, 500, &[CigarOp::Match(147), CigarOp::SoftClip(3)]);
+            full.strand = strand;
+            clipped.strand = strand;
+            aligner.rescore_strict(&query, &mut full);
+            aligner.rescore_strict(&query, &mut clipped);
+            assert_eq!(full.strict.score, clipped.strict.score);
+            assert_eq!(full.strict.mm, clipped.strict.mm);
+            for mut candidates in [
+                vec![clipped.clone(), full.clone()],
+                vec![full.clone(), clipped.clone()],
+            ] {
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+                assert_eq!(
+                    result.cigar, full.cigar,
+                    "a same-score clipped tie must not erase terminal edit evidence"
+                );
+                assert_eq!(result.ea_tc, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn splice_competition_retains_neutral_terminal_edit_on_both_mates() {
+        let mut state = 0x517cc1b7u64;
+        let mut genome: Vec<u8> = (0..4000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        genome[1078..1080].copy_from_slice(b"CT");
+        genome[2998..3000].copy_from_slice(b"AC");
+        genome[1002] = b'T';
+        let mut query = b"N".repeat(8);
+        query.extend_from_slice(&genome[1000..1078]);
+        query.extend_from_slice(&genome[3000..3064]);
+        query[10] = b'C';
+        for strand in [Strand::Plus, Strand::Minus] {
+            let junction = Junction {
+                contig: 0,
+                start: 1078,
+                end: 3000,
+                minus_strand: true,
+            };
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap())
+                .with_lib(Arc::new(JunctionLib::build([junction])));
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let anchors = [(11, 1003, 72), (86, 3000, 64)]
+                .into_iter()
+                .flat_map(|(q, r, span)| {
+                    (0..span - 15)
+                        .step_by(4)
+                        .map(move |offset| crate::seed::Anchor {
+                            contig: 0,
+                            strand,
+                            qpos: q + offset,
+                            rpos: r + offset,
+                        })
+                })
+                .collect();
+            let chain = Chain {
+                contig: 0,
+                strand,
+                anchors,
+                score: 90,
+            };
+            let hit = aligner.try_spliced(&read, &revcomp(&read), &chain).unwrap();
+            assert_eq!(hit.pos, 1000);
+            assert_eq!(
+                hit.cigar,
+                vec![
+                    CigarOp::SoftClip(8),
+                    CigarOp::Match(78),
+                    CigarOp::RefSkip(1922),
+                    CigarOp::Match(64),
+                ]
+            );
+            let mut full = Placement::from_genomic(
+                0,
+                hit.pos,
+                strand,
+                hit.cigar,
+                hit.junctions,
+                90,
+                hit.score,
+            );
+            let mut clipped = Placement::from_genomic(
+                0,
+                1003,
+                strand,
+                vec![
+                    CigarOp::SoftClip(11),
+                    CigarOp::Match(75),
+                    CigarOp::RefSkip(1922),
+                    CigarOp::Match(64),
+                ],
+                full.junctions.clone(),
+                90,
+                0,
+            );
+            aligner.rescore_strict(&query, &mut full);
+            aligner.rescore_strict(&query, &mut clipped);
+            assert_eq!(full.strict.score, clipped.strict.score);
+            assert_eq!(full.strict.ea_tc, 1);
+            assert_eq!(clipped.strict.ea_tc, 0);
+            for mut candidates in [
+                vec![full.clone(), clipped.clone()],
+                vec![clipped.clone(), full.clone()],
+            ] {
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+                assert_eq!(result.pos, full.pos);
+                assert_eq!(result.cigar, full.cigar);
+                assert_eq!(result.ea_tc, 1);
+            }
         }
     }
 

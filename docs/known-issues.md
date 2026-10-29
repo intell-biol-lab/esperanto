@@ -107,3 +107,20 @@ chain could not reproduce them. Dev.6 reconstructs from the selected fragment
 pair using pseudo-reference extension and consistent stitching. Historical
 dev.5 output remains a failed scientific qualification candidate even though
 its interface and unit gates passed.
+
+## Neutral endpoint and read/transcript orientation competition (dev.6 review)
+
+The `catalog_10@512` regression included three clipped body bases whose strict
+score was exactly zero (two matches, one T>C). Local traceback/end trimming
+removed them on a score tie. Right-end clipped ties at identical coordinates
+could also win same-locus dedup by generator order. Dev.7 retains neutral
+informative diagonal flanks and prefers informative coverage after score and
+ordinary mismatch ties. Negative clips and ambiguous columns remain excluded.
+
+Read-aware junction refinement previously consulted only the read alignment
+strand, while common rescoring accepted annotation/motifs on either RNA
+strand. This could slide the opposite mate 1-2 bases at repeat boundaries.
+Dev.7 considers both transcript strands in that same refinement search.
+These synthetic mechanism fixes require independent full-seed/event review;
+they do not establish global recall or calibrated MAPQ. Historical dev.6
+NO-GO and its lost event remain preserved research evidence.

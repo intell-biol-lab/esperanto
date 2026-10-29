@@ -25,7 +25,8 @@ It does not use reference span, intron length, producer score or chain score.
 ## Deduplication and editing evidence
 
 Candidates use the existing deterministic decision order: score descending,
-ordinary mismatches ascending, origin rank, contig, position. The existing
+ordinary mismatches ascending, informative query coverage descending, origin
+rank, contig, position. The coverage tie preference was added in dev.7. The existing
 same-locus footprint definition (same contig/strand, reference M overlap at
 least 0.5 of the smaller footprint) is unchanged.
 
@@ -117,3 +118,32 @@ Do not rebuild from an unrelated invoking chain. The generic spliced path
 still runs independently. A synthetic asymmetric 60/79-base splice with an
 11-base technical clip fails construction consistency on dev.5 and passes
 on both read strands and both genomic motif orientations after reconstruction.
+
+## Neutral endpoints and boundary competition (dev.7)
+
+After extension traceback/end trimming, prefer the longest available contiguous
+diagonal outer flank whose net substitution score is exactly zero. A positive
+alignment is required; ambiguous bases on either side stop the scan. This is
+a tie convention, not a clipping penalty or editing exemption. Existing
+substitution/gap scores, retained internal indels and total score stay unchanged.
+The same shared finish routine is used by scalar, AVX2 and banded kernels.
+This does not claim a globally longest optimal gapped alignment.
+
+On equal common scores and ordinary mismatch counts, informative query coverage
+breaks candidate ties before origin and coordinates. D and N cannot inflate
+this quantity. Both generator orders must keep a same-locus terminal edit when
+the clipped explanation only ties its score. Different-locus competition and
+the primary coverage/positive-score rules are unchanged.
+
+Read-aware splice refinement must not equate a mate's alignment direction with
+the RNA direction. Search each existing boundary shift under both transcript
+orientations with the same existing flank/motif/library scoring. Preserve the
+selected transcript's junction metadata and the read's own alignment strand
+separately. Known and novel canonical junctions are available on both mates.
+This matches the existing any-strand common junction scorer; it does not add
+an annotation-only override or force a truth-derived boundary.
+
+Five synthetic tests cover neutral Ag/Tc flanks at both ends, negative/N
+controls, input-order invariant same-locus ties, annotated/novel 1-2 bp
+boundary competition on both motif/read orientations, and an end-to-end
+spliced terminal-edit competition with both mates. Four fail on dev.6.

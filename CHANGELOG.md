@@ -24,6 +24,14 @@
 
 ### Fixed
 
+- In `1.1.1-dev.7`, retain score-neutral informative diagonal outer flanks
+  after local extension, preserving terminal editing evidence on score ties
+  while keeping negative and ambiguous clips. Same-score, same-mismatch
+  candidate ties prefer informative query coverage. Read-aware junction
+  refinement considers both transcript orientations, matching unstranded
+  common arbitration instead of equating mate direction with RNA direction.
+  Score constants, density/coverage thresholds and model weights are unchanged.
+
 - In `1.1.1-dev.6`, reconstruct fast intron candidates by extending a
   pseudo-reference from their own fragment pair, then stitch at the same
   refined junction. This replaces the midpoint M-N-M assembly that could

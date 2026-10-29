@@ -202,7 +202,8 @@ pub fn refine_junction(
 /// un-anchored read gap the splice falls. Enumerate that shift and pick the
 /// boundary that carries a canonical splice signal AND matches the read on
 /// both flanks (editing-aware). This removes the proximity bias that drifted
-/// off at competing GT/AG motifs.
+/// off at competing GT/AG motifs. Transcript orientation is evaluated on
+/// both strands, independently of the mate alignment direction.
 #[allow(clippy::too_many_arguments)]
 pub fn refine_junction_read(
     reference: &Reference,
@@ -253,19 +254,6 @@ pub fn refine_junction_read(
         if qb < 1 || qb as u32 >= read_len {
             continue;
         }
-        let signal = splice_signal(
-            dinuc(ctg, s as u32, true),
-            dinuc(ctg, e as u32, false),
-            minus,
-        );
-        let junction = Junction {
-            contig,
-            start: s as u32,
-            end: e as u32,
-            minus_strand: minus,
-        };
-        let support = lib.support(&junction);
-
         // Read-match on both flanks of the boundary (editing-aware).
         let mut m = 0i32;
         let w = 4i64;
@@ -288,19 +276,37 @@ pub fn refine_junction_read(
             }
         }
 
-        let mut score = m * 50 + signal.score(params) * 5 - (delta.abs() as i32) * 5;
-        if support > 0 {
-            score += params.known_bonus;
-        }
-        if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
-            best = Some((
-                score,
-                RefinedJunction {
-                    junction,
-                    signal,
-                    known_support: support,
-                },
-            ));
+        // The read strand is not the transcript strand in an unstranded
+        // library. Match common arbitration: annotation and canonical
+        // signals on either transcript orientation are admissible.
+        // Keep the read orientation only as a deterministic tie preference.
+        for transcript_minus in [minus, !minus] {
+            let signal = splice_signal(
+                dinuc(ctg, s as u32, true),
+                dinuc(ctg, e as u32, false),
+                transcript_minus,
+            );
+            let junction = Junction {
+                contig,
+                start: s as u32,
+                end: e as u32,
+                minus_strand: transcript_minus,
+            };
+            let support = lib.support(&junction);
+            let mut score = m * 50 + signal.score(params) * 5 - (delta.abs() as i32) * 5;
+            if support > 0 {
+                score += params.known_bonus;
+            }
+            if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
+                best = Some((
+                    score,
+                    RefinedJunction {
+                        junction,
+                        signal,
+                        known_support: support,
+                    },
+                ));
+            }
         }
     }
     best.map(|(_, rj)| rj)
@@ -879,5 +885,73 @@ pub(crate) fn lib_window_candidates(
     } else {
         let (js, cs) = lib.range_start(contig, lo, hi);
         js.iter().zip(cs.iter()).map(|(j, &c)| (j, c)).collect()
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn read_boundary_competition_is_invariant_to_mate_orientation() {
+        let mut state = 0x243f6a88u64;
+        let mut genome: Vec<u8> = (0..500)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        for transcript_minus in [false, true] {
+            let (donor, acceptor) = if transcript_minus {
+                (b"CT", b"AC")
+            } else {
+                (b"GT", b"AG")
+            };
+            genome[120..122].copy_from_slice(donor);
+            genome[298..300].copy_from_slice(acceptor);
+            genome[300..302].copy_from_slice(donor);
+            genome[119] = b'T';
+            let mut query = genome[60..120].to_vec();
+            query[59] = b'C';
+            query.extend_from_slice(&genome[300..379]);
+            let reference = crate::fasta::parse_fasta_bytes(
+                format!(">chrT\n{}\n", std::str::from_utf8(&genome).unwrap()).as_bytes(),
+            )
+            .unwrap();
+            let junction = Junction {
+                contig: 0,
+                start: 120,
+                end: 300,
+                minus_strand: transcript_minus,
+            };
+            for annotated in [false, true] {
+                let lib = JunctionLib::build(if annotated { vec![junction] } else { vec![] });
+                for read_minus in [false, true] {
+                    for shift in [1, 2] {
+                        let best = refine_junction_read(
+                            &reference,
+                            &query,
+                            0,
+                            120 + shift,
+                            300 + shift,
+                            60 + shift,
+                            60 + shift,
+                            read_minus,
+                            &lib,
+                            &SpliceParams::default(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            best.junction, junction,
+                            "read orientation must not select a shifted transcript junction"
+                        );
+                        assert_eq!(best.signal, SpliceSignal::GtAg);
+                        assert_eq!(best.known_support, u32::from(annotated));
+                    }
+                }
+            }
+        }
     }
 }
