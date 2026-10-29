@@ -475,27 +475,41 @@ impl<'a> Aligner<'a> {
     /// qualifies, while a full-length candidate of the same locus (L1
     /// projection, or the clipped one re-extended) shows the signature
     /// plainly. When found, every unspliced genomic candidate is re-extended
-    /// and every candidate rescored under that direction, then dedup and
-    /// order are recomputed. No-op otherwise.
+    /// and every candidate rescored in that one read-oriented conversion
+    /// domain. A candidate on the opposite alignment strand must complement
+    /// the reference-oriented direction (A>G <-> T>C). Then dedup and order
+    /// are recomputed. No-op otherwise.
     fn hyper_rearbitrate(
         &mut self,
         seq: &[u8],
         rc_storage: &[u8],
         placements: &mut Vec<Placement>,
     ) {
-        let Some(dir) = placements.iter().find_map(hyper_direction) else {
+        let Some((dir, evidence_strand)) = placements
+            .iter()
+            .find_map(|p| hyper_direction(p).map(|dir| (dir, p.strand)))
+        else {
             return;
         };
         for p in placements.iter_mut() {
+            let candidate_dir = if p.strand == evidence_strand {
+                dir
+            } else {
+                match dir {
+                    EditDir::Ag => EditDir::Tc,
+                    EditDir::Tc => EditDir::Ag,
+                    EditDir::Off => EditDir::Off,
+                }
+            };
             let q: &[u8] = if p.strand == Strand::Minus {
                 rc_storage
             } else {
                 seq
             };
             if p.origin == crate::mapq::Origin::Genomic {
-                self.reextend_with(q, p, dir);
+                self.reextend_with(q, p, candidate_dir);
             }
-            self.rescore_with(q, p, dir);
+            self.rescore_with(q, p, candidate_dir);
         }
         dedup_by_footprint(placements, seq.len());
         sort_placements(placements);
@@ -3575,6 +3589,255 @@ mod tests {
         assert_eq!(result.second_score, 288);
         assert_eq!(result.mapq_of_checked(), 0);
         assert_eq!(result.n_cands, 2);
+    }
+
+    fn hyper_opposite_strand_case(trigger_strand: Strand, trigger_dir: EditDir, genomic: bool) {
+        // Purely synthetic two-locus competition. The strict leader has seven
+        // edits (below the 5% trigger), while its opposite-strand competitor
+        // has nine edits plus an ordinary mismatch and triggers re-arbitration.
+        // A read-oriented conversion must complement when the candidate flips.
+        let mut state = 0x91cb_ab67u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut read = random(150);
+        let edited_positions = [15, 27, 39, 51, 63, 75, 87, 99, 111];
+        let trigger_base = if trigger_dir == EditDir::Ag {
+            b'G'
+        } else {
+            b'C'
+        };
+        let raw_base = if trigger_strand == Strand::Plus {
+            trigger_base
+        } else if trigger_base == b'G' {
+            b'C'
+        } else {
+            b'G'
+        };
+        for &i in &edited_positions {
+            read[i] = raw_base;
+        }
+        let other_strand = if trigger_strand == Strand::Plus {
+            Strand::Minus
+        } else {
+            Strand::Plus
+        };
+        let other_dir = if trigger_dir == EditDir::Ag {
+            EditDir::Tc
+        } else {
+            EditDir::Ag
+        };
+        let rc = revcomp(&read);
+        let oriented = |strand| {
+            if strand == Strand::Plus {
+                read.clone()
+            } else {
+                rc.clone()
+            }
+        };
+        let mut trigger_reference = oriented(trigger_strand);
+        let mut other_reference = oriented(other_strand);
+        for (number, &i) in edited_positions.iter().enumerate() {
+            let t = if trigger_strand == Strand::Plus {
+                i
+            } else {
+                149 - i
+            };
+            let o = if other_strand == Strand::Plus {
+                i
+            } else {
+                149 - i
+            };
+            trigger_reference[t] = if trigger_dir == EditDir::Ag {
+                b'A'
+            } else {
+                b'T'
+            };
+            if number < 7 {
+                other_reference[o] = if other_dir == EditDir::Ag { b'A' } else { b'T' };
+            }
+        }
+        let ordinary = if trigger_strand == Strand::Plus {
+            130
+        } else {
+            19
+        };
+        let qb = trigger_reference[ordinary];
+        trigger_reference[ordinary] = *b"ACGT"
+            .iter()
+            .find(|&&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+            .unwrap();
+        let mut genome = random(1200);
+        genome[100..250].copy_from_slice(&trigger_reference);
+        genome[800..950].copy_from_slice(&other_reference);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+        trigger.strand = trigger_strand;
+        let mut other = placement(0, 800, &[CigarOp::Match(150)]);
+        other.strand = other_strand;
+        for p in [&mut trigger, &mut other] {
+            if !genomic {
+                p.origin = crate::mapq::Origin::L1;
+            }
+            let query = if p.strand == Strand::Plus { &read } else { &rc };
+            aligner.rescore_strict(query, p);
+        }
+        assert_eq!(trigger.strict.score, 240);
+        assert_eq!(other.strict.score, 258);
+        assert_eq!(hyper_direction(&trigger), Some(trigger_dir));
+        assert_eq!(hyper_direction(&other), None);
+        let mut candidates = vec![other, trigger];
+        sort_placements(&mut candidates);
+        aligner.hyper_rearbitrate(&read, &rc, &mut candidates);
+        let other = candidates.iter().find(|p| p.pos == 800).unwrap();
+        assert_eq!(
+            other.ea_dir, other_dir,
+            "opposite strand must complement the read's domain"
+        );
+        assert_eq!(other.strict.score, 286);
+        let trigger = candidates.iter().find(|p| p.pos == 100).unwrap();
+        assert_eq!(trigger.ea_dir, trigger_dir);
+        assert_eq!(trigger.strict.score, 276);
+        let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+        assert_eq!(result.pos, 800);
+        assert_eq!(result.strand, other_strand);
+        assert_eq!(result.second_score, 276);
+    }
+
+    #[test]
+    fn hyper_opposite_strand_candidates_share_one_read_oriented_domain() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                hyper_opposite_strand_case(strand, dir, false);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_opposite_strand_genomic_reextension_uses_complemented_domain() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                hyper_opposite_strand_case(strand, dir, true);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_complemented_reextension_recovers_an_edited_clipped_flank() {
+        // The opposite-strand trigger fixes the read's conversion alphabet.
+        // Its genomic competitor starts with an unedited 129 bp prefix;
+        // recovering the last 21 bp requires exempting nine edits there.
+        // Common rescoring alone cannot restore those missing CIGAR columns.
+        for other_strand in [Strand::Plus, Strand::Minus] {
+            for other_dir in [EditDir::Ag, EditDir::Tc] {
+                let mut state = 0x98b3_5f2du64;
+                let mut random = |len: usize| -> Vec<u8> {
+                    (0..len)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            b"ACGT"[(state & 3) as usize]
+                        })
+                        .collect()
+                };
+                let mut query = random(150);
+                let edited_base = if other_dir == EditDir::Ag { b'G' } else { b'C' };
+                let reference_base = if other_dir == EditDir::Ag { b'A' } else { b'T' };
+                for i in 0..9 {
+                    query[129 + 2 * i] = edited_base;
+                }
+                let mut other_reference = query.clone();
+                for i in 0..9 {
+                    other_reference[129 + 2 * i] = reference_base;
+                }
+                let trigger_query = revcomp(&query);
+                let mut trigger_reference = trigger_query.clone();
+                for i in 0..9 {
+                    trigger_reference[149 - (129 + 2 * i)] =
+                        if other_dir == EditDir::Ag { b'T' } else { b'A' };
+                }
+                let qb = trigger_reference[100];
+                trigger_reference[100] = *b"ACGT"
+                    .iter()
+                    .find(|&&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+                    .unwrap();
+                let mut genome = random(1200);
+                genome[100..250].copy_from_slice(&trigger_reference);
+                genome[800..950].copy_from_slice(&other_reference);
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let read = if other_strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+                trigger.strand = if other_strand == Strand::Plus {
+                    Strand::Minus
+                } else {
+                    Strand::Plus
+                };
+                trigger.origin = crate::mapq::Origin::L1;
+                aligner.rescore_strict(&trigger_query, &mut trigger);
+                let mut other = placement(0, 800, &[CigarOp::Match(129), CigarOp::SoftClip(21)]);
+                other.strand = other_strand;
+                aligner.rescore_strict(&query, &mut other);
+                assert_eq!(other.strict.score, 258);
+                assert_eq!(hyper_direction(&other), None);
+                let mut candidates = vec![other, trigger];
+                aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+                let recovered = candidates.iter().find(|p| p.pos == 800).unwrap();
+                assert_eq!(recovered.cigar, vec![CigarOp::Match(150)]);
+                assert_eq!(recovered.ea_dir, other_dir);
+                assert_eq!(recovered.strict.score, 282);
+                assert_eq!(candidates[0].pos, 800);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_same_strand_competitor_cannot_choose_its_own_editing_direction() {
+        let read = b"CG".repeat(75);
+        let mut trigger_ref = read.clone();
+        let mut other_ref = read.clone();
+        for i in 0..9 {
+            trigger_ref[21 + 10 * i] = b'A';
+        }
+        trigger_ref[130] = b'G'; // ordinary ref G/read C
+        for i in 0..7 {
+            other_ref[20 + 10 * i] = b'T';
+        }
+        let mut genome = b"N".repeat(1200);
+        genome[100..250].copy_from_slice(&trigger_ref);
+        genome[800..950].copy_from_slice(&other_ref);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+        let mut other = placement(0, 800, &[CigarOp::Match(150)]);
+        for p in [&mut trigger, &mut other] {
+            p.origin = crate::mapq::Origin::L1;
+            aligner.rescore_strict(&read, p);
+        }
+        let mut candidates = vec![other, trigger];
+        sort_placements(&mut candidates);
+        aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+        assert!(candidates.iter().all(|p| p.ea_dir == EditDir::Ag));
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|p| p.pos == 800)
+                .unwrap()
+                .strict
+                .score,
+            258
+        );
+        assert_eq!(candidates[0].pos, 100);
     }
 
     #[test]

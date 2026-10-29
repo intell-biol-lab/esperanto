@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Dev.10 corrects an orientation error in hyperediting re-arbitration: A>G/T>C
+must complement for candidates on opposite alignment strands to represent one
+original-read conversion domain. This does not resolve conflicting signature
+domains, same-base terminal splice ambiguity, short-body confidence, or
+independent held-out qualification. See the
+[strand-aware editing-domain contract](strand-aware-edit-domain-contract.md).
+
 Optional `map --candidate-diagnostics` retains legal positive candidates below
 primary coverage for inspection. This adds observability, not recall recovery:
 96/98 bp candidates in 150 bp reads remain below the unchanged 99 bp minimum.

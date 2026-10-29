@@ -30,6 +30,15 @@
 
 ### Fixed
 
+- In `1.1.1-dev.10`, keep hyperediting re-arbitration in one original-read
+  conversion domain: complement A>G/T>C when a candidate's alignment strand
+  differs from the signature-producing candidate. Apply that direction to
+  genomic re-extension and common rescoring. Preserve signature thresholds,
+  score constants, primary coverage and model weights. Four synthetic tests
+  cover both strands/directions, L1/genomic paths and a same-strand negative
+  control. See the strand-aware editing-domain contract; development replays
+  do not establish independent qualification or calibrated MAPQ.
+
 - In `1.1.1-dev.8`, apply the existing score/ordinary-mismatch decision order
   to score-neutral outer-flank normalization. Stop before ordinary mismatches
   instead of extending through them to a later score tie. Preserve A>G/T>C
