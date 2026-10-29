@@ -99,10 +99,13 @@ fn query_edge_completion_paired_pipeline_preserves_raw_frame() {
         None,
         false,
     );
+    assert_eq!(off.records.len(), 2);
     assert!(off.records.iter().all(|rec| !rec.flags().is_unmapped()));
     let on = run("edge-prefix-on", &index, &[pair.clone()], true, None, false);
     assert_eq!(on.records.len(), 2);
+    assert_eq!(on.rows.len(), 2);
     for (mate, (rec, row)) in on.records.iter().zip(&on.rows).enumerate() {
+        assert_eq!(row["mate"], mate + 1);
         assert!(
             !rec.flags().is_unmapped(),
             "effective prefix must retain its body anchor"

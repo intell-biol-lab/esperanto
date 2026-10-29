@@ -237,7 +237,47 @@ fn query_edge_completion_scratch_reuse_matches_fresh_aligners() {
         let expected = Aligner::new(&index, cfg).align_read_full(read);
         assert_eq!(format!("{:?}", observed.0), format!("{:?}", expected.0));
         let summarize = |cache: Option<CachedPlacements>| {
-            cache.map(|c| (c.n_seeds, format!("{:?}", c.seed_budget)))
+            cache.map(|c| {
+                let placements: Vec<_> = c
+                    .placements
+                    .iter()
+                    .map(|p| {
+                        let Placement {
+                            origin,
+                            contig,
+                            pos,
+                            strand,
+                            cigar,
+                            junctions,
+                            chain_score,
+                            ext_score,
+                            strict,
+                            ea_dir,
+                        } = p;
+                        format!(
+                            "{:?}",
+                            (
+                                origin,
+                                contig,
+                                pos,
+                                strand,
+                                cigar,
+                                junctions,
+                                chain_score,
+                                ext_score,
+                                strict,
+                                ea_dir
+                            )
+                        )
+                    })
+                    .collect();
+                (
+                    c.n_seeds,
+                    c.genomic_any,
+                    format!("{:?}", c.seed_budget),
+                    placements,
+                )
+            })
         };
         assert_eq!(summarize(observed.1), summarize(expected.1));
     }
