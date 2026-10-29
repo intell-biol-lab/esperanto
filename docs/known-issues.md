@@ -67,3 +67,20 @@ Dev.3 qualification, residual regressions and adoption must be assessed on its
 own named outputs, independently of the dev.2 interface result. This remains
 development software; no general mapping-accuracy or biological claim follows
 from these mechanism tests.
+
+## Coverage eligibility and fallback found during dev.3 review
+
+Added continuous competitors exposed coverage refusal after destructive
+same-locus dedup: a shorter higher score could remove a full candidate, and
+rejecting the score leader ended arbitration without considering a fallback.
+The dev.4 candidate separates coverage classes during dedup, selects the first
+positive full-coverage candidate, and retains different-locus short evidence
+in the MAPQ margin. Reference deletions do not count as query coverage.
+Full nonpositive candidates remain available for existing editing rescoring,
+but cannot become primary without qualifying in the active domain.
+
+The executable [candidate contract](candidate-eligibility-contract.md) and
+eight synthetic mechanism tests define these rules. They do not require all
+previously mapped low-confidence reads to be restored. Qualification,
+per-read body/ALT changes and any remaining wrong placements require a new
+complete human development replay and independent review.

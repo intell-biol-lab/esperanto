@@ -114,7 +114,8 @@ pub struct ReadAlignment {
     pub mapq_override: Option<u8>,
     /// Layer that produced the winning placement.
     pub origin: Origin,
-    /// Number of distinct-locus candidates the arbiter saw.
+    /// Number of primary-eligible locus representatives. Coverage-ineligible
+    /// different-locus evidence can still contribute to `second_score`.
     pub n_cands: usize,
 }
 

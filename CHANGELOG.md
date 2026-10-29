@@ -24,6 +24,14 @@
 
 ### Fixed
 
+- In `1.1.1-dev.4`, read-coverage classes protect full candidates from being
+  erased by shorter high-scoring explanations. Primary selection continues
+  past ineligible score leaders, requires positive score and informative query
+  coverage, and keeps different-locus short evidence in the ambiguity margin.
+  Deleted reference columns no longer fill read coverage. Mate-window and
+  hyperediting arbitration apply the same rules; scoring constants and the
+  existing coverage fraction are unchanged. See
+  `docs/candidate-eligibility-contract.md`.
 - In `1.1.1-dev.3`, split/span rescue proposals are compared with their primary
   using strict read-placement scores. A rewrite must improve sequence evidence
   and exceed the existing split cost; a junction prior alone cannot displace an

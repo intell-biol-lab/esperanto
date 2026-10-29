@@ -147,6 +147,26 @@ pub(crate) struct Placement {
 }
 
 impl Placement {
+    /// Query evidence, not reference span: strict.aligned historically also
+    /// includes deleted reference columns. Preserve that score bookkeeping
+    /// for MAPQ/edit-density consumers, but never credit D/N as read coverage.
+    fn coverage_eligible(&self, read_len: usize) -> bool {
+        let deleted: u32 = self
+            .cigar
+            .iter()
+            .filter_map(|op| match op {
+                CigarOp::Del(n) => Some(*n),
+                _ => None,
+            })
+            .sum();
+        let covered = self.strict.aligned.saturating_sub(deleted);
+        read_len > 0 && f64::from(covered) >= REFUSE_MIN_ALIGNED_FRAC * read_len as f64
+    }
+
+    fn primary_eligible(&self, read_len: usize) -> bool {
+        self.strict.score > 0 && self.coverage_eligible(read_len)
+    }
+
     fn from_genomic(
         contig: u32,
         pos: u32,
@@ -322,12 +342,13 @@ impl<'a> Aligner<'a> {
     /// the L1 engine contributes every defensible transcriptome projection,
     /// the genomic layer one extension per chained locus — and every
     /// candidate is rescored by one strict four-letter function with the
-    /// editing exemption off. The best strict score decides the placement
+    /// editing exemption off. The best eligible strict score decides the placement
     /// (ties prefer the genomic layer, whose CIGAR was computed against the
     /// genome directly), the margin to the best non-overlapping runner-up
-    /// decides MAPQ, and a placement explaining less than
-    /// [`REFUSE_MIN_ALIGNED_FRAC`] of the read is refused outright so the
-    /// read reaches the Tier-2 pool.
+    /// decides MAPQ. Primary eligibility requires positive score and at least
+    /// [`REFUSE_MIN_ALIGNED_FRAC`] informative query coverage; if no candidate
+    /// qualifies the read reaches the Tier-2 pool. Ineligible different-locus
+    /// evidence still contributes to the ambiguity margin.
     pub fn align_read(&mut self, seq: &[u8]) -> Option<ReadAlignment> {
         let (aln, _) = self.align_read_full(seq);
         aln
@@ -353,7 +374,7 @@ impl<'a> Aligner<'a> {
         )
     }
 
-    /// Collect, strictly rescore, dedup and order the candidate placements of
+    /// Collect, strictly rescore, coverage-class dedup and order the placements of
     /// a read from both layers. Returns None when no layer produced any candidate.
     fn scored_placements(&mut self, seq: &[u8]) -> Option<(Vec<Placement>, usize, bool)> {
         let mut placements: Vec<Placement> = Vec::new();
@@ -396,8 +417,9 @@ impl<'a> Aligner<'a> {
             self.rescore_strict(q, p);
         }
 
-        // 4. Same-locus dedup, then the decision order.
-        dedup_by_footprint(&mut placements);
+        // 4. Same-locus dedup within coverage classes, then decision order.
+        // Retain full nonpositive candidates for the hyperediting check below.
+        dedup_by_footprint(&mut placements, seq.len());
         sort_placements(&mut placements);
 
         // 5. Hyperedited read: re-arbitrate in its own reduced alphabet (see
@@ -436,7 +458,7 @@ impl<'a> Aligner<'a> {
             }
             self.rescore_with(q, p, dir);
         }
-        dedup_by_footprint(placements);
+        dedup_by_footprint(placements, seq.len());
         sort_placements(placements);
     }
 
@@ -475,11 +497,15 @@ impl<'a> Aligner<'a> {
                 .unwrap_or((Vec::new(), 0, false)),
         };
         placements.push(win);
-        dedup_by_footprint(&mut placements);
+        dedup_by_footprint(&mut placements, seq.len());
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
-        // The mate-window candidate must have won the locus (dedup keeps the
+        // The mate-window candidate must have won an eligible locus (dedup keeps the
         // better-scored of two same-locus candidates, so compare footprints).
-        if footprint_overlap(&placements[0], &win_probe) < 0.5 {
+        if !placements
+            .iter()
+            .find(|p| p.primary_eligible(seq.len()))
+            .is_some_and(|p| footprint_overlap(p, &win_probe) >= 0.5)
+        {
             self.scratch.rc = rc_storage;
             return None;
         }
@@ -583,25 +609,17 @@ impl<'a> Aligner<'a> {
         n_seeds: usize,
         genomic_any: bool,
     ) -> Option<ReadAlignment> {
-        if placements.is_empty() {
-            return None;
-        }
-        let best = &placements[0];
+        // A score leader that lacks read coverage cannot veto a lower-ranked
+        // eligible placement. Keep it as ambiguity evidence at other loci.
+        let best = placements.iter().find(|p| p.primary_eligible(seq.len()))?;
         // Runner-up must be a different locus (footprint overlap < 0.5).
-        let second = placements[1..]
+        let second = placements
             .iter()
             .filter(|p| footprint_overlap(best, p) < 0.5)
             .map(|p| p.strict.score)
             .filter(|s| *s > 0)
             .max()
             .unwrap_or(0);
-
-        // 5. Refusal: a placement that cannot explain two thirds of the read
-        // is not a placement — the read belongs in the unmapped pool, where
-        // the Tier-2 collapsed-alphabet rescue looks for it.
-        if f64::from(best.strict.aligned) < REFUSE_MIN_ALIGNED_FRAC * seq.len() as f64 {
-            return None;
-        }
 
         // A best hit on a decoy contig is the decoy contract doing its job:
         // the read's source is absent from the primary reference (rDNA,
@@ -644,7 +662,10 @@ impl<'a> Aligner<'a> {
             rescued: false,
             mapq_override: None,
             origin: best_origin,
-            n_cands: placements.len(),
+            n_cands: placements
+                .iter()
+                .filter(|p| p.primary_eligible(seq.len()))
+                .count(),
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -2209,11 +2230,17 @@ fn hyper_direction(p: &Placement) -> Option<EditDir> {
     Some(EditDir::from_plus(s.ea_ag > 0))
 }
 
-fn dedup_by_footprint(ps: &mut Vec<Placement>) {
+/// Keep the best-scored representative of each locus in each coverage class.
+/// A short local explanation cannot erase a full-length fallback or its edit
+/// signature; positive score is checked only after any hyper rescoring.
+fn dedup_by_footprint(ps: &mut Vec<Placement>, read_len: usize) {
     sort_placements(ps);
     let mut kept: Vec<Placement> = Vec::with_capacity(ps.len());
     for p in ps.drain(..) {
-        if kept.iter().all(|k| footprint_overlap(k, &p) < 0.5) {
+        if kept.iter().all(|k| {
+            k.coverage_eligible(read_len) != p.coverage_eligible(read_len)
+                || footprint_overlap(k, &p) < 0.5
+        }) {
             kept.push(p);
         }
     }
@@ -2545,7 +2572,7 @@ mod tests {
         for p in &mut candidates {
             aligner.rescore_strict(&read, p);
         }
-        dedup_by_footprint(&mut candidates);
+        dedup_by_footprint(&mut candidates, read.len());
         sort_placements(&mut candidates);
         assert_eq!(candidates[0].pos, 12000);
         assert_eq!(candidates[0].cigar, vec![CigarOp::Match(150)]);
@@ -2722,11 +2749,199 @@ mod tests {
         let mut c = placement(0, 5000, &[CigarOp::Match(100)]);
         c.strict.score = 100; // different locus
         let mut ps = vec![a, b.clone(), c];
-        dedup_by_footprint(&mut ps);
+        dedup_by_footprint(&mut ps, 100);
         assert_eq!(ps.len(), 2);
         assert_eq!(ps[0].strict.score, 200);
         assert_eq!(ps[0].pos, b.pos);
         assert_eq!(ps[1].strict.score, 100);
+    }
+
+    #[test]
+    fn coverage_short_same_locus_cannot_erase_full_fallback() {
+        let mut genome = b"A".repeat(1000);
+        genome[..30].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 70, &[CigarOp::SoftClip(70), CigarOp::Match(80)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        assert_eq!((full.strict.score, short.strict.score), (120, 160));
+        assert_eq!(footprint_overlap(&full, &short), 1.0);
+        let mut candidates = vec![short, full];
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("an ineligible short hit must not delete the full placement");
+        assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(result.score, 120);
+        assert_eq!(result.n_cands, 1);
+        assert!(result.mapq_of_checked() < crate::mapq::PILEUP_GATE);
+    }
+
+    #[test]
+    fn coverage_disjoint_short_hit_allows_fallback_but_retains_ambiguity() {
+        let mut genome = b"A".repeat(1000);
+        genome[500..530].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 500, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 0, &[CigarOp::Match(80), CigarOp::SoftClip(70)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        let mut candidates = vec![full, short];
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("continue past a disjoint coverage-ineligible score leader");
+        assert_eq!(result.pos, 500);
+        assert_eq!(result.score, 120);
+        assert_eq!(result.second_score, 160);
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert_eq!(result.n_cands, 1);
+    }
+
+    #[test]
+    fn coverage_full_nonpositive_candidate_is_not_a_fallback() {
+        let mut aligner = aligner_on(&"C".repeat(1000));
+        let read = b"A".repeat(150);
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut full);
+        assert_eq!(full.strict.score, -600);
+        assert!(aligner
+            .arbitrate(&read, vec![full.clone()], 10, true)
+            .is_none());
+        full.strict.score = 0;
+        assert!(aligner.arbitrate(&read, vec![full], 10, true).is_none());
+    }
+
+    #[test]
+    fn coverage_boundary_counts_query_evidence_in_both_orientations() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [98, 99] {
+                let mut p = placement(
+                    0,
+                    0,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(150 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(150), &mut p);
+                let read = if strand == Strand::Plus { b'A' } else { b'T' };
+                let result = aligner.arbitrate(&vec![read; 150], vec![p], 10, true);
+                assert_eq!(result.is_some(), covered == 99);
+            }
+        }
+        let mut with_insertion = placement(
+            0,
+            0,
+            &[CigarOp::Match(90), CigarOp::Ins(9), CigarOp::SoftClip(51)],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut with_insertion);
+        assert!(aligner
+            .arbitrate(&b"A".repeat(150), vec![with_insertion], 10, true)
+            .is_some());
+    }
+
+    #[test]
+    fn coverage_deletions_skips_and_ambiguous_columns_do_not_fill_the_read() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let read = b"A".repeat(150);
+        for gap in [CigarOp::Del(50), CigarOp::RefSkip(50)] {
+            let mut p = placement(0, 0, &[CigarOp::Match(98), gap, CigarOp::SoftClip(52)]);
+            aligner.rescore_strict(&read, &mut p);
+            assert!(p.strict.score > 0);
+            assert!(
+                aligner.arbitrate(&read, vec![p], 10, true).is_none(),
+                "reference gaps cannot satisfy query coverage"
+            );
+        }
+        let mut ambiguous_read = b"A".repeat(98);
+        ambiguous_read.extend_from_slice(&b"N".repeat(52));
+        let mut p = placement(0, 0, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&ambiguous_read, &mut p);
+        assert!(p.strict.score > 0);
+        assert!(aligner
+            .arbitrate(&ambiguous_read, vec![p], 10, true)
+            .is_none());
+    }
+
+    #[test]
+    fn coverage_hyper_rescoring_can_promote_a_retained_full_candidate() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let mut read = b"A".repeat(80);
+        read.extend_from_slice(&b"G".repeat(70));
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 0, &[CigarOp::Match(80), CigarOp::SoftClip(70)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        assert!(full.strict.score < 0 && hyper_direction(&full).is_some());
+        let mut candidates = vec![full, short];
+        dedup_by_footprint(&mut candidates, read.len());
+        aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("retain a full candidate as hyperediting evidence before dedup");
+        assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(result.ea_ag, 70);
+    }
+
+    #[test]
+    fn coverage_mate_window_without_eligible_candidate_returns_none() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let mut read = b"A".repeat(98);
+        read.extend_from_slice(&b"G".repeat(52));
+        let mut win = aligner
+            .mate_window_placement(&read, 0, 100)
+            .expect("reduced-alphabet window search supplies a partial candidate");
+        aligner.rescore_strict(&read, &mut win);
+        assert!(!win.primary_eligible(read.len()));
+        let cache = CachedPlacements {
+            placements: Vec::new(),
+            n_seeds: 0,
+            genomic_any: false,
+        };
+        assert!(aligner
+            .align_read_with_mate(&read, 0, 100, Some(&cache))
+            .is_none());
+        let good = aligner
+            .align_read_with_mate(&b"A".repeat(150), 0, 100, Some(&cache))
+            .expect("eligible mate-window placements still work");
+        assert!(good.rescued);
+        assert_eq!(good.cigar, vec![CigarOp::Match(150)]);
+        assert!(good.mapq_of_checked() <= crate::mapq::PILEUP_GATE);
+    }
+
+    #[test]
+    fn coverage_dedup_fallback_is_independent_of_generator_order() {
+        let mut genome = b"A".repeat(1000);
+        genome[..30].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 70, &[CigarOp::SoftClip(70), CigarOp::Match(80)]);
+        let mut alternative = placement(0, 500, &[CigarOp::Match(99), CigarOp::SoftClip(51)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        aligner.rescore_strict(&read, &mut alternative);
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let pool = [full.clone(), short.clone(), alternative.clone()];
+            let mut candidates = order.map(|i| pool[i].clone()).to_vec();
+            dedup_by_footprint(&mut candidates, read.len());
+            let result = aligner
+                .arbitrate(&read, candidates, 10, true)
+                .expect("eligible");
+            assert_eq!(result.pos, 500);
+            assert_eq!(result.second_score, 160);
+            assert_eq!(result.n_cands, 2);
+        }
     }
 
     #[test]
