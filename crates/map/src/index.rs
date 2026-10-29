@@ -248,8 +248,14 @@ pub fn collect_anchors_into(
     seeds_hit
 }
 
-/// Evidence about seed lists omitted to keep a chaining round within budget.
-/// Additional ordinary context verification, not ordinary retained anchors.
+/// Same-domain background evidence for additional ordinary context proposals.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct ContextBackgroundBudget {
+    pub score: i32,
+    pub rejected_candidates: usize,
+}
+
+/// Additional context verification, not ordinary retained anchors.
 /// Its presence denotes a conservative, ungapped-only limited search.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct RepeatContextBudget {
@@ -263,6 +269,8 @@ pub struct RepeatContextBudget {
     pub positive_candidates: usize,
     pub retained_candidates: usize,
     pub omitted_candidates: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<ContextBackgroundBudget>,
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]

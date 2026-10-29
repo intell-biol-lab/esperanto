@@ -4,6 +4,13 @@
 
 ### Organization development
 
+- In `1.1.1-dev.18`, require additional ordinary repeat-context proposals to
+  beat the strict local score against constant A/C/G/T backgrounds. Retain old
+  candidate families and conservative MAPQ0; declare background score/rejection
+  counters and independent `map --no-context-background` ablation. Generated
+  both-strand and paired failures turn green while full low-complexity target
+  controls remain. Independent human qualification and adoption are separate.
+
 - In `1.1.1-dev.17`, propose bounded high-frequency ordinary context candidates
   after original chain failure. Preserve existing candidates/DP,verify legal
   local M/S hypotheses and propagate typed additional posting-budget evidence

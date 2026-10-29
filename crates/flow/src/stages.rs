@@ -449,6 +449,43 @@ pub fn map_stage_with_context_options(
     ),
     FlowError,
 > {
+    map_stage_with_background_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        true,
+    )
+}
+
+/// Independent context-background ablation, preserving prior public wrappers.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_background_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -459,6 +496,7 @@ pub fn map_stage_with_context_options(
     let mut config = AlignConfig::rna_default();
     config.fragment_endpoints = fragment_endpoints;
     config.repeat_context = repeat_context;
+    config.context_background = context_background;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,

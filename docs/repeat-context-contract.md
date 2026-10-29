@@ -1,5 +1,9 @@
 # Bounded ordinary repeat-context proposals (dev.17)
 
+Dev.18 additionally requires emitted proposals to beat a strict constant-base
+background; see [the background contract](context-background-contract.md).
+Its independent ablation restores the original proposal policy below.
+
 This is an unadopted development proposal, not a qualified release or a claim
 of mapper superiority. It uses the unchanged ordinary index and scoring model.
 

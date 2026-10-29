@@ -1,5 +1,10 @@
 # map — splice-aware read alignment
 
+Dev.18 tests additional context proposals against a constant-base background
+in the same strict score domain. `map --no-context-background` independently
+restores the dev17 policy. See [the contract](../../context-background-contract.md).
+This changes proposal qualification only; human adoption remains separate.
+
 The mapper aligns single-end or paired-end FASTQ reads to a `.paidx` genomic index and writes BAM alignments. RNA alignment uses minimizer seeds, chaining, splice-aware extension, and paired-end evidence.
 
 Dev.17 adds bounded ordinary high-frequency context proposals after failure of

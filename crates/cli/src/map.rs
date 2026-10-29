@@ -37,11 +37,14 @@ pub struct MapArgs {
     /// Disable additional ordinary high-frequency context proposals (ablation).
     #[arg(long)]
     no_repeat_context: bool,
+    /// Disable constant-base background competition for context proposals (ablation).
+    #[arg(long)]
+    no_context_background: bool,
 }
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_context_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_background_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -52,6 +55,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         a.candidate_diagnostics,
         !a.no_fragment_endpoints,
         !a.no_repeat_context,
+        !a.no_context_background,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -87,5 +91,20 @@ mod tests {
         .unwrap();
         assert!(!default.map.no_repeat_context);
         assert!(!default.map.no_fragment_endpoints);
+        assert!(!default.map.no_context_background);
+    }
+    #[test]
+    fn context_background_has_independent_cli_ablation() {
+        assert!(Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--no-context-background",
+        ])
+        .is_ok());
     }
 }

@@ -41,6 +41,29 @@ fn run_with_context(
     two_pass: bool,
     repeat_context: bool,
 ) -> Observed {
+    run_with_background(
+        name,
+        index,
+        pairs,
+        enabled,
+        lib,
+        two_pass,
+        repeat_context,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_background(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+    context_background: bool,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -61,6 +84,7 @@ fn run_with_context(
     let mut config = AlignConfig::rna_default();
     config.fragment_endpoints = enabled;
     config.repeat_context = repeat_context;
+    config.context_background = context_background;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),
@@ -92,6 +116,63 @@ fn run_with_context(
         rows,
         discoveries,
         library,
+    }
+}
+
+#[test]
+fn context_background_paired_refusal_preserves_unmapped_raw_evidence() {
+    let (index, fragment) = crate::align::background_tests::fixture(false);
+    let pair = crate::fragment::tests::pair(&fragment, [150, 150], 0);
+    let off = run_with_background(
+        "background-off",
+        &index,
+        &[pair.clone()],
+        true,
+        None,
+        false,
+        true,
+        false,
+    );
+    assert!(off.records.iter().all(|rec| !rec.flags().is_unmapped()));
+    assert!(off
+        .rows
+        .iter()
+        .all(|row| row["independent"]["seed_budget"]["repeat_context"]
+            .get("background")
+            .is_none()));
+    assert_eq!(
+        crate::fragment::infer(&pair[0], &pair[1])
+            .unwrap()
+            .fragment_length,
+        118
+    );
+    for two_pass in [false, true] {
+        let name = if two_pass {
+            "background-null-two-pass"
+        } else {
+            "background-null-one-pass"
+        };
+        let on = run_with_context(name, &index, &[pair.clone()], true, None, two_pass, true);
+        assert_eq!((on.records.len(), on.rows.len()), (2, 2));
+        for (mate, (rec, row)) in on.records.iter().zip(&on.rows).enumerate() {
+            assert!(
+                rec.flags().is_unmapped(),
+                "background-dominated pair must stay unresolved"
+            );
+            assert_eq!(row["pass2_primary_placed"], false);
+            assert_eq!(row["effective_read_length"], 118);
+            let bg = &row["independent"]["seed_budget"]["repeat_context"]["background"];
+            assert!(bg["score"].as_i64().unwrap() >= 152);
+            assert!(bg["rejected_candidates"].as_u64().unwrap() > 0);
+            assert_eq!(rec.sequence().iter().collect::<Vec<_>>(), pair[mate]);
+            assert_eq!(
+                rec.quality_scores().iter().collect::<Vec<_>>(),
+                (0..150)
+                    .map(|q| ((q + mate) % 41) as u8)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(rec.data().get(b"XF").unwrap().unwrap().as_int(), Some(118));
+        }
     }
 }
 

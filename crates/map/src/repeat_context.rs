@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use crate::align::{revcomp, MID_OCC_CAP, REFUSE_MIN_ALIGNED_FRAC};
 use crate::extend::{exempt_dir, CigarOp, ExtendParams};
-use crate::index::{unpack_pos, Index, RepeatContextBudget};
+use crate::index::{unpack_pos, ContextBackgroundBudget, Index, RepeatContextBudget};
 use crate::seed::{minimizers, SeedParams, Strand};
 
 pub(crate) const POSTING_BUDGET: usize = 20_000;
@@ -64,6 +64,31 @@ fn local(query: &[u8], reference: &[u8], ep: ExtendParams) -> Local {
     best
 }
 
+/// Best strict local score against a coordinate-free constant-base reference.
+/// This is a competing explanation, not a technical-origin classifier.
+fn background_score(query: &[u8], ep: ExtendParams) -> i32 {
+    b"ACGT"
+        .iter()
+        .map(|&base| {
+            let mut best = 0;
+            let mut score = 0;
+            for &q in query {
+                let s = if q == b'N' {
+                    0
+                } else if q == base {
+                    ep.match_score
+                } else {
+                    ep.mismatch
+                };
+                score = (score + s).max(0);
+                best = best.max(score);
+            }
+            best
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Positive local M/S proposals from a bounded union of complete hit lists.
 /// `None` means no additional search; `Some` is conservatively limited even
 /// when every selected list fits, because this family verifies ungapped
@@ -72,6 +97,15 @@ pub(crate) fn generate(
     index: &Index,
     query: &[u8],
     ep: ExtendParams,
+) -> Option<(Vec<Proposal>, RepeatContextBudget)> {
+    generate_with_background(index, query, ep, true)
+}
+
+pub(crate) fn generate_with_background(
+    index: &Index,
+    query: &[u8],
+    ep: ExtendParams,
+    background: bool,
 ) -> Option<(Vec<Proposal>, RepeatContextBudget)> {
     let k = index.params.k as usize;
     if k == 0 || k > 32 || query.len() < k || query.len() > MAX_QUERY {
@@ -92,6 +126,10 @@ pub(crate) fn generate(
         query_length: query.len(),
         eligible_seed_lists: seeds.len(),
         eligible_postings: seeds.iter().map(|(n, _)| n).sum(),
+        background: background.then(|| ContextBackgroundBudget {
+            score: background_score(query, ep),
+            rejected_candidates: 0,
+        }),
         ..RepeatContextBudget::default()
     };
     let rc = revcomp(query);
@@ -140,6 +178,12 @@ pub(crate) fn generate(
                 continue;
             }
             emitted.insert(key);
+            if let Some(background) = &mut budget.background {
+                if best.score <= background.score {
+                    background.rejected_candidates += 1;
+                    continue;
+                }
+            }
             budget.positive_candidates += 1;
             let mut cigar = Vec::with_capacity(3);
             if best.start > 0 {
@@ -183,6 +227,80 @@ pub(crate) fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_background_score_matches_exhaustive_subinterval_oracle() {
+        let mut state = 0x175831_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        assert_eq!(background_score(b"", ExtendParams::default()), 0);
+        for i in 0..2500 {
+            let n = (next() % 48 + 1) as usize;
+            let query: Vec<_> = (0..n).map(|_| b"ACGTN"[(next() % 5) as usize]).collect();
+            let ep = if i % 2 == 0 {
+                ExtendParams::default()
+            } else {
+                ExtendParams {
+                    match_score: 3,
+                    mismatch: -2,
+                    ..ExtendParams::default()
+                }
+            };
+            let mut expected = 0;
+            for &base in b"ACGT" {
+                for start in 0..n {
+                    let mut score = 0;
+                    for &q in &query[start..] {
+                        score += if q == b'N' {
+                            0
+                        } else if q == base {
+                            ep.match_score
+                        } else {
+                            ep.mismatch
+                        };
+                        expected = expected.max(score);
+                    }
+                }
+            }
+            assert_eq!(background_score(&query, ep), expected);
+            assert_eq!(background_score(&revcomp(&query), ep), expected);
+        }
+        // The best constant explanation can bridge a mismatch; it is not just
+        // a longest-run heuristic. N contributes neither score nor information.
+        assert_eq!(background_score(b"AAAACAAAA", ExtendParams::default()), 12);
+        assert_eq!(background_score(b"AAANAAA", ExtendParams::default()), 12);
+    }
+
+    #[test]
+    fn context_background_equality_rejects_and_counts_once_per_diagonal() {
+        let query = vec![b'A'; 15];
+        // Native sketch: one valid kmer per separated copy, no forced cap.
+        let repeated = [vec![b'N'; 32], query.clone(), vec![b'N'; 32]]
+            .concat()
+            .repeat(6000);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">repeat\n".as_slice(), &repeated, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        let (off, b0) =
+            generate_with_background(&index, &query, ExtendParams::default(), false).unwrap();
+        assert!(!off.is_empty());
+        assert_eq!(off[0].score, 30);
+        assert!(b0.background.is_none());
+        let (on, b1) = generate(&index, &query, ExtendParams::default()).unwrap();
+        assert!(on.is_empty(), "a constant-base tie provides no specificity");
+        let bg = b1.background.unwrap();
+        assert_eq!(bg.score, 30);
+        assert_eq!(bg.rejected_candidates, b0.positive_candidates);
+        assert_eq!(b1.positive_candidates, 0);
+        assert_eq!(b1.scanned_postings, b0.scanned_postings);
+        assert_eq!(b1.unique_intervals, b0.unique_intervals);
+    }
 
     #[test]
     fn local_context_ties_keep_neutral_edits_but_not_ordinary_or_ambiguous_tails() {

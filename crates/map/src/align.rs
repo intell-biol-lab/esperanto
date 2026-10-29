@@ -63,6 +63,8 @@ pub struct AlignConfig {
     pub fragment_endpoints: bool,
     /// Additional bounded high-frequency ordinary context hypotheses.
     pub repeat_context: bool,
+    /// Require additional context proposals to beat a constant-base background.
+    pub context_background: bool,
 }
 
 impl Default for AlignConfig {
@@ -75,6 +77,7 @@ impl Default for AlignConfig {
             rna: false,
             fragment_endpoints: false,
             repeat_context: false,
+            context_background: false,
         }
     }
 }
@@ -89,6 +92,7 @@ impl AlignConfig {
             rna: true,
             fragment_endpoints: true,
             repeat_context: true,
+            context_background: true,
         }
     }
 }
@@ -1290,9 +1294,12 @@ impl<'a> Aligner<'a> {
                     && p.cigar == [CigarOp::Match(read_len)]
             })
         {
-            if let Some((proposals, context)) =
+            let context = if cfg.context_background {
                 crate::repeat_context::generate(self.index, seq, cfg.extend)
-            {
+            } else {
+                crate::repeat_context::generate_with_background(self.index, seq, cfg.extend, false)
+            };
+            if let Some((proposals, context)) = context {
                 seed_budget
                     .get_or_insert_with(Default::default)
                     .repeat_context = Some(context);
@@ -5130,3 +5137,6 @@ mod tests {
         assert_eq!(hit.junctions[0].junction.end, 117);
     }
 }
+
+#[cfg(test)]
+pub(crate) mod background_tests;
