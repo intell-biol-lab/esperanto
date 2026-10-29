@@ -124,3 +124,21 @@ Dev.7 considers both transcript strands in that same refinement search.
 These synthetic mechanism fixes require independent full-seed/event review;
 they do not establish global recall or calibrated MAPQ. Historical dev.6
 NO-GO and its lost event remain preserved research evidence.
+
+## Non-N technical tails and endpoint tie consistency (dev.7 review)
+
+Dev.7's zero-score flank scan admitted ordinary mismatches, unlike common
+arbitration's preference for fewer ordinary mismatches before coverage. This
+could absorb a neutral technical flank solely to add query coverage. Dev.8
+stops at such mismatches, retaining only matches and A>G/T>C columns up to the
+longest neutral endpoint before that barrier. No score, model or eligibility
+threshold changes.
+
+The original development review found 499 reads adding nonbody bases without
+a correct-body gain; 472 had new ordinary-mismatch columns and 27 only had
+matching/edit-direction columns. These are diagnostic cohorts, not a promised
+count of corrected reads. Positive-score accidental technical alignments,
+technical sequences identical to terminal edit evidence, incomplete mapping
+and population MAPQ calibration remain unresolved. Five new synthetic tests
+include explicit positive-score and identical-input limits. Full independent
+replay must determine the actual per-read/body/event costs of the change.

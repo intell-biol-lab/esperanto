@@ -147,3 +147,28 @@ Five synthetic tests cover neutral Ag/Tc flanks at both ends, negative/N
 controls, input-order invariant same-locus ties, annotated/novel 1-2 bp
 boundary competition on both motif/read orientations, and an end-to-end
 spliced terminal-edit competition with both mates. Four fail on dev.6.
+
+## Ordinary-mismatch barrier for neutral outer flanks (dev.8)
+
+The dev.7 endpoint convention omitted the ordinary-mismatch part of common
+arbitration. A zero-net-score extension with additional ordinary mismatches
+must not beat clipping just by covering more query bases. Stop an outer-flank
+scan at an ordinary mismatch or an ambiguous base; never cross that barrier
+to find a more distant zero-net-score endpoint. Keep a valid neutral edit
+block reached before the barrier. Exact matches and directional A>G/T>C
+columns use the shared `exempt_dir` classification, independently of which
+extension pass currently exempts one editing direction.
+
+This changes only the shared finish routine's tie normalization. Positive
+score extensions, substitution/gap constants, coverage eligibility, splice
+refinement, model and evaluator remain unchanged. No adapter identifier,
+biological-origin label, human coordinate or new length/penalty threshold
+enters the mapper.
+
+Synthetic non-N adapter, poly(A) and deterministic random-tail competitions
+cover left/right ends, Off/Ag/Tc scoring, and scalar/packed dispatch. Separate
+controls preserve terminal editing and positive-score ordinary alignments.
+Identical sequence/reference inputs with different body/technical labels
+remain indistinguishable: sequence-only tie handling cannot guarantee perfect
+technical-tail specificity. Human replay and independent held-out controls
+are separate gates.

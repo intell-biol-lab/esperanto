@@ -989,15 +989,20 @@ fn finish_extension(
     let mut read_end = read_start + rm;
     if score > 0 {
         // Local traceback and end trimming choose a shorter path at zero
-        // score. Prefer more informative query coverage when a diagonal
-        // outer flank has exactly the same score. Stop at ambiguous bases;
-        // they must not turn free clipping into fictitious coverage.
+        // score. Apply the common decision order: do not introduce ordinary
+        // mismatches on a score tie, then prefer informative query coverage.
+        // An editing-direction substitution is not an ordinary mismatch even
+        // when this extension pass scores it strictly. Ambiguous bases stop
+        // the scan as well; neither barrier may be crossed to a later tie.
+        let neutral_column = |q: usize, r: usize| {
+            q < 4 && r < 4 && (q == r || exempt_dir(b"ACGT"[r], b"ACGT"[q]).is_some())
+        };
         let mut neutral_left = 0u32;
         let mut delta = 0i32;
         for n in 1..=read_start.min(ref_start) {
             let q = read_codes[(read_start - n) as usize];
             let r = ref_codes[(ref_start - n) as usize];
-            if q >= 4 || r >= 4 {
+            if !neutral_column(q, r) {
                 break;
             }
             delta += core.lut.score(q, r) as i32;
@@ -1016,7 +1021,7 @@ fn finish_extension(
         for n in 0..available {
             let q = read_codes[(read_end + n) as usize];
             let r = ref_codes[(ref_end + n) as usize];
-            if q >= 4 || r >= 4 {
+            if !neutral_column(q, r) {
                 break;
             }
             delta += core.lut.score(q, r) as i32;
@@ -2090,6 +2095,191 @@ mod tests {
             assert_eq!(ext.ref_start, 3);
             assert_eq!(ext.cigar, vec![CigarOp::SoftClip(3), CigarOp::Match(20)]);
         }
+    }
+
+    #[test]
+    fn neutral_non_n_technical_tails_do_not_buy_coverage_with_ordinary_mismatches() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        let tails: [&[u8]; 3] = [
+            b"AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+            b"AAAAAAAAAAAAAAAAAAAA",
+            b"CAGTCGTACGATCTAG",
+        ];
+        for tail in tails {
+            for left in [true, false] {
+                let mut flank = if left {
+                    tail[tail.len() - 3..].to_vec()
+                } else {
+                    tail[..3].to_vec()
+                };
+                let mismatch = if left { 2 } else { 0 };
+                flank[mismatch] = *b"ACGT"
+                    .iter()
+                    .find(|&&r| {
+                        r != flank[mismatch]
+                            && exempt_dir(r, tail[if left { tail.len() - 1 } else { 0 }]).is_none()
+                    })
+                    .unwrap();
+                let padding = tail.len() + 2;
+                let (mut reference, mut query) = (vec![b'N'; padding], Vec::new());
+                if left {
+                    reference.extend_from_slice(&flank);
+                    query.extend_from_slice(tail);
+                }
+                reference.extend_from_slice(core);
+                query.extend_from_slice(core);
+                if !left {
+                    reference.extend_from_slice(&flank);
+                    query.extend_from_slice(tail);
+                }
+                reference.extend(vec![b'N'; padding]);
+                for edit_dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    for lowercase in [false, true] {
+                        let (mut r, mut q) = (reference.clone(), query.clone());
+                        if lowercase {
+                            r.make_ascii_lowercase();
+                            q.make_ascii_lowercase();
+                        }
+                        let ext = extend(
+                            &q,
+                            &r,
+                            &ExtendParams {
+                                edit_dir,
+                                ..ExtendParams::default()
+                            },
+                            &mut ExtendBuffer::default(),
+                        );
+                        assert_eq!(ext.score, 40);
+                        assert_eq!(ext.ref_start, (padding + if left { 3 } else { 0 }) as u32);
+                        assert_eq!(
+                            ext.cigar,
+                            if left {
+                                vec![CigarOp::SoftClip(tail.len() as u32), CigarOp::Match(20)]
+                            } else {
+                                vec![CigarOp::Match(20), CigarOp::SoftClip(tail.len() as u32)]
+                            },
+                            "same-score ordinary mismatch must not buy tail coverage: left={left}, edit={edit_dir:?}, scalar={lowercase}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_flank_scan_does_not_cross_an_ordinary_mismatch_to_reach_a_later_tie() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        // From the core outward: T>C (-4), A=A (+2), A=A (+2),
+        // T>G (-4), A=A (+2), A=A (+2). The first neutral edit block
+        // remains admissible; a second neutral ordinary block must not.
+        let mut reference = b"NNAATAAT".to_vec();
+        reference.extend_from_slice(core);
+        let mut query = b"NNAAGAAC".to_vec();
+        query.extend_from_slice(core);
+        let ext = extend(
+            &query,
+            &reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        assert_eq!(ext.score, 40);
+        assert_eq!(ext.read_start, 5);
+        assert_eq!(ext.ref_start, 5);
+        assert_eq!(ext.cigar, vec![CigarOp::SoftClip(5), CigarOp::Match(23)]);
+    }
+
+    #[test]
+    fn terminal_edit_ties_survive_all_edit_modes_and_scalar_dispatch() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        for (rf, qf, direction) in [(b"AAT", b"AAC", EditDir::Tc), (b"CCA", b"CCG", EditDir::Ag)] {
+            for left in [true, false] {
+                for edit_dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    for lowercase in [false, true] {
+                        let (mut r, mut q) = (b"NN".to_vec(), b"NN".to_vec());
+                        if left {
+                            r.extend_from_slice(rf);
+                            q.extend_from_slice(qf);
+                        }
+                        r.extend_from_slice(core);
+                        q.extend_from_slice(core);
+                        if !left {
+                            r.extend(rf.iter().rev());
+                            q.extend(qf.iter().rev());
+                        }
+                        r.extend_from_slice(b"NN");
+                        q.extend_from_slice(b"NN");
+                        if lowercase {
+                            r.make_ascii_lowercase();
+                            q.make_ascii_lowercase();
+                        }
+                        let ext = extend(
+                            &q,
+                            &r,
+                            &ExtendParams {
+                                edit_dir,
+                                ..ExtendParams::default()
+                            },
+                            &mut ExtendBuffer::default(),
+                        );
+                        assert_eq!(ext.score, 40 + if edit_dir == direction { 4 } else { 0 });
+                        assert_eq!(ext.ref_start, 2);
+                        assert_eq!(
+                            ext.cigar,
+                            vec![
+                                CigarOp::SoftClip(2),
+                                CigarOp::Match(23),
+                                CigarOp::SoftClip(2),
+                            ]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_edit_and_technical_origin_sequences_remain_indistinguishable() {
+        let reference = b"NNAATGACGATCGGATACGCTAGCA";
+        let same_sequence = b"NNAACGACGATCGGATACGCTAGCA";
+        let body_interpretation = extend(
+            same_sequence,
+            reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        // No origin label is an aligner input. Relabeling the same AAC as
+        // technical cannot justify a different sequence-based decision.
+        let technical_interpretation = extend(
+            same_sequence,
+            reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        assert_eq!(body_interpretation.score, technical_interpretation.score);
+        assert_eq!(body_interpretation.cigar, technical_interpretation.cigar);
+        assert_eq!(
+            body_interpretation.cigar,
+            vec![CigarOp::SoftClip(2), CigarOp::Match(23)]
+        );
+    }
+
+    #[test]
+    fn positive_score_ordinary_terminal_alignment_is_not_a_neutral_tie() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        let mut reference = b"NNAAAC".to_vec();
+        reference.extend_from_slice(core);
+        let mut query = b"NNAAAA".to_vec();
+        query.extend_from_slice(core);
+        let ext = extend(
+            &query,
+            &reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        // Three matches and one ordinary mismatch add +2. The tie
+        // convention must not become an unrequested terminal penalty.
+        assert_eq!(ext.score, 42);
+        assert_eq!(ext.cigar, vec![CigarOp::SoftClip(2), CigarOp::Match(24)]);
     }
 
     /// The i16 sentinel contract: exact-equality NEG with a max() clamp —

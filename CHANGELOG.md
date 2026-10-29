@@ -24,6 +24,14 @@
 
 ### Fixed
 
+- In `1.1.1-dev.8`, apply the existing score/ordinary-mismatch decision order
+  to score-neutral outer-flank normalization. Stop before ordinary mismatches
+  instead of extending through them to a later score tie. Preserve A>G/T>C
+  terminal evidence using the existing substitution classification. This
+  prevents neutral non-N technical tails from buying coverage at the cost
+  of extra ordinary mismatches. Positive-score tails and identical-sequence
+  origin ambiguity remain separate qualification limits.
+
 - In `1.1.1-dev.7`, retain score-neutral informative diagonal outer flanks
   after local extension, preserving terminal editing evidence on score ties
   while keeping negative and ambiguous clips. Same-score, same-mismatch
