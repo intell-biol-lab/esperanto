@@ -623,11 +623,9 @@ fn run_band<T: Acc>(
 
     let (offset, num, den, half) = match band_spec {
         Some((o, nm, dn, h)) => (o, nm, dn.max(1), h.max(0)),
-        // Full window: half = n covers every diagonal whenever m <= n.
-        None => {
-            debug_assert!(m <= n);
-            (0, 1, 1, n)
-        }
+        // Full window: each row's center is clamped into [1,n] below.
+        // Half=n therefore covers every column even for a longer read.
+        None => (0, 1, 1, n),
     };
     debug_assert!(num == 1 && den == 1);
     let width = (2 * half + 1) as usize;
@@ -1129,7 +1127,8 @@ mod avx2_full {
         if m == 0 || n == 0 {
             return (empty_extension(m as u32), TouchRec::default());
         }
-        debug_assert!(m <= n);
+        // Rectangular local alignment is valid with either dimension longer;
+        // the anti-diagonal bounds below cover every cell in [1,m]×[1,n].
 
         // LUT-derived substitution constants. The vector `add` assumes the
         // constant operand is never the sentinel; default scoring never is,
@@ -2386,6 +2385,38 @@ mod tests {
         assert_touch_same(&sim_touch, &sca_touch, ctx);
     }
 
+    #[test]
+    fn full_matrix_short_reference_covers_late_query_matches() {
+        // A local reference window can be shorter than the read, especially
+        // a stitched splice pseudo-reference. Full matrix must include late
+        // query rows, not silently turn into a diagonal band of half-width n.
+        for (m, n) in [(4, 1), (33, 7), (80, 15), (150, 55), (301, 31)] {
+            let rf: Vec<u8> = (0..n).map(|i| b"ACGT"[i % 4]).collect();
+            let read = [vec![b'N'; m - n], rf.clone()].concat();
+            let params = ExtendParams::default();
+            let core = CoreParams::new(&params);
+            let mut buf = ExtendBuffer::default();
+            let (scalar, _) = run_band(&read, &rf, &core, &mut buf.packed, None);
+            assert_eq!(scalar.read_start, (m - n) as u32);
+            assert_eq!(scalar.read_end, m as u32);
+            assert_eq!(scalar.ref_start, 0);
+            assert_eq!(scalar.score, (2 * n) as i32);
+            assert_eq!(
+                scalar.cigar,
+                vec![CigarOp::SoftClip((m - n) as u32), CigarOp::Match(n as u32)]
+            );
+            let (wide, _) = run_band(&read, &rf, &core, &mut buf.scalar, None);
+            assert_ext_same(&scalar, &wide, "short reference wide");
+            let dispatched = extend(&read, &rf, &params, &mut buf);
+            assert_ext_same(&scalar, &dispatched, "short reference dispatch");
+            #[cfg(target_arch = "x86_64")]
+            if avx2_full::available() {
+                let (simd, _) = avx2_full::run(&read, &rf, &core, &mut buf.packed);
+                assert_ext_same(&scalar, &simd, "short reference simd fallback");
+            }
+        }
+    }
+
     /// Randomized ACGTN read/window pairs across lengths (including edge
     /// shapes m = 1, n < 16, n not a multiple of 16), all three editing
     /// directions: the AVX2 kernel must return the exact scalar Extension.
@@ -2407,12 +2438,9 @@ mod tests {
         let mut cases = 0usize;
         for &m in lens_m.iter() {
             for &n in lens_n.iter() {
-                if n < m {
-                    continue;
-                }
                 for rep in 0..3 {
                     let read = rand_seq(&mut rng, m);
-                    let win = if rep == 2 {
+                    let win = if rep == 2 || n < m {
                         rand_seq(&mut rng, n)
                     } else {
                         rand_window(&mut rng, &read, n)
@@ -2455,11 +2483,11 @@ mod tests {
         }
         let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
         for m in 14usize..=20 {
-            for n in m..=20 {
-                // production contract: read fits the window (m <= n)
+            for n in 1..=20 {
+                // Both rectangular orientations are valid local windows.
                 for rep in 0..4 {
                     let read = rand_seq(&mut rng, m);
-                    let win = if rep & 1 == 0 {
+                    let win = if rep & 1 == 0 && n >= m {
                         rand_window(&mut rng, &read, n)
                     } else {
                         rand_seq(&mut rng, n)
