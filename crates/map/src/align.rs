@@ -124,6 +124,8 @@ pub(crate) struct StrictScore {
     pub clipped: u32,
     /// Intron (RefSkip) count.
     pub n_splice: u32,
+    /// Junction prior contribution, separate from base/indel evidence.
+    pub splice_score: i32,
 }
 
 /// One placement candidate from either layer, pending strict arbitration.
@@ -755,6 +757,7 @@ impl<'a> Aligner<'a> {
                     ro += *n;
                 }
                 CigarOp::RefSkip(n) => {
+                    let before = score;
                     // Annotated introns receive the known-junction bonus on
                     // either read orientation. Signal and length penalties
                     // apply to novel junctions only.
@@ -779,6 +782,7 @@ impl<'a> Aligner<'a> {
                         score += signal - intron_length_penalty(*n);
                     }
                     s.n_splice += 1;
+                    s.splice_score += score - before;
                     rf += *n;
                 }
             }
@@ -1176,6 +1180,38 @@ impl<'a> Aligner<'a> {
         if cfg.rna {
             let min_intron = SpliceParams::default().min_intron;
             let segs = segment_chain(chain, k, min_intron);
+            if segs.len() >= 2 {
+                // A repeat-derived anchor can attach to a genuine continuous
+                // placement and manufacture a plausible intron. A successful
+                // splice must not suppress the continuous explanation at any
+                // of its collinear segments. Longer segments get the shared
+                // extension budget first.
+                let mut ordered = segs.clone();
+                ordered.sort_by_key(|s| std::cmp::Reverse(s.q_end - s.q_start));
+                for seg in ordered {
+                    let segment = Chain {
+                        contig: chain.contig,
+                        strand: chain.strand,
+                        score: chain.score,
+                        anchors: chain
+                            .anchors
+                            .iter()
+                            .copied()
+                            .filter(|a| {
+                                a.qpos >= seg.q_start
+                                    && a.qpos + k <= seg.q_end
+                                    && a.rpos >= seg.r_start
+                                    && a.rpos + k <= seg.r_end
+                            })
+                            .collect(),
+                    };
+                    if !segment.anchors.is_empty() {
+                        self.extend_unspliced_chain(
+                            seq, &segment, false, rc_storage, dp_budget, out,
+                        );
+                    }
+                }
+            }
             if segs.len() == 2 && is_best {
                 // Intron-chain fast path: verified intra-chain intron
                 // algorithm, with read-aware boundary refinement.
@@ -1257,6 +1293,22 @@ impl<'a> Aligner<'a> {
             }
         }
 
+        self.extend_unspliced_chain(seq, chain, fast_lane_ok, rc_storage, dp_budget, out);
+    }
+
+    /// Continuous explanation of one collinear chain, without splice search.
+    fn extend_unspliced_chain(
+        &mut self,
+        seq: &[u8],
+        chain: &Chain,
+        fast_lane_ok: bool,
+        rc_storage: &[u8],
+        dp_budget: &mut usize,
+        out: &mut Vec<Placement>,
+    ) {
+        let cfg = self.config;
+        let k = cfg.seed.k;
+        let read_len = seq.len() as u32;
         // Unspliced interpretation — fast lane (decisive best chain only:
         // zero-mismatch Kadane, point-equivalent to the affine DP).
         if fast_lane_ok {
@@ -1485,8 +1537,63 @@ impl<'a> Aligner<'a> {
         Some(aln)
     }
 
-    /// Split rescue (both tails; success rewrites CIGAR/junctions/pos).
+    /// Compare rescue proposals with the primary in the same strict domain.
+    /// Extension totals and genomic-scan ranks are not read-placement scores.
+    /// The existing split cost is an acceptance margin; a library bonus alone
+    /// must not rewrite an equally good continuous sequence explanation.
+    fn select_rescue(
+        &mut self,
+        seq: &[u8],
+        original: ReadAlignment,
+        mut proposal: ReadAlignment,
+    ) -> ReadAlignment {
+        if original.pos == proposal.pos && original.cigar == proposal.cigar {
+            return original;
+        }
+        let mut before = Placement::from_genomic(
+            original.contig,
+            original.pos,
+            original.strand,
+            original.cigar.clone(),
+            original.junctions.clone(),
+            original.chain_score,
+            original.score,
+        );
+        let mut after = Placement::from_genomic(
+            proposal.contig,
+            proposal.pos,
+            proposal.strand,
+            proposal.cigar.clone(),
+            proposal.junctions.clone(),
+            proposal.chain_score,
+            proposal.score,
+        );
+        let rc_storage = self.take_rc(seq);
+        let query = if original.strand == Strand::Minus {
+            &rc_storage
+        } else {
+            seq
+        };
+        self.rescore_strict(query, &mut before);
+        self.rescore_strict(query, &mut after);
+        self.scratch.rc = rc_storage;
+        let sequence_gain = after.strict.score - after.strict.splice_score
+            > before.strict.score - before.strict.splice_score;
+        if sequence_gain && after.strict.score > before.strict.score + crate::splice::SPLIT_COST {
+            proposal.score = after.strict.score;
+            proposal
+        } else {
+            original
+        }
+    }
+
+    /// Split rescue (both tails), accepted against the original primary.
     fn apply_split_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
+        let proposal = self.propose_split_rescue(seq, aln.clone());
+        self.select_rescue(seq, aln, proposal)
+    }
+
+    fn propose_split_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
         let empty_lib = JunctionLib::default();
         // Query in extension orientation: (RC'd if minus) read; tails operate
         // in extension coordinates; result CIGAR is plus-reference isomorphic.
@@ -1619,7 +1726,12 @@ impl<'a> Aligner<'a> {
 
     /// Library-driven run-through reinterpretation (span.rs; skipped without
     /// a library or when the alignment is already spliced).
-    fn apply_span_rescue(&mut self, seq: &[u8], mut aln: ReadAlignment) -> ReadAlignment {
+    fn apply_span_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
+        let proposal = self.propose_span_rescue(seq, aln.clone());
+        self.select_rescue(seq, aln, proposal)
+    }
+
+    fn propose_span_rescue(&mut self, seq: &[u8], mut aln: ReadAlignment) -> ReadAlignment {
         let rc_storage = self.take_rc(seq);
         let Some(lib) = self.jlib.as_deref() else {
             self.scratch.rc = rc_storage;
@@ -2213,6 +2325,231 @@ mod tests {
         assert_eq!(result.cigar, original);
         assert_eq!(result.score, 80);
         assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn marginal_short_tail_rescue_does_not_replace_the_primary() {
+        // AT..AC intron of 22kb. Moving two already matched body bases
+        // permits six clipped bases to match, but the existing signal/length
+        // score improves by only three: below the split rewrite cost.
+        let seq = format!(
+            "{}{}AT{}ACATGGGGGG{}",
+            "A".repeat(20),
+            "C".repeat(38),
+            "T".repeat(21996),
+            "A".repeat(60)
+        );
+        let read = format!("{}ATGGGGGGCC", "C".repeat(38));
+        let mut aligner = aligner_on(&seq);
+        let original = vec![CigarOp::Match(40), CigarOp::SoftClip(8)];
+        let aln = ReadAlignment {
+            pos: 20,
+            score: 80,
+            cigar: original.clone(),
+            ..Default::default()
+        };
+        let result = aligner.apply_split_rescue(read.as_bytes(), aln);
+        assert_eq!(
+            result.cigar, original,
+            "weak tail must not create a discovery: {result:?}"
+        );
+        assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn span_rescue_requires_sequence_gain_beyond_the_junction_prior() {
+        // Both the contiguous GT and the acceptor GT exactly explain the
+        // same two bases. Library support is a prior, not extra read evidence.
+        let seq = format!(
+            "{}GT{}AGGT{}",
+            "C".repeat(60),
+            "T".repeat(96),
+            "A".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}GT", "C".repeat(40));
+        let original = vec![CigarOp::Match(42)];
+        let aln = ReadAlignment {
+            pos: 20,
+            score: 84,
+            cigar: original.clone(),
+            ..Default::default()
+        };
+        let result = aligner.apply_span_rescue(read.as_bytes(), aln);
+        assert_eq!(result.cigar, original);
+        assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn supported_span_rescue_keeps_a_genuine_sequence_improvement() {
+        let seq = format!(
+            "{}GT{}AGGG{}",
+            "C".repeat(60),
+            "T".repeat(96),
+            "A".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}GG", "C".repeat(40));
+        let aln = ReadAlignment {
+            pos: 20,
+            cigar: vec![CigarOp::Match(42)],
+            ..Default::default()
+        };
+        let result = aligner.apply_span_rescue(read.as_bytes(), aln);
+        assert_eq!(
+            result.cigar,
+            vec![CigarOp::Match(40), CigarOp::RefSkip(100), CigarOp::Match(2)]
+        );
+        assert_eq!(result.junctions.len(), 1);
+    }
+
+    #[test]
+    fn rescue_margin_uses_strict_scores_in_both_read_orientations() {
+        let seq = format!("{}GC{}AG{}", "C".repeat(60), "T".repeat(96), "G".repeat(60));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for tail in [5, 6] {
+                let query = format!("{}{}", "C".repeat(40), "G".repeat(tail)).into_bytes();
+                let read = if strand == Strand::Minus {
+                    revcomp(&query)
+                } else {
+                    query
+                };
+                let mut aligner = aligner_on(&seq);
+                let primary = ReadAlignment {
+                    pos: 20,
+                    strand,
+                    score: 80,
+                    cigar: vec![CigarOp::Match(40), CigarOp::SoftClip(tail as u32)],
+                    ..Default::default()
+                };
+                let candidate = ReadAlignment {
+                    pos: 20,
+                    strand,
+                    score: 10000, // arbitrary producer domain
+                    cigar: vec![
+                        CigarOp::Match(40),
+                        CigarOp::RefSkip(100),
+                        CigarOp::Match(tail as u32),
+                    ],
+                    junctions: vec![RefinedJunction {
+                        junction: Junction {
+                            contig: 0,
+                            start: 60,
+                            end: 160,
+                            minus_strand: strand == Strand::Minus,
+                        },
+                        signal: SpliceSignal::GcAg,
+                        known_support: 0,
+                    }],
+                    ..Default::default()
+                };
+                let result = aligner.select_rescue(&read, primary, candidate);
+                if tail == 5 {
+                    // 90 base score + 2 motif - 8 length = 84. The four-point
+                    // improvement only ties the existing rewrite cost.
+                    assert!(result.junctions.is_empty());
+                    assert_eq!(result.score, 80);
+                } else {
+                    assert_eq!(result.junctions.len(), 1);
+                    assert_eq!(result.score, 86);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_chain_keeps_the_contiguous_interpretation_of_each_exon() {
+        // A repeat-derived first anchor joins a much stronger downstream
+        // segment. Splice construction must not hide a full-length contiguous
+        // placement at that segment; strict arbitration, not generation
+        // order or mate fallback, decides which explanation wins.
+        let mut state = 0x6a09e667u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut genome = random(16000);
+        let mut read = random(150);
+        read[47..51].copy_from_slice(b"AGGC");
+        genome[12000..12150].copy_from_slice(&read);
+        genome[2000..2049].copy_from_slice(&read[..49]);
+        genome[2000..2008].fill(b'N');
+        genome[2012] = b"ACGT".iter().copied().find(|&b| b != read[12]).unwrap();
+        genome[2023] = b"ACGT".iter().copied().find(|&b| b != read[23]).unwrap();
+        genome[2049..2051].copy_from_slice(b"GC");
+        // One A>G substitution at the correct locus.
+        genome[12030] = b'A';
+        read[30] = b'G';
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut anchors = vec![crate::seed::Anchor {
+            qpos: 35,
+            rpos: 2035,
+            contig: 0,
+            strand: Strand::Plus,
+        }];
+        for q in [53, 60, 83, 95, 106, 118] {
+            anchors.push(crate::seed::Anchor {
+                qpos: q,
+                rpos: 12000 + q,
+                contig: 0,
+                strand: Strand::Plus,
+            });
+        }
+        let chain = Chain {
+            contig: 0,
+            strand: Strand::Plus,
+            anchors,
+            score: 90,
+        };
+        let mut candidates = Vec::new();
+        aligner.extend_chain(
+            &read,
+            &crate::seed::minimizers(&read, aligner.config.seed),
+            &chain,
+            true,
+            false,
+            &revcomp(&read),
+            &mut 8,
+            &mut candidates,
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|p| p.cigar.iter().any(|op| matches!(op, CigarOp::RefSkip(_)))),
+            "fixture must also produce a spliced interpretation"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|p| p.pos == 12000 && p.cigar == vec![CigarOp::Match(150)]),
+            "successful splicing must not suppress the contiguous candidate"
+        );
+        for p in &mut candidates {
+            aligner.rescore_strict(&read, p);
+        }
+        dedup_by_footprint(&mut candidates);
+        sort_placements(&mut candidates);
+        assert_eq!(candidates[0].pos, 12000);
+        assert_eq!(candidates[0].cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(candidates[0].strict.score, 294);
     }
 
     #[test]

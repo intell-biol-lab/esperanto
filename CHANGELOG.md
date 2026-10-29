@@ -24,6 +24,14 @@
 
 ### Fixed
 
+- In `1.1.1-dev.3`, split/span rescue proposals are compared with their primary
+  using strict read-placement scores. A rewrite must improve sequence evidence
+  and exceed the existing split cost; a junction prior alone cannot displace an
+  equally good contiguous match. Segmented chains also retain the continuous
+  interpretation at each collinear segment even when splice construction
+  succeeds. This prevents a repeat-derived splice from hiding the better
+  contiguous placement before arbitration. Scoring constants and model weights
+  are unchanged; candidate generation and rescue eligibility change.
 - In `1.1.1-dev.2`, splice-tail and run-through rescue require both sides to
   meet at the declared query and reference boundaries before accepting a
   stitched CIGAR. Invalid local-extension seams fall back to the original

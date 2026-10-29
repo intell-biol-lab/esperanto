@@ -49,3 +49,21 @@ dynamic-programming implementation: it can reject a local optimum even when a
 different boundary-constrained alignment could be valid. Unit tests establish
 the construction behavior; named human reruns and independent scoring establish
 only the qualification and effects observed on those development inputs.
+
+## Rescue arbitration regressions found during dev.2 review
+
+Full-seed, sequence-filtered diagnostics identified a weak novel-tail proposal
+that seeded a second-pass junction prior, a perfect contiguous read rewritten
+solely by that prior, and a repeat-derived segmented chain whose successful
+splice suppressed the correct continuous alternative. The dev.3 candidate
+adds strict proposal-versus-primary acceptance with the existing rewrite cost,
+requires actual sequence evidence gain, and generates continuous segment
+alternatives alongside splices. Pure synthetic regressions fail on dev.2
+before this change. No human read data are included in the public repository.
+
+The research workspace retains exact instrumented patches and full-seed
+receipts; instrumentation was checked against every uninstrumented primary.
+Dev.3 qualification, residual regressions and adoption must be assessed on its
+own named outputs, independently of the dev.2 interface result. This remains
+development software; no general mapping-accuracy or biological claim follows
+from these mechanism tests.
