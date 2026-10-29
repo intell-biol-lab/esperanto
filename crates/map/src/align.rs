@@ -88,9 +88,8 @@ pub const REFUSE_MIN_ALIGNED_FRAC: f64 = 0.66;
 /// mid-occurrence seeding round runs (see `genomic_candidates`).
 pub const MID_ROUND_MIN_COVERAGE: f64 = 0.6;
 
-/// Anchor budget for the mid-occurrence round; beyond it the round is
-/// skipped rather than chained (chaining cost grows with the square of the
-/// anchors sharing a contig and strand).
+/// Anchor budget for the mid-occurrence round. On overflow, admit whole
+/// seed hit lists, rarest first, and mark the search incomplete (MAPQ 0).
 pub const MID_ROUND_MAX_ANCHORS: usize = 20_000;
 
 /// Half-width of the mate-anchored window, on top of the insert estimate
@@ -224,6 +223,7 @@ impl Placement {
 pub(crate) struct GenomicBatch {
     pub placements: Vec<Placement>,
     pub n_seeds: usize,
+    pub seed_budget: Option<crate::index::AnchorBudget>,
 }
 
 /** Per-thread aligner state (reuses DP buffers).
@@ -270,16 +270,24 @@ pub struct CachedPlacements {
     placements: Vec<Placement>,
     n_seeds: usize,
     genomic_any: bool,
+    seed_budget: Option<crate::index::AnchorBudget>,
 }
 
 impl CachedPlacements {
+    pub(crate) fn seed_search_limited(&self) -> bool {
+        self.seed_budget.is_some_and(|b| b.limited())
+    }
+
     pub(crate) fn diagnostic_pool(
         &self,
         index: &Index,
         read_len: usize,
         stage: &'static str,
     ) -> crate::diagnostics::CandidatePool {
-        crate::diagnostics::CandidatePool::capture(index, read_len, &self.placements, stage)
+        let mut pool =
+            crate::diagnostics::CandidatePool::capture(index, read_len, &self.placements, stage);
+        pool.seed_budget = self.seed_budget;
+        pool
     }
 }
 
@@ -399,23 +407,34 @@ impl<'a> Aligner<'a> {
         &mut self,
         seq: &[u8],
     ) -> (Option<ReadAlignment>, Option<CachedPlacements>) {
-        let Some((placements, n_seeds, genomic_any)) = self.scored_placements(seq) else {
+        let Some((placements, n_seeds, genomic_any, seed_budget)) = self.scored_placements(seq)
+        else {
             return (None, None);
         };
         let cache = CachedPlacements {
             placements: placements.clone(),
             n_seeds,
             genomic_any,
+            seed_budget,
         };
         (
-            self.arbitrate(seq, placements, n_seeds, genomic_any),
+            self.arbitrate_with_budget(seq, placements, n_seeds, genomic_any, seed_budget),
             Some(cache),
         )
     }
 
     /// Collect, strictly rescore, coverage-class dedup and order the placements of
-    /// a read from both layers. Returns None when no layer produced any candidate.
-    fn scored_placements(&mut self, seq: &[u8]) -> Option<(Vec<Placement>, usize, bool)> {
+    /// a read from both layers. Retains an empty pool when an incomplete seed
+    /// search must be propagated to later mate-window arbitration.
+    fn scored_placements(
+        &mut self,
+        seq: &[u8],
+    ) -> Option<(
+        Vec<Placement>,
+        usize,
+        bool,
+        Option<crate::index::AnchorBudget>,
+    )> {
         let mut placements: Vec<Placement> = Vec::new();
 
         // 1. Candidate generation — transcriptome layer.
@@ -439,8 +458,9 @@ impl<'a> Aligner<'a> {
         let batch = self.genomic_candidates(seq);
         let n_seeds = batch.n_seeds;
         let genomic_any = !batch.placements.is_empty();
+        let seed_budget = batch.seed_budget;
         placements.extend(batch.placements);
-        if placements.is_empty() {
+        if placements.is_empty() && seed_budget.is_none() {
             return None;
         }
 
@@ -465,7 +485,7 @@ impl<'a> Aligner<'a> {
         // `rescore_with`).
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
         self.scratch.rc = rc_storage;
-        Some((placements, n_seeds, genomic_any))
+        Some((placements, n_seeds, genomic_any, seed_budget))
     }
 
     /// Hyperedited-read re-arbitration (see `rescore_with`). The signature is
@@ -550,6 +570,9 @@ impl<'a> Aligner<'a> {
                 &[],
                 "mate_window_no_proposal",
             ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = cached.and_then(|c| c.seed_budget);
+            }
         }
         let mut win = self.mate_window_placement(seq, mate_contig, mate_pos)?;
         let rc_storage = self.take_rc(seq);
@@ -560,13 +583,18 @@ impl<'a> Aligner<'a> {
         };
         self.rescore_strict(q, &mut win);
         let win_probe = win.clone();
-        let (mut placements, n_seeds, _) = match cached {
+        let (mut placements, n_seeds, _, seed_budget) = match cached {
             // Reuse the caller's own scored candidates: the read was just
             // aligned once already.
-            Some(c) => (c.placements.clone(), c.n_seeds, c.genomic_any),
+            Some(c) => (
+                c.placements.clone(),
+                c.n_seeds,
+                c.genomic_any,
+                c.seed_budget,
+            ),
             None => self
                 .scored_placements(seq)
-                .unwrap_or((Vec::new(), 0, false)),
+                .unwrap_or((Vec::new(), 0, false, None)),
         };
         placements.push(win);
         dedup_by_footprint(&mut placements, seq.len());
@@ -578,6 +606,9 @@ impl<'a> Aligner<'a> {
                 &placements,
                 "mate_window_rejected",
             ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = seed_budget;
+            }
         }
         // The mate-window candidate must have won an eligible locus (dedup keeps the
         // better-scored of two same-locus candidates, so compare footprints).
@@ -604,10 +635,13 @@ impl<'a> Aligner<'a> {
                 &placements,
                 "mate_window_arbitration",
             ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = seed_budget;
+            }
         }
         // The genomic layer was consulted (the window search is genomic), so
         // the L1-only last-resort policy does not apply here.
-        let mut aln = self.arbitrate(seq, placements, n_seeds, true)?;
+        let mut aln = self.arbitrate_with_budget(seq, placements, n_seeds, true, seed_budget)?;
         aln.rescued = true;
         Some(aln)
     }
@@ -690,6 +724,22 @@ impl<'a> Aligner<'a> {
     }
 
     /// The Tier-1 decision over an ordered, deduplicated candidate list.
+    fn arbitrate_with_budget(
+        &mut self,
+        seq: &[u8],
+        placements: Vec<Placement>,
+        n_seeds: usize,
+        genomic_any: bool,
+        seed_budget: Option<crate::index::AnchorBudget>,
+    ) -> Option<ReadAlignment> {
+        let mut aln = self.arbitrate(seq, placements, n_seeds, genomic_any)?;
+        if seed_budget.is_some_and(|b| b.limited()) {
+            aln.seed_search_limited = true;
+            crate::mapq::force_mapq0(&mut aln);
+        }
+        Some(aln)
+    }
+
     fn arbitrate(
         &mut self,
         seq: &[u8],
@@ -754,6 +804,7 @@ impl<'a> Aligner<'a> {
                 .iter()
                 .filter(|p| p.primary_eligible(seq.len()))
                 .count(),
+            seed_search_limited: false,
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -1044,6 +1095,7 @@ impl<'a> Aligner<'a> {
             return GenomicBatch {
                 placements: Vec::new(),
                 n_seeds: 0,
+                seed_budget: None,
             };
         }
 
@@ -1061,10 +1113,22 @@ impl<'a> Aligner<'a> {
                 f64::from(qe.saturating_sub(qs)) / f64::from(read_len.max(1))
             })
             .unwrap_or(0.0);
+        let mut seed_budget = None;
         let r2 = if r1_cov < MID_ROUND_MIN_COVERAGE {
             let mut anchors = std::mem::take(&mut self.scratch.anchors);
-            collect_anchors_into(self.index, &mins, read_len, k, MID_OCC_CAP, &mut anchors);
-            if anchors.is_empty() || anchors.len() > MID_ROUND_MAX_ANCHORS {
+            let budget = crate::index::collect_anchors_budgeted_into(
+                self.index,
+                &mins,
+                read_len,
+                k,
+                MID_OCC_CAP,
+                MID_ROUND_MAX_ANCHORS,
+                &mut anchors,
+            );
+            if budget.limited() {
+                seed_budget = Some(budget);
+            }
+            if anchors.is_empty() {
                 self.scratch.anchors = anchors;
                 None
             } else {
@@ -1152,6 +1216,7 @@ impl<'a> Aligner<'a> {
             return GenomicBatch {
                 placements: Vec::new(),
                 n_seeds,
+                seed_budget,
             };
         };
         let cr = rounds[w];
@@ -1168,6 +1233,7 @@ impl<'a> Aligner<'a> {
                 return GenomicBatch {
                     placements: Vec::new(),
                     n_seeds,
+                    seed_budget,
                 };
             }
         };
@@ -1210,6 +1276,7 @@ impl<'a> Aligner<'a> {
                 decisive && is_best,
                 &rc_storage,
                 &mut dp_budget,
+                seed_budget.is_some(),
                 &mut placements,
             );
         }
@@ -1261,6 +1328,7 @@ impl<'a> Aligner<'a> {
         GenomicBatch {
             placements,
             n_seeds,
+            seed_budget,
         }
     }
 
@@ -1278,6 +1346,7 @@ impl<'a> Aligner<'a> {
         fast_lane_ok: bool,
         rc_storage: &[u8],
         dp_budget: &mut usize,
+        seed_search_limited: bool,
         out: &mut Vec<Placement>,
     ) {
         let cfg = self.config;
@@ -1334,7 +1403,26 @@ impl<'a> Aligner<'a> {
                     Strand::Minus => rc_storage,
                 };
                 let mut ic_anchors = std::mem::take(&mut self.scratch.anchors);
-                collect_anchors_into(self.index, mins, read_len, k, MID_OCC_CAP, &mut ic_anchors);
+                if seed_search_limited {
+                    crate::index::collect_anchors_budgeted_into(
+                        self.index,
+                        mins,
+                        read_len,
+                        k,
+                        MID_OCC_CAP,
+                        MID_ROUND_MAX_ANCHORS,
+                        &mut ic_anchors,
+                    );
+                } else {
+                    collect_anchors_into(
+                        self.index,
+                        mins,
+                        read_len,
+                        k,
+                        MID_OCC_CAP,
+                        &mut ic_anchors,
+                    );
+                }
                 ic_anchors.retain(|a| a.contig == chain.contig && a.strand == chain.strand);
                 let ic_hit = crate::intron_chain::try_intron_chain_placement(
                     self.index.reference,
@@ -2358,6 +2446,106 @@ mod tests {
     }
 
     #[test]
+    fn repeat_budget_retains_repeat_paths_without_confidence_or_technical_tail() {
+        let mut state = 0x71f3ab92u64;
+        let body: Vec<u8> = (0..135)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let unit = [b"N".repeat(50), body.clone(), b"N".repeat(50)].concat();
+        let genome = unit.repeat(700);
+        let mut index = Index::build(
+            ref_from(std::str::from_utf8(&genome).unwrap()),
+            SeedParams { k: 15, w: 5 },
+        );
+        index.freq_cutoff = 1; // exact repeat seeds require the existing mid-occ round
+        let mut aligner = Aligner::new(&index, AlignConfig::rna_default());
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                let query = if leading {
+                    [b"C".repeat(15), body.clone()].concat()
+                } else {
+                    [body.clone(), b"C".repeat(15)].concat()
+                };
+                let read = if strand == Strand::Plus {
+                    query
+                } else {
+                    revcomp(&query)
+                };
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let (all, _) = crate::index::collect_anchors(&index, &mins, 150, 15, MID_OCC_CAP);
+                assert!(all.len() > MID_ROUND_MAX_ANCHORS);
+                let (result, cache) = aligner.align_read_full(&read);
+                let result = result.expect("budgeted whole-seed search must retain repeat paths");
+                let budget = cache.unwrap().seed_budget.unwrap();
+                assert_eq!(budget.eligible_anchors, all.len());
+                assert!(budget.retained_anchors <= MID_ROUND_MAX_ANCHORS);
+                assert!(budget.limited());
+                assert_eq!(result.strand, strand);
+                assert_eq!(result.mapq_of_checked(), 0);
+                let expected = if leading {
+                    vec![CigarOp::SoftClip(15), CigarOp::Match(135)]
+                } else {
+                    vec![CigarOp::Match(135), CigarOp::SoftClip(15)]
+                };
+                assert_eq!(
+                    result.cigar, expected,
+                    "technical sequence must stay clipped"
+                );
+                assert_eq!(result.pos % unit.len() as u32, 50);
+            }
+        }
+    }
+
+    #[test]
+    fn limited_seed_search_cannot_gain_confidence_from_a_single_path_or_mate() {
+        let genome = "ACGT".repeat(500);
+        let mut aligner = aligner_on(&genome);
+        let read = genome.as_bytes()[100..250].to_vec();
+        let mut p = placement(0, 100, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut p);
+        let budget = crate::index::AnchorBudget {
+            eligible_anchors: 25000,
+            retained_anchors: 19000,
+            omitted_seeds: 3,
+        };
+        let result = aligner
+            .arbitrate_with_budget(&read, vec![p.clone()], 30, true, Some(budget))
+            .unwrap();
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert!(crate::evidence::evidence_tag(&result).contains("seed_search=limited"));
+        let mut overridden = result;
+        overridden.mapq_override = Some(60);
+        assert_eq!(
+            overridden.mapq_of_checked(),
+            0,
+            "later override cannot erase truncation"
+        );
+
+        // An empty independent pool must still carry search incompleteness
+        // into the seed-free mate-window fallback and its evidence.
+        let cache = CachedPlacements {
+            placements: Vec::new(),
+            n_seeds: 30,
+            genomic_any: false,
+            seed_budget: Some(budget),
+        };
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert!(pool.seed_budget.unwrap().limited());
+        let mut observed = None;
+        let mate = aligner
+            .align_read_with_mate_observed(&read, 0, 100, Some(&cache), Some(&mut observed))
+            .unwrap();
+        assert_eq!(mate.mapq_of_checked(), 0);
+        assert!(mate.rescued);
+        assert!(observed.unwrap().seed_budget.unwrap().limited());
+    }
+
+    #[test]
     fn diagnostic_96_98_99_preserves_evidence_without_promoting_either_mate() {
         let mut aligner = aligner_on(&"A".repeat(2000));
         for strand in [Strand::Plus, Strand::Minus] {
@@ -2373,6 +2561,7 @@ mod tests {
                     placements: vec![p],
                     n_seeds: 5,
                     genomic_any: true,
+                    seed_budget: None,
                 };
                 let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
                 assert_eq!(pool.candidates.len(), 1);
@@ -2443,6 +2632,7 @@ mod tests {
             ],
             n_seeds: 5,
             genomic_any: true,
+            seed_budget: None,
         };
         let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
         assert_eq!(pool.candidates.len(), 3);
@@ -2470,6 +2660,7 @@ mod tests {
             placements: placements.clone(),
             n_seeds: 10,
             genomic_any: true,
+            seed_budget: None,
         };
         let before = aligner
             .arbitrate(&query, placements.clone(), 10, true)
@@ -2769,6 +2960,7 @@ mod tests {
             false,
             &revcomp(&read),
             &mut 8,
+            false,
             &mut candidates,
         );
         assert!(
@@ -3114,6 +3306,7 @@ mod tests {
             placements: Vec::new(),
             n_seeds: 0,
             genomic_any: false,
+            seed_budget: None,
         };
         assert!(aligner
             .align_read_with_mate(&read, 0, 100, Some(&cache))
@@ -3427,6 +3620,7 @@ mod tests {
                     false,
                     &revcomp(&read),
                     &mut budget,
+                    false,
                     &mut candidates,
                 );
                 assert!(
@@ -3647,6 +3841,7 @@ mod tests {
                 false,
                 &revcomp(&read),
                 &mut 8,
+                false,
                 &mut candidates,
             );
             assert!(

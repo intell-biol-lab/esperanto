@@ -41,6 +41,11 @@ Every pool contains `stage`, `scored_candidates`, `excluded_nonpositive`,
 disjoint: geometry is checked first, then score. The sum of exclusions and
 retained candidates equals `scored_candidates`.
 
+From dev.12, a limited mid-occurrence search adds optional `seed_budget`:
+`eligible_anchors`, `retained_anchors` (at most 20,000), and `omitted_seeds`.
+This limitation survives cache/mate arbitration and forces MAPQ 0. See the
+[repeat-budget contract](repeat-budget-contract.md). Complete pools omit it.
+
 Stages are `independent`, `mate_window_no_proposal` (empty attempt),
 `mate_window_rejected` (after normalization, before the existing eligibility
 check), and `mate_window_arbitration` (after the existing fragment reach

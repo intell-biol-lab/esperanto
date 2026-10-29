@@ -145,6 +145,7 @@ pub fn record_se(name: &[u8], seq: &[u8], qual: &[u8], aln: Option<&ReadAlignmen
         flag: flag_bits,
         mapq: q,
         aln: aln.map(aln_view),
+        unmapped_tags: Vec::new(),
         seq,
         qual,
         mate: None,
@@ -191,6 +192,7 @@ mod tests {
             n_seeds: 14,
             rescued,
             mapq_override: None,
+            seed_search_limited: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         }

@@ -87,6 +87,8 @@ pub struct OutRecord {
     pub mapq: u8,
     /// None = unmapped.
     pub aln: Option<AlnView>,
+    /// Auxiliary evidence for records without a placement.
+    pub unmapped_tags: Vec<RawTag>,
     /// Stored orientation (reference-forward already applied).
     pub seq: Vec<u8>,
     pub qual: Vec<u8>,
@@ -214,10 +216,16 @@ pub fn write_record_slow<W: IoWrite>(
                     .into_iter()
                     .collect(),
             );
+    }
+    {
         use noodles::sam::alignment::record::data::field::Tag;
         use noodles::sam::alignment::record_buf::data::field::Value;
         let mut data = noodles::sam::alignment::record_buf::Data::default();
-        for RawTag(tag, value) in &aln.tags {
+        let tags = rec
+            .aln
+            .as_ref()
+            .map_or(rec.unmapped_tags.as_slice(), |a| a.tags.as_slice());
+        for RawTag(tag, value) in tags {
             let t = Tag::new(tag[0], tag[1]);
             match value {
                 TagValue::Char(c) => data.insert(t, Value::Character(*c)),

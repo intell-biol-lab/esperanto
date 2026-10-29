@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Dev.12 proposes bounded whole-seed-list candidate generation for overflowing
+mid-occurrence pools. Every affected placement carries incomplete-search
+evidence and MAPQ 0, including mate fallback. Retaining a placement does not
+establish correct repeat-copy resolution. Human replay can reject this
+proposal under the repeat-budget contract; source availability and passing
+software CI do not imply scientific adoption or release qualification.
+
 Dev.11 permits the existing full-anchor intron-pair proposal when the best
 chain has at least two segments. Requiring exactly two segments incorrectly
 disabled independently supported pairs when repeat-derived anchors added

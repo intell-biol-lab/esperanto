@@ -7,6 +7,9 @@
 //! MAPQ. `mapq_src` names it: `ext_margin` for the extension pair,
 //! `chain_margin` for the chain pair, `unique` for no runner-up in either,
 //! `policy` for a caller-fixed MAPQ ([`crate::mapq::ReadAlignment::mapq_override`]).
+//! `seed_budget` takes precedence over every other MAPQ source when eligible
+//! seed lists were omitted. Those records append `;seed_search=limited` after
+//! the frozen fields and always have MAPQ 0; complete records are unchanged.
 //! The pair comes from [`crate::mapq::margin`], so the tag cannot disagree
 //! with the MAPQ it explains. `origin` names the layer whose candidate won
 //! the unified strict arbitration and `cand` counts the distinct-locus
@@ -23,7 +26,7 @@ pub fn evidence_tag(aln: &ReadAlignment) -> String {
         .unwrap_or("-");
     let (best, second, mapq_src) = margin(aln);
     let dq = (best - second).max(0);
-    format!(
+    let mut tag = format!(
         "seeds={};chain={};sub={};dq={};splice={};mm={};ea={};mapq_src={};origin={};cand={}",
         aln.n_seeds,
         best,
@@ -35,5 +38,9 @@ pub fn evidence_tag(aln: &ReadAlignment) -> String {
         mapq_src,
         aln.origin.label(),
         aln.n_cands
-    )
+    );
+    if aln.seed_search_limited {
+        tag.push_str(";seed_search=limited");
+    }
+    tag
 }

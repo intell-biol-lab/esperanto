@@ -27,6 +27,16 @@ use crate::pair::{relate, template_length, PairRelation};
 use crate::seed::Strand;
 use crate::stats::{AlignStats, StatsAcc};
 
+/// Preserve original-search limitation on an unplaced record for later rescue.
+fn mark_unplaced_seed_limit(rec: &mut BamRecord, limited: bool) {
+    if rec.aln.is_none() && limited {
+        rec.unmapped_tags.push(esperanto_bamio::RawTag(
+            *b"EK",
+            esperanto_bamio::TagValue::Str("mapq_src=seed_budget;seed_search=limited".into()),
+        ));
+    }
+}
+
 /// Streaming block size (pairs / reads).
 pub const CHUNK: usize = 100_000;
 
@@ -147,6 +157,7 @@ pub fn run_se(
         let cached: Vec<(
             Option<ReadAlignment>,
             Option<crate::diagnostics::CandidatePool>,
+            bool,
         )> = {
             let miss_seqs: Vec<&[u8]> = unique_seqs.to_vec();
             pool.install(|| {
@@ -156,12 +167,11 @@ pub fn run_se(
                     .map_init(
                         move || make_aligner(index, cfg, &lib, &l1_clone),
                         |aligner, &seq| {
-                            if diagnostics_enabled {
-                                let (aln, cache) = aligner.align_read_full(seq);
-                                (aln, Some(diagnostic_pool(index, seq.len(), cache.as_ref())))
-                            } else {
-                                (aligner.align_read(seq), None)
-                            }
+                            let (aln, cache) = aligner.align_read_full(seq);
+                            let limited = cache.as_ref().is_some_and(|c| c.seed_search_limited());
+                            let diagnostic = diagnostics_enabled
+                                .then(|| diagnostic_pool(index, seq.len(), cache.as_ref()));
+                            (aln, diagnostic, limited)
                         },
                     )
                     .collect()
@@ -171,15 +181,17 @@ pub fn run_se(
         // alignment and pairing it with the read's own name/qual.
         let mut results: Vec<BamRecord> = Vec::with_capacity(chunk.len());
         for (i, rec) in chunk.iter().enumerate() {
-            results.push(bam::record_se(
+            let mut br = bam::record_se(
                 &rec.name,
                 &rec.seq,
                 &rec.qual,
                 cached[uid_of_read[i]].0.as_ref(),
-            ));
+            );
+            mark_unplaced_seed_limit(&mut br, cached[uid_of_read[i]].2);
+            results.push(br);
         }
         for (i, (rec, br)) in chunk.iter().zip(&results).enumerate() {
-            let (aln, diagnostic) = &cached[uid_of_read[i]];
+            let (aln, diagnostic, _) = &cached[uid_of_read[i]];
             if let (Some(sink), Some(pool)) = (out.diagnostics.as_mut(), diagnostic) {
                 crate::diagnostics::write_row(
                     &mut **sink,
@@ -434,8 +446,22 @@ pub fn run_pe(
             // Records carry every number the stats/discovery section needs
             // (MAPQ, proper-pair flag, tlen) — one derivation per field,
             // no re-computation from the alignment.
-            let (ra, rb) = pair_records(
+            let (mut ra, mut rb) = pair_records(
                 &a.name, &a.seq, &a.qual, aln1, &b.name, &b.seq, &b.qual, aln2,
+            );
+            mark_unplaced_seed_limit(
+                &mut ra,
+                unique_alns[uid1_of_pair[i]]
+                    .1
+                    .as_ref()
+                    .is_some_and(|c| c.seed_search_limited()),
+            );
+            mark_unplaced_seed_limit(
+                &mut rb,
+                unique_alns[uid2_of_pair[i]]
+                    .1
+                    .as_ref()
+                    .is_some_and(|c| c.seed_search_limited()),
             );
             if let Some(x) = aln1 {
                 stats.push_junctions(x.junctions.len() as u64);
@@ -573,6 +599,7 @@ fn pair_records(
             name: name.to_vec(),
             flag: f,
             aln: aln.as_ref().map(crate::bam::aln_view),
+            unmapped_tags: Vec::new(),
             mapq: q,
             seq: s_out,
             qual: q_out,
@@ -967,6 +994,7 @@ mod tests {
             n_seeds: 10,
             rescued: false,
             mapq_override: None,
+            seed_search_limited: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

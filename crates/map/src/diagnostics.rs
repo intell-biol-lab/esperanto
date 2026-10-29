@@ -35,6 +35,9 @@ pub struct CandidatePool {
     pub excluded_nonpositive: usize,
     pub excluded_invalid_geometry: usize,
     pub candidates: Vec<CandidateEvidence>,
+    /// Present only when whole seed hit lists were omitted by the budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_budget: Option<crate::index::AnchorBudget>,
 }
 
 impl CandidatePool {
@@ -50,6 +53,7 @@ impl CandidatePool {
             excluded_nonpositive: 0,
             excluded_invalid_geometry: 0,
             candidates: Vec::new(),
+            seed_budget: None,
         };
         for (rank, p) in placements.iter().enumerate() {
             if !legal_geometry(index, read_len, p) {
@@ -228,6 +232,7 @@ mod tests {
             excluded_nonpositive: 0,
             excluded_invalid_geometry: 0,
             candidates: vec![],
+            seed_budget: None,
         };
         let mut read = FastqRecord {
             name: b"quote\"and\nnewline".to_vec(),

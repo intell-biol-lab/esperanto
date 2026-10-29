@@ -602,6 +602,7 @@ fn rescue_collapsed(
     // Include primary placements with insufficient aligned coverage or
     // excessive unexplained mismatches. Replace a deferred placement only
     // after a rescue direction passes all evidence checks.
+    let original_seed_limits = collect_seed_limits(raw_bam)?;
     let n_unmapped = fq.len();
     fq.extend(collect_deferred(raw_bam)?);
     let dropped = dedup_pool(&mut fq);
@@ -726,6 +727,7 @@ fn rescue_collapsed(
         });
         for (&i, aln) in cand_idx.iter().zip(results) {
             let Some(mut a) = aln else { continue };
+            inherit_seed_limit(&mut a, &fq[i].0, &original_seed_limits);
             placed_count += 1;
             let (_, seq, qual) = &fq[i];
             let proof = match verify_rescue_placement(&a, seq, qual, true_ref, *dir) {
@@ -1026,6 +1028,15 @@ fn rescue_collapsed(
                 &s2,
                 &esperanto_map::bam::phred_from_ascii(&q2),
             );
+            if a.seed_search_limited {
+                rec.push_aux(
+                    b"EK",
+                    rust_htslib::bam::record::Aux::String(&esperanto_map::evidence::evidence_tag(
+                        a,
+                    )),
+                )
+                .map_err(stage_err("map"))?;
+            }
             rec.push_aux(b"RE", rust_htslib::bam::record::Aux::String("collapsed"))
                 .map_err(stage_err("map"))?;
             w.write(&rec).map_err(stage_err("map"))?;
@@ -1119,6 +1130,42 @@ fn collect_mate_placements(
 /// Aligned fraction below which a Tier-1 placement counts as only partly
 /// explaining its read, and is therefore offered to the rescue passes.
 const RESCUE_CLIPPED_COVERAGE: f64 = 0.7;
+
+fn inherit_seed_limit(
+    aln: &mut esperanto_map::mapq::ReadAlignment,
+    pool_name: &str,
+    limited: &std::collections::HashSet<Vec<u8>>,
+) {
+    aln.seed_search_limited |= limited.contains(pool_name.as_bytes());
+}
+
+/// Read identities whose original (or earlier rescue) search was incomplete.
+/// raw.bam contains both unplaced and deferred records, and is durable across
+/// the FASTQ eviction/restart boundary. Mate slots prevent cross-mate leakage.
+fn collect_seed_limits(raw_bam: &Path) -> Result<std::collections::HashSet<Vec<u8>>, FlowError> {
+    let mut rdr = rust_htslib::bam::Reader::from_path(raw_bam).map_err(stage_err("map"))?;
+    let mut limited = std::collections::HashSet::new();
+    for r in rdr.records() {
+        let rec = r.map_err(stage_err("map"))?;
+        if rec.is_secondary() || rec.is_supplementary() {
+            continue;
+        }
+        if let Ok(rust_htslib::bam::record::Aux::String(ek)) = rec.aux(b"EK") {
+            if ek.split(';').any(|f| f == "seed_search=limited") {
+                let mut name = rec.qname().to_vec();
+                if rec.is_paired() {
+                    name.extend_from_slice(if rec.is_first_in_template() {
+                        b"/1"
+                    } else {
+                        b"/2"
+                    });
+                }
+                limited.insert(name);
+            }
+        }
+    }
+    Ok(limited)
+}
 
 /// A read offered to the rescue: name, sequence and quality as sequenced. The
 /// two sources — `unmapped.fq.gz` and [`collect_deferred`] — produce the same
@@ -1929,6 +1976,66 @@ mod rescue_tests {
     }
 
     #[test]
+    fn inherited_seed_limit_overrides_complete_rescue_confidence_without_mate_leakage() {
+        let mut limited = std::collections::HashSet::new();
+        limited.insert(b"template/1".to_vec());
+        limited.insert(b"literal/1".to_vec());
+        for (name, expected) in [
+            ("template/1", 0),
+            ("template/2", 60),
+            ("other/1", 60),
+            ("literal/1", 0),
+            ("literal/2", 60),
+        ] {
+            let mut aln = alignment_at(20, 150);
+            aln.mapq_override = Some(60);
+            assert!(!aln.seed_search_limited);
+            inherit_seed_limit(&mut aln, name, &limited);
+            assert_eq!(esperanto_map::mapq::mapq_of(&aln), expected);
+        }
+    }
+
+    #[test]
+    fn seed_limit_identity_uses_bam_pair_flags_for_literal_suffixes() {
+        let d = std::env::temp_dir().join(format!("esp-limit-identity-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let path = d.join("raw.bam");
+        write_pool_bam(&path, "chr1", 1000, &[]);
+        let header = rust_htslib::bam::Header::from_template(
+            rust_htslib::bam::Reader::from_path(&path).unwrap().header(),
+        );
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&path, &header, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, flags) in [
+                ("literal/1", 4),
+                ("paired/1", 1 | 4 | 64),
+                ("paired/1", 1 | 4 | 128),
+            ] {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(name.as_bytes(), None, b"ACGT", &[40; 4]);
+                rec.set_flags(flags);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                rec.push_aux(
+                    b"EK",
+                    rust_htslib::bam::record::Aux::String("seed_search=limited"),
+                )
+                .unwrap();
+                writer.write(&rec).unwrap();
+            }
+        }
+        let limited = collect_seed_limits(&path).unwrap();
+        assert_eq!(limited.len(), 3);
+        for name in ["literal/1", "paired/1/1", "paired/1/2"] {
+            assert!(limited.contains(name.as_bytes()));
+        }
+        assert!(!limited.contains(b"literal".as_slice()));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn collect_deferred_recovers_sealed_records() {
         let d = std::env::temp_dir().join(format!("esp-deferred-re-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
@@ -2021,6 +2128,15 @@ mod rescue_tests {
     /// same read from both pool halves. Every counter must stay singular.
     #[test]
     fn rescue_rerun_after_merge_without_eviction_does_not_double() {
+        rescue_roundtrip(false);
+    }
+
+    #[test]
+    fn limited_original_search_survives_complete_collapsed_rescue_and_rerun() {
+        rescue_roundtrip(true);
+    }
+
+    fn rescue_roundtrip(limited: bool) {
         // Same period-7 fixture as the verify tests.
         let bg = b"CGTATGCCTAGG";
         let mut seq = Vec::with_capacity(400);
@@ -2034,7 +2150,8 @@ mod rescue_tests {
         let read = hyper_read(true_ref, 20, 20, 110);
         let qual = vec![b'I'; 150];
 
-        let d = std::env::temp_dir().join(format!("esp-rescue-e2e-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("esp-rescue-e2e-{}-{limited}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let map_dir = d.join("map");
         fs::create_dir_all(&map_dir).unwrap();
@@ -2057,6 +2174,27 @@ mod rescue_tests {
         // starts empty (header only).
         let raw_bam = map_dir.join("raw.bam");
         write_pool_bam(&raw_bam, "c1", 400, &[]);
+        if limited {
+            let hdr = rust_htslib::bam::Header::from_template(
+                rust_htslib::bam::Reader::from_path(&raw_bam)
+                    .unwrap()
+                    .header(),
+            );
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&raw_bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            let mut rec = rust_htslib::bam::Record::new();
+            rec.set(b"hyper1", None, &read, &vec![40; read.len()]);
+            rec.set_flags(4);
+            rec.set_tid(-1);
+            rec.set_pos(-1);
+            rec.push_aux(
+                b"EK",
+                rust_htslib::bam::record::Aux::String("mapq_src=seed_budget;seed_search=limited"),
+            )
+            .unwrap();
+            writer.write(&rec).unwrap();
+        }
         let unm = map_dir.join("unmapped.fq.gz");
         let write_unmapped = |with_read: bool| {
             let text = if with_read {
@@ -2107,6 +2245,19 @@ mod rescue_tests {
         // First pass: the read is rescued and the seal is written.
         let n1 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
         assert_eq!(n1, 1);
+        if limited {
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr.records().next().unwrap().unwrap();
+            assert_eq!(
+                rec.mapq(),
+                0,
+                "original incomplete search must survive rescue"
+            );
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+        }
         assert_eq!(re_count(&raw_bam), 1);
         assert_eq!(rescued_tsv_rows(&map_dir), 1);
         assert_eq!(sealed_value(&map_dir), Some(1));
@@ -2117,6 +2268,15 @@ mod rescue_tests {
         write_stats(None);
         let n2 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
         assert_eq!(n2, 1);
+        if limited {
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr.records().next().unwrap().unwrap();
+            assert_eq!(rec.mapq(), 0);
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+        }
         assert_eq!(re_count(&raw_bam), 1);
         assert_eq!(rescued_tsv_rows(&map_dir), 1);
         assert_eq!(sealed_value(&map_dir), Some(1));

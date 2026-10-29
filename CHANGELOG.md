@@ -30,6 +30,13 @@
 
 ### Fixed
 
+- In `1.1.1-dev.12`, replace the mid-occurrence round's whole-round abort
+  with deterministic whole-seed-list selection within the same 20,000-anchor
+  budget. Preserve complete-input order, cap limited-search placements at
+  MAPQ 0 through cache/mate/override paths, and expose the limitation in EK
+  and optional diagnostic evidence. See the repeat-budget contract. This
+  remains a development proposal subject to per-read regression review.
+
 - In `1.1.1-dev.11`, allow the existing full-anchor intron-pair proposal
   when the best chain has at least two segments. Extra repeat-derived
   segments no longer suppress an independently supported two-exon path.
