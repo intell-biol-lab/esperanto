@@ -40,6 +40,13 @@
 
 ### Fixed
 
+- In `1.1.1-dev.16`, complete query-edge canonical seeds only after both
+  ordinary RNA chain rounds fail. Replace the failed bounded mid round with
+  the original/edge seed union, without changing the reference sketch,
+  occurrence/anchor limits, extension budget, scoring or successful rounds.
+  Retain limited-search MAPQ0. See the query-edge seed contract; this is not
+  scientific adoption or a general mapper superiority claim.
+
 - Remove two unjustified full-matrix `read_length<=reference_length` debug
   assertions. Short splice pseudo-references are valid rectangular local
   alignments. Keep release recurrence, widths, dispatch and scores unchanged;

@@ -2,6 +2,11 @@
 
 The mapper aligns single-end or paired-end FASTQ reads to a `.paidx` genomic index and writes BAM alignments. RNA alignment uses minimizer seeds, chaining, splice-aware extension, and paired-end evidence.
 
+In dev.16, an ordinary RNA query with no chain from either initial round can
+complete its query-edge seeds within the existing mid-round budgets. Successful
+rounds, the reference sketch, DNA and editing-variant paths are unchanged.
+See [the bounded query-edge contract](../../query-edge-seeds.md).
+
 ## Inputs
 
 - Plain or gzip-compressed FASTQ with synchronized paired-end records.

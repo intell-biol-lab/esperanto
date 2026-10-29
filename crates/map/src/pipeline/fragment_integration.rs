@@ -81,6 +81,75 @@ fn run(
     }
 }
 
+#[test]
+fn query_edge_completion_paired_pipeline_preserves_raw_frame() {
+    let (index, fragment) = crate::align::prefix_tests::fixture();
+    let pair = crate::fragment::tests::pair(&fragment, [150, 150], 0);
+    assert_eq!(
+        crate::fragment::infer(&pair[0], &pair[1])
+            .unwrap()
+            .fragment_length,
+        142
+    );
+    let off = run(
+        "edge-prefix-off",
+        &index,
+        &[pair.clone()],
+        false,
+        None,
+        false,
+    );
+    assert!(off.records.iter().all(|rec| !rec.flags().is_unmapped()));
+    let on = run("edge-prefix-on", &index, &[pair.clone()], true, None, false);
+    assert_eq!(on.records.len(), 2);
+    for (mate, (rec, row)) in on.records.iter().zip(&on.rows).enumerate() {
+        assert!(
+            !rec.flags().is_unmapped(),
+            "effective prefix must retain its body anchor"
+        );
+        assert_eq!(rec.reference_sequence_id().unwrap().unwrap(), 2);
+        assert_eq!(rec.alignment_start().unwrap().unwrap().get(), 121);
+        assert_eq!(row["schema_version"], 2);
+        assert_eq!(row["effective_read_length"], 142);
+        assert_eq!(row["pass2_primary_placed"], true);
+        let ops: Vec<_> = rec
+            .cigar()
+            .iter()
+            .map(|op| {
+                let op = op.unwrap();
+                (format!("{:?}", op.kind()), op.len())
+            })
+            .collect();
+        let expected = if mate == 0 {
+            vec![("Match".to_owned(), 142), ("SoftClip".to_owned(), 8)]
+        } else {
+            vec![("SoftClip".to_owned(), 8), ("Match".to_owned(), 142)]
+        };
+        assert_eq!(ops, expected);
+        let mut seq: Vec<_> = rec.sequence().iter().collect();
+        let mut qual: Vec<_> = rec.quality_scores().iter().collect();
+        if rec.flags().is_reverse_complemented() {
+            seq = crate::align::revcomp(&seq);
+            qual.reverse();
+        }
+        assert_eq!(seq, pair[mate]);
+        assert_eq!(
+            qual,
+            (0..150)
+                .map(|q| ((q + mate) % 41) as u8)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(rec.data().get(b"XF").unwrap().unwrap().as_int(), Some(142));
+        assert_eq!(
+            rec.data()
+                .iter()
+                .filter(|field| field.as_ref().unwrap().0 == *b"XF")
+                .count(),
+            1
+        );
+    }
+}
+
 fn splice_world(n: usize) -> (Index, Vec<u8>, Junction) {
     // Independent random reference with a single canonical intron.
     let mut state = 0x72a984b1821u64;

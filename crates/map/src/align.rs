@@ -18,7 +18,9 @@ use crate::extend::{
 use crate::gtf::{Junction, JunctionLib, RefinedJunction, SpliceSignal};
 use crate::index::{collect_anchors_into, Index};
 use crate::mapq::ReadAlignment;
-use crate::seed::{minimizers_into, Minimizer, SeedParams, SeedScratch, Strand};
+use crate::seed::{
+    append_query_edge_kmers, minimizers_into, Minimizer, SeedParams, SeedScratch, Strand,
+};
 use crate::splice::{
     align_spliced, intron_length_penalty, segment_chain, splice_signal, SpliceParams,
 };
@@ -1144,38 +1146,35 @@ impl<'a> Aligner<'a> {
             })
             .unwrap_or(0.0);
         let mut seed_budget = None;
-        let r2 = if r1_cov < MID_ROUND_MIN_COVERAGE {
-            let mut anchors = std::mem::take(&mut self.scratch.anchors);
-            let budget = crate::index::collect_anchors_budgeted_into(
-                self.index,
-                &mins,
-                read_len,
-                k,
-                MID_OCC_CAP,
-                MID_ROUND_MAX_ANCHORS,
-                &mut anchors,
-            );
+        let mut r2 = if r1_cov < MID_ROUND_MIN_COVERAGE {
+            let (round, budget) = self.bounded_chain_round(&mins, read_len, k);
             if budget.limited() {
                 seed_budget = Some(budget);
             }
-            if anchors.is_empty() {
-                self.scratch.anchors = anchors;
-                None
-            } else {
-                let mut chains = std::mem::take(&mut self.scratch.chains_out);
-                chain_anchors_into(
-                    &mut anchors,
-                    &cfg.chain,
-                    &mut chains,
-                    &mut self.scratch.chain,
-                );
-                self.scratch.anchors = anchors;
-                let second = second_score_with(&chains, &mut self.scratch.second_keys);
-                Some(RoundOutcome { chains, second })
-            }
+            round
         } else {
             None
         };
+
+        // Truncating technical tails can change terminal minimizer selection
+        // even when the necessary k-mer lies wholly inside the retained query.
+        // Only a complete chaining failure permits query-edge completion;
+        // successful rounds, DNA and edit-variant search are left untouched.
+        if cfg.rna
+            && !cfg.extend.edit_dir.is_on()
+            && r1.as_ref().is_none_or(|r| r.best().is_none())
+            && r2.as_ref().is_none_or(|r| r.best().is_none())
+            && append_query_edge_kmers(seq.len(), cfg.seed, &self.scratch.seed, &mut mins) > 0
+        {
+            if let Some(failed) = r2.take() {
+                self.scratch.chains_out = failed.chains;
+            }
+            let (round, budget) = self.bounded_chain_round(&mins, read_len, k);
+            if budget.limited() {
+                seed_budget = Some(budget);
+            }
+            r2 = round;
+        }
 
         // Editing-aware variant round: only when chaining fully failed (weak).
         let weak = r1
@@ -2173,6 +2172,38 @@ impl<'a> Aligner<'a> {
         recount_mm_ea_in(self.index.reference, query, aln);
     }
 
+    fn bounded_chain_round(
+        &mut self,
+        mins: &[Minimizer],
+        read_len: u32,
+        k: u32,
+    ) -> (Option<RoundOutcome>, crate::index::AnchorBudget) {
+        let mut anchors = std::mem::take(&mut self.scratch.anchors);
+        let budget = crate::index::collect_anchors_budgeted_into(
+            self.index,
+            mins,
+            read_len,
+            k,
+            MID_OCC_CAP,
+            MID_ROUND_MAX_ANCHORS,
+            &mut anchors,
+        );
+        if anchors.is_empty() {
+            self.scratch.anchors = anchors;
+            return (None, budget);
+        }
+        let mut chains = std::mem::take(&mut self.scratch.chains_out);
+        chain_anchors_into(
+            &mut anchors,
+            &self.config.chain,
+            &mut chains,
+            &mut self.scratch.chain,
+        );
+        self.scratch.anchors = anchors;
+        let second = second_score_with(&chains, &mut self.scratch.second_keys);
+        (Some(RoundOutcome { chains, second }), budget)
+    }
+
     pub(crate) fn chain_round(
         &mut self,
         mins: &[Minimizer],
@@ -2454,6 +2485,9 @@ impl ReadAlignment {
         crate::mapq::mapq_of(self)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod prefix_tests;
 
 #[cfg(test)]
 mod tests {
