@@ -30,6 +30,13 @@
 
 ### Fixed
 
+- In `1.1.1-dev.13`, preserve the nonempty complete first round's extension
+  priority when repeat-seed search is limited. Other rounds still fill remaining
+  slots and compete by common sequence score. Keep the eight-chain shortlist,
+  shared two-DP budget, coverage, scoring, model and limited-search MAPQ 0.
+  See the limited-search extension-priority contract. Independent qualification
+  and per-read regression review remain required.
+
 - In `1.1.1-dev.12`, replace the mid-occurrence round's whole-round abort
   with deterministic whole-seed-list selection within the same 20,000-anchor
   budget. Preserve complete-input order, cap limited-search placements at

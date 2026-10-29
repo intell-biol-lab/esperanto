@@ -1197,90 +1197,14 @@ impl<'a> Aligner<'a> {
             None
         };
 
-        // Merge rounds: winner = round with the highest best-chain score.
-        let rounds: Vec<&RoundOutcome> = r1.iter().chain(r2.iter()).chain(r3.iter()).collect();
-        let mut win_idx: Option<usize> = None;
-        for (i, r) in rounds.iter().enumerate() {
-            let better = match (win_idx, r.best()) {
-                (None, Some(_)) => true,
-                (Some(w), Some(b)) => b.score > rounds[w].best().map(|x| x.score).unwrap_or(0),
-                _ => false,
-            };
-            if better {
-                win_idx = Some(i);
-            }
-        }
-        let Some(w) = win_idx else {
-            let n_seeds = mins.len();
-            self.scratch.mins_out = mins;
-            return GenomicBatch {
-                placements: Vec::new(),
-                n_seeds,
-                seed_budget,
-            };
-        };
-        let cr = rounds[w];
-        let second = cr.second;
-        let extra_top: Vec<Chain> = rounds
-            .iter()
-            .flat_map(|r| r.chains.iter().take(TOP_CANDIDATES).cloned())
-            .collect();
-        let best = match cr.best() {
-            Some(b) => b.clone(),
-            None => {
-                let n_seeds = mins.len();
-                self.scratch.mins_out = mins;
-                return GenomicBatch {
-                    placements: Vec::new(),
-                    n_seeds,
-                    seed_budget,
-                };
-            }
-        };
-
-        // Candidate chains: deduplicated by locus (same contig+strand,
-        // ref-span start within 50bp), in chain-score order.
-        let mut cand_chains: Vec<Chain> = Vec::new();
-        let push_dedup = |c: Chain, out: &mut Vec<Chain>| {
-            let dup = out.iter().any(|x| {
-                x.contig == c.contig
-                    && x.strand == c.strand
-                    && x.ref_span(k).0.abs_diff(c.ref_span(k).0) < 50
-            });
-            if !dup {
-                out.push(c);
-            }
-        };
-        for c in cr.chains.iter().take(TOP_CANDIDATES) {
-            push_dedup(c.clone(), &mut cand_chains);
-        }
-        for c in extra_top {
-            if cand_chains.len() >= MAX_TIED_CANDIDATES {
-                break;
-            }
-            push_dedup(c, &mut cand_chains);
-        }
-
-        let tied = tied_best(&cr.chains);
-        let decisive = tied.len() <= 1 && second * 5 < best.score * 4;
-        let rc_storage = self.take_rc(seq);
-        let mut placements: Vec<Placement> = Vec::new();
-        let mut dp_budget = EXTEND_BUDGET;
-        for (i, chain) in cand_chains.iter().take(MAX_TIED_CANDIDATES).enumerate() {
-            let is_best = i == 0;
-            self.extend_chain(
-                seq,
-                &mins,
-                chain,
-                is_best,
-                decisive && is_best,
-                &rc_storage,
-                &mut dp_budget,
-                seed_budget.is_some(),
-                &mut placements,
-            );
-        }
-        self.scratch.rc = rc_storage;
+        let mut placements = self.extend_genomic_rounds(
+            seq,
+            &mins,
+            r1.as_ref(),
+            r2.as_ref(),
+            r3.as_ref(),
+            seed_budget.is_some(),
+        );
         if let Some(r1) = r1 {
             self.scratch.chains_out = r1.chains;
         }
@@ -1330,6 +1254,98 @@ impl<'a> Aligner<'a> {
             n_seeds,
             seed_budget,
         }
+    }
+
+    /// Schedule and extend genomic chains with one shared DP budget.
+    fn extend_genomic_rounds(
+        &mut self,
+        seq: &[u8],
+        mins: &[Minimizer],
+        r1: Option<&RoundOutcome>,
+        r2: Option<&RoundOutcome>,
+        r3: Option<&RoundOutcome>,
+        seed_search_limited: bool,
+    ) -> Vec<Placement> {
+        let k = self.config.seed.k;
+        // A limited repeat search may introduce higher-chain-score competitors
+        // that exhaust extension before a complete first-round path is tried.
+        // Preserve that round's existing budget priority; additional proposals
+        // still compete by common sequence score. Complete search is unchanged.
+        let rounds: Vec<&RoundOutcome> = r1.into_iter().chain(r2).chain(r3).collect();
+        let mut win_idx: Option<usize> = None;
+        for (i, r) in rounds.iter().enumerate() {
+            let better = match (win_idx, r.best()) {
+                (None, Some(_)) => true,
+                (Some(w), Some(b)) => b.score > rounds[w].best().map(|x| x.score).unwrap_or(0),
+                _ => false,
+            };
+            if better {
+                win_idx = Some(i);
+            }
+        }
+        if seed_search_limited && r1.is_some_and(|r| r.best().is_some()) {
+            win_idx = Some(0);
+        }
+        let Some(w) = win_idx else {
+            return Vec::new();
+        };
+        let cr = rounds[w];
+        let second = cr.second;
+        let extra_top: Vec<Chain> = rounds
+            .iter()
+            .flat_map(|r| r.chains.iter().take(TOP_CANDIDATES).cloned())
+            .collect();
+        let best = match cr.best() {
+            Some(b) => b.clone(),
+            None => {
+                return Vec::new();
+            }
+        };
+
+        // Candidate chains: deduplicated by locus (same contig+strand,
+        // ref-span start within 50bp), in chain-score order.
+        let mut cand_chains: Vec<Chain> = Vec::new();
+        let push_dedup = |c: Chain, out: &mut Vec<Chain>| {
+            let dup = out.iter().any(|x| {
+                x.contig == c.contig
+                    && x.strand == c.strand
+                    && x.ref_span(k).0.abs_diff(c.ref_span(k).0) < 50
+            });
+            if !dup {
+                out.push(c);
+            }
+        };
+        for c in cr.chains.iter().take(TOP_CANDIDATES) {
+            push_dedup(c.clone(), &mut cand_chains);
+        }
+        for c in extra_top {
+            if cand_chains.len() >= MAX_TIED_CANDIDATES {
+                break;
+            }
+            push_dedup(c, &mut cand_chains);
+        }
+
+        let tied = tied_best(&cr.chains);
+        let decisive = tied.len() <= 1 && second * 5 < best.score * 4;
+        let rc_storage = self.take_rc(seq);
+        let mut placements: Vec<Placement> = Vec::new();
+        let mut dp_budget = EXTEND_BUDGET;
+        for (i, chain) in cand_chains.iter().take(MAX_TIED_CANDIDATES).enumerate() {
+            let is_best = i == 0;
+            self.extend_chain(
+                seq,
+                mins,
+                chain,
+                is_best,
+                decisive && is_best,
+                &rc_storage,
+                &mut dp_budget,
+                seed_search_limited,
+                &mut placements,
+            );
+        }
+        self.scratch.rc = rc_storage;
+        placements
     }
 
     /// Extend one chain into spliced and continuous placement candidates.
@@ -2443,6 +2459,395 @@ mod tests {
             0,
             100,
         )
+    }
+
+    // Synthetic rounds isolate scheduling from seed discovery. The complete
+    // round has sparse anchors at the exact ordinary locus; a repeat round has
+    // higher chain scores but poorer base evidence and includes the exact locus
+    // after two competitors. Every short query contains N in its outer tail,
+    // forcing verification to use the shared DP fallback. Long non-N queries
+    // exercise the same budget without the <=256-base Myers path.
+    fn round_competition(
+        strand: Strand,
+        leading: bool,
+        long_non_n: bool,
+    ) -> (Aligner<'static>, Vec<u8>, RoundOutcome, RoundOutcome, u32) {
+        let mut state = 0x9e3779b9u64;
+        let body_len = if long_non_n { 270 } else { 135 };
+        let tail_len = if long_non_n { 30 } else { 15 };
+        let body: Vec<u8> = (0..body_len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let tail = vec![if long_non_n { b'C' } else { b'N' }; tail_len];
+        let oriented = if leading {
+            [tail, body.clone()].concat()
+        } else {
+            [body.clone(), tail].concat()
+        };
+        let read = if strand == Strand::Plus {
+            oriented
+        } else {
+            revcomp(&oriented)
+        };
+        let offset = if leading { tail_len as u32 } else { 0 };
+        let strong_pos = 20000u32;
+        let mut genome = vec![b'A'; 22000];
+        genome[strong_pos as usize..strong_pos as usize + body_len].copy_from_slice(&body);
+        let chain = |pos: u32, score: i32, qs: &[u32]| Chain {
+            contig: 0,
+            strand,
+            score,
+            anchors: qs
+                .iter()
+                .map(|&q| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos: offset + q,
+                    rpos: pos + q,
+                })
+                .collect(),
+        };
+        let complete = RoundOutcome {
+            chains: vec![chain(strong_pos, 60, &[45, 100])],
+            second: 0,
+        };
+        let mut repeats = Vec::new();
+        for i in 0..10 {
+            let pos = 1000 + i * 1000;
+            let target = &mut genome[pos as usize..pos as usize + body_len];
+            target.copy_from_slice(&body);
+            for q in [5, 55, 65, 115, 125] {
+                let rb = target[q];
+                target[q] = b"ACGT"
+                    .iter()
+                    .copied()
+                    .find(|&b| b != rb && crate::extend::exempt_dir(b, rb).is_none())
+                    .unwrap();
+            }
+            repeats.push(chain(pos, 120 - i as i32, &[20, 90]));
+        }
+        repeats.insert(4, chain(strong_pos, 116, &[20, 90]));
+        let repeat = RoundOutcome {
+            second: 119,
+            chains: repeats,
+        };
+        (
+            aligner_on(std::str::from_utf8(&genome).unwrap()),
+            read,
+            complete,
+            repeat,
+            strong_pos,
+        )
+    }
+
+    #[test]
+    fn limited_repeat_round_preserves_complete_path_before_shared_dp() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                for long_non_n in [false, true] {
+                    let (mut aligner, read, complete, repeat, strong_pos) =
+                        round_competition(strand, leading, long_non_n);
+                    let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                    let mut candidates = aligner.extend_genomic_rounds(
+                        &read,
+                        &mins,
+                        Some(&complete),
+                        Some(&repeat),
+                        None,
+                        true,
+                    );
+                    let query = if strand == Strand::Plus {
+                        read.clone()
+                    } else {
+                        revcomp(&read)
+                    };
+                    for p in &mut candidates {
+                        aligner.rescore_strict(&query, p);
+                    }
+                    assert!(
+                        candidates.iter().any(|p| p.pos == strong_pos),
+                        "complete path displaced before arbitration: {strand:?}, \
+                         leading={leading}, long_non_n={long_non_n}"
+                    );
+                    assert_eq!(
+                        candidates.len(),
+                        EXTEND_BUDGET,
+                        "all fixture paths require DP; the budget must remain two"
+                    );
+                    dedup_by_footprint(&mut candidates, read.len());
+                    let budget = crate::index::AnchorBudget {
+                        eligible_anchors: 25000,
+                        retained_anchors: 19000,
+                        omitted_seeds: 1,
+                    };
+                    let result = aligner
+                        .arbitrate_with_budget(&read, candidates, mins.len(), true, Some(budget))
+                        .unwrap();
+                    let (body, tail) = if long_non_n { (270, 30) } else { (135, 15) };
+                    assert_eq!(result.pos, strong_pos);
+                    assert_eq!(result.strand, strand);
+                    assert_eq!(
+                        result.score,
+                        2 * body as i32,
+                        "{strand:?} leading={leading} long_non_n={long_non_n} cigar={:?}",
+                        result.cigar
+                    );
+                    let expected = if leading {
+                        vec![CigarOp::SoftClip(tail), CigarOp::Match(body)]
+                    } else {
+                        vec![CigarOp::Match(body), CigarOp::SoftClip(tail)]
+                    };
+                    assert_eq!(
+                        result.cigar, expected,
+                        "outer technical tail must stay clipped"
+                    );
+                    assert_eq!(result.mapq_of_checked(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_repeat_round_preserves_previous_extension_priority() {
+        let (mut aligner, read, complete, repeat, strong_pos) =
+            round_competition(Strand::Plus, false, false);
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let candidates = aligner.extend_genomic_rounds(
+            &read,
+            &mins,
+            Some(&complete),
+            Some(&repeat),
+            None,
+            false,
+        );
+        assert_eq!(candidates.len(), EXTEND_BUDGET);
+        assert!(
+            candidates.iter().all(|p| p.pos != strong_pos),
+            "scope control: complete search retains its existing scheduling"
+        );
+    }
+
+    #[test]
+    fn limited_repeat_round_can_beat_a_weaker_complete_path() {
+        let (mut aligner, read, complete, repeat, strong_pos) =
+            round_competition(Strand::Plus, true, false);
+        let weak_complete = RoundOutcome {
+            chains: vec![repeat.chains[0].clone()],
+            second: 0,
+        };
+        let strong_repeat = RoundOutcome {
+            chains: vec![complete.chains[0].clone()],
+            second: 0,
+        };
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let mut candidates = aligner.extend_genomic_rounds(
+            &read,
+            &mins,
+            Some(&weak_complete),
+            Some(&strong_repeat),
+            None,
+            true,
+        );
+        assert!(candidates
+            .iter()
+            .any(|p| p.pos == weak_complete.chains[0].ref_span(15).0 - 20));
+        assert!(candidates.iter().any(|p| p.pos == strong_pos));
+        for p in &mut candidates {
+            aligner.rescore_strict(&read, p);
+        }
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, mins.len(), true)
+            .unwrap();
+        assert_eq!(
+            result.pos, strong_pos,
+            "strict evidence, not round origin, decides"
+        );
+        assert_eq!(result.score, 270);
+    }
+
+    #[test]
+    fn limited_repeat_without_complete_chain_keeps_existing_search() {
+        let (mut aligner, read, _, repeat, _) = round_competition(Strand::Minus, false, false);
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let absent = aligner.extend_genomic_rounds(&read, &mins, None, Some(&repeat), None, true);
+        let empty = RoundOutcome {
+            chains: Vec::new(),
+            second: 0,
+        };
+        let present_empty =
+            aligner.extend_genomic_rounds(&read, &mins, Some(&empty), Some(&repeat), None, true);
+        assert_eq!(absent.len(), EXTEND_BUDGET);
+        assert_eq!(
+            absent.iter().map(|p| (p.pos, &p.cigar)).collect::<Vec<_>>(),
+            present_empty
+                .iter()
+                .map(|p| (p.pos, &p.cigar))
+                .collect::<Vec<_>>()
+        );
+        assert!(aligner
+            .extend_genomic_rounds(&read, &mins, None, None, None, true)
+            .is_empty());
+    }
+
+    #[test]
+    fn round_extension_keeps_eight_loci_and_exact_repeat_ambiguity() {
+        let (fixture, _, _, _, _) = round_competition(Strand::Plus, false, false);
+        let mut body = Vec::new();
+        fixture.index.reference.contigs[0].decode_into(20000, 20135, &mut body);
+        let mut genome = vec![b'N'; 14000];
+        let chains: Vec<Chain> = (0..12)
+            .map(|i| {
+                let pos = 500 + i * 1000;
+                genome[pos as usize..pos as usize + body.len()].copy_from_slice(&body);
+                Chain {
+                    contig: 0,
+                    strand: Strand::Plus,
+                    score: 135,
+                    anchors: [20, 90]
+                        .iter()
+                        .map(|&q| crate::seed::Anchor {
+                            contig: 0,
+                            strand: Strand::Plus,
+                            qpos: q,
+                            rpos: pos + q,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let complete = RoundOutcome {
+            chains,
+            second: 135,
+        };
+        let mins = crate::seed::minimizers(&body, aligner.config.seed);
+        let mut candidates =
+            aligner.extend_genomic_rounds(&body, &mins, Some(&complete), None, None, true);
+        assert_eq!(candidates.len(), MAX_TIED_CANDIDATES);
+        for p in &mut candidates {
+            aligner.rescore_strict(&body, p);
+        }
+        dedup_by_footprint(&mut candidates, body.len());
+        let result = aligner
+            .arbitrate(&body, candidates, mins.len(), true)
+            .unwrap();
+        assert_eq!(result.n_cands, MAX_TIED_CANDIDATES);
+        assert_eq!(
+            result.second_score, result.score,
+            "exact alternatives remain visible"
+        );
+        assert_eq!(result.mapq_of_checked(), 0);
+    }
+
+    #[test]
+    fn limited_repeat_splice_can_beat_continuous_priority_round() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                let mut state = 0x719ac57bu64;
+                let mut genome: Vec<u8> = (0..6000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        b"ACGT"[(state & 3) as usize]
+                    })
+                    .collect();
+                genome[2064..2066].copy_from_slice(b"GT");
+                genome[3998..4000].copy_from_slice(b"AG");
+                genome[2063] = b'T';
+                genome[4000] = b'A';
+                let body = [&genome[2000..2064], &genome[4000..4071]].concat();
+                genome[1000..1135].copy_from_slice(&body);
+                for q in [40, 46, 52, 58, 64, 70, 76, 82] {
+                    let qb = body[q];
+                    genome[1000 + q] = b"ACGT"
+                        .iter()
+                        .copied()
+                        .find(|&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+                        .unwrap();
+                }
+                let offset = if leading { 15 } else { 0 };
+                let query = if leading {
+                    [b"N".repeat(15), body].concat()
+                } else {
+                    [body, b"N".repeat(15)].concat()
+                };
+                let read = if strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let make = |q, r| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos: offset + q,
+                    rpos: r,
+                };
+                let complete = RoundOutcome {
+                    chains: vec![Chain {
+                        contig: 0,
+                        strand,
+                        score: 60,
+                        anchors: vec![make(20, 1020), make(90, 1090)],
+                    }],
+                    second: 0,
+                };
+                let repeat = RoundOutcome {
+                    chains: vec![Chain {
+                        contig: 0,
+                        strand,
+                        score: 120,
+                        anchors: [5, 25, 45, 70, 90, 110]
+                            .iter()
+                            .map(|&q| make(q, if q < 64 { 2000 + q } else { 4000 + q - 64 }))
+                            .collect(),
+                    }],
+                    second: 0,
+                };
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let mut candidates = aligner.extend_genomic_rounds(
+                    &read,
+                    &mins,
+                    Some(&complete),
+                    Some(&repeat),
+                    None,
+                    true,
+                );
+                assert!(
+                    candidates.iter().any(|p| p.pos == 1000),
+                    "priority proposal must remain"
+                );
+                for p in &mut candidates {
+                    aligner.rescore_strict(&query, p);
+                }
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner
+                    .arbitrate(&read, candidates, mins.len(), true)
+                    .unwrap();
+                let mut expected = vec![
+                    CigarOp::Match(64),
+                    CigarOp::RefSkip(1936),
+                    CigarOp::Match(71),
+                ];
+                if leading {
+                    expected.insert(0, CigarOp::SoftClip(15));
+                } else {
+                    expected.push(CigarOp::SoftClip(15));
+                }
+                assert_eq!(
+                    result.pos, 2000,
+                    "stronger spliced second-round path must compete"
+                );
+                assert_eq!(result.cigar, expected);
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,16 @@
 # Known scientific qualification issues
 
+## Limited-search extension priority (dev.13 proposal)
+
+Higher repeat-chain scores can exhaust the shared extension budget before
+an existing stronger sequence path is extended. Dev.13 preserves the nonempty
+complete first round's extension priority only after limited mid-occurrence
+search. This does not guarantee complete candidate generation, reserve a slot
+for every repeat path, repair every technical-tail error, or certify first-round
+placements. See `limited-search-extension-priority.md`. Per-read full replay,
+independent family-heldout accuracy and confidence qualification remain required.
+
+
 Dev.12 proposes bounded whole-seed-list candidate generation for overflowing
 mid-occurrence pools. Every affected placement carries incomplete-search
 evidence and MAPQ 0, including mate fallback. Retaining a placement does not
