@@ -103,3 +103,17 @@ CIGAR/query-reference consumption, missing and inconsistent junction metadata,
 and an equal-locus-pair editing trigger that must retain MAPQ 0 ambiguity.
 This does not guarantee recovery of an exon with no chain anchors or calibrate
 MAPQ against a population of reads.
+
+## Fast proposal reconstruction (dev.6)
+
+The fast constructor retains its existing fragment-pair selection and dual
+mismatch split-verification gates. Reconstruct from that selected pair: refine
+its own tight read boundary with the existing read-aware routine (or retain
+the pair's diagonal boundary when the routine cannot apply), concatenate
+flanking exon windows, extend against that pseudo-reference and stitch using
+the very same junction. The emitted score is the real extension score, rather
+than a fabricated full-read match total. Retain legal outer clips and indels.
+Do not rebuild from an unrelated invoking chain. The generic spliced path
+still runs independently. A synthetic asymmetric 60/79-base splice with an
+11-base technical clip fails construction consistency on dev.5 and passes
+on both read strands and both genomic motif orientations after reconstruction.

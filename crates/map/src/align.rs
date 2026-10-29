@@ -2950,6 +2950,80 @@ mod tests {
     }
 
     #[test]
+    fn intron_fast_path_reconstructs_asymmetric_exons_with_technical_clips() {
+        let mut state = 0x517cc1b7u64;
+        let mut genome: Vec<u8> = (0..5000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        for (donor, acceptor) in [(b"GT", b"AG"), (b"CT", b"AC")] {
+            genome[1060..1062].copy_from_slice(donor);
+            genome[2998..3000].copy_from_slice(acceptor);
+            // Unique seam in either motif orientation (no one-base slide).
+            genome[1059] = b'T';
+            genome[3000] = b'A';
+            let mut query = b"N".repeat(11);
+            query.extend_from_slice(&genome[1000..1060]);
+            query.extend_from_slice(&genome[3000..3079]);
+            let reference = ref_from(std::str::from_utf8(&genome).unwrap());
+            for strand in [Strand::Plus, Strand::Minus] {
+                let anchors: Vec<_> = [(11, 1000, 60), (71, 3000, 79)]
+                    .into_iter()
+                    .flat_map(|(q, r, span)| {
+                        (3..span - 14)
+                            .step_by(4)
+                            .map(move |offset| crate::seed::Anchor {
+                                contig: 0,
+                                strand,
+                                qpos: q + offset,
+                                rpos: r + offset,
+                            })
+                    })
+                    .collect();
+                let hit = crate::intron_chain::try_intron_chain_placement(
+                    &reference,
+                    &JunctionLib::default(),
+                    &query,
+                    &anchors,
+                    15,
+                    &crate::intron_chain::IntronParams::default(),
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                )
+                .expect("supported fragment pair must retain an independent fast proposal");
+                let p = Placement::from_genomic(
+                    0,
+                    hit.genomic_start(),
+                    strand,
+                    hit.cigar,
+                    hit.junctions,
+                    90,
+                    hit.extension.score,
+                );
+                assert!(
+                    p.has_consistent_junctions(),
+                    "fast proposal CIGAR and junction disagree"
+                );
+                assert_eq!(p.pos, 1000);
+                assert_eq!(
+                    p.cigar,
+                    vec![
+                        CigarOp::SoftClip(11),
+                        CigarOp::Match(60),
+                        CigarOp::RefSkip(1940),
+                        CigarOp::Match(79),
+                    ]
+                );
+                assert_eq!(hit.extension.score, 278);
+            }
+        }
+    }
+
+    #[test]
     fn intron_proposal_junctions_must_match_cigar_reference_intervals() {
         let mut p = placement(
             0,

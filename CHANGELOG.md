@@ -24,6 +24,14 @@
 
 ### Fixed
 
+- In `1.1.1-dev.6`, reconstruct fast intron candidates by extending a
+  pseudo-reference from their own fragment pair, then stitch at the same
+  refined junction. This replaces the midpoint M-N-M assembly that could
+  disagree with refined genomic boundaries and drops neither outer clips nor
+  indels. Existing split-verification thresholds remain unchanged. The dev.5
+  seam rejection alone lost supported fast candidates in human replay;
+  that failed candidate and its results remain historical evidence.
+
 - In `1.1.1-dev.5`, intron-chain fast proposals retain their own junction
   geometry and must agree with their CIGAR reference skips. A fast proposal
   also permits independent generic spliced candidate generation before common

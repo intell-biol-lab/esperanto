@@ -5,17 +5,17 @@
 //! maximal exact matches (MEMs), MEMs cluster into fragments by implied
 //! read-start (±5bp). A fragment covering at least 55% of the read routes to
 //! the unspliced paths. Otherwise the best fragment pair is scored as
-//! `cov*4 + anchors*3 − bal`, EA-Myers sharpens both breakpoints, the split is
-//! verified under dual mismatch-rate thresholds, and the final CIGAR is
-//! guarded for read-length conservation. Any failing stage returns `None`;
+//! `cov*4 + anchors*3 − bal`, EA-Myers checks the split under dual mismatch-rate
+//! thresholds, then the same fragment pair supplies a read-aware junction and
+//! pseudo-reference extension. The stitched CIGAR conserves query length. Any failing stage returns `None`;
 //! the caller falls through to later paths.
 
-use crate::extend::{CigarOp, ExtendBuffer, ExtendParams, Extension};
+use crate::extend::{extend_hint, CigarOp, DiagHint, ExtendBuffer, ExtendParams};
 use crate::fasta::Reference;
 use crate::gtf::{Junction, JunctionLib, RefinedJunction};
 use crate::myers_ea::{infix_best_end, infix_best_start};
 use crate::seed::{Anchor, Strand};
-use crate::splice::SplicedAlignment;
+use crate::splice::{refine_junction_read, stitch_cigar, SpliceParams, SplicedAlignment};
 
 /// Intron-chain parameters (see parameter table).
 #[derive(Clone, Copy, Debug)]
@@ -280,7 +280,7 @@ pub fn best_frag_pair(frags: &[Frag], intron_max: u32) -> Option<FragPair> {
 /// Pattern = `query[pat_start..junction_off]` with `pat_start = max(junction_off
 /// − refine_pattern_len, text_lo_in_read)` where `text_lo_in_read = (lo −
 /// frag_implied_start + 2).max(0)`. Empty window/pattern ⇒ `frag_ref_hi − 1`.
-/// The returned coordinate is adopted directly (no signal comparison).
+/// This coordinate is used by the split verification gate.
 #[allow(clippy::too_many_arguments)]
 pub fn refine_donor_end(
     ctg: &crate::fasta::Contig,
@@ -386,18 +386,18 @@ pub fn cigar_conserving(cigar: &[CigarOp], read_len: usize) -> bool {
 
 /// Two-segment spliced placement over the anchor set; `None` at any failing
 /// stage. The read must be in alignment orientation (anchor `qpos` space).
-/// EA-refined breakpoints are adopted directly; `verify_split_read` is the
-/// only acceptance stage.
+/// EA-refined breakpoints feed `verify_split_read`. Reconstruction uses the
+/// same fragment pair, read-aware junction refinement and a stitched extension.
 #[allow(clippy::too_many_arguments)]
 pub fn try_intron_chain_placement(
     reference: &Reference,
-    _lib: &JunctionLib,
+    lib: &JunctionLib,
     read: &[u8],
     anchors: &[Anchor],
     k: u32,
     params: &IntronParams,
-    _extend_params: &ExtendParams,
-    _buf: &mut ExtendBuffer,
+    extend_params: &ExtendParams,
+    buf: &mut ExtendBuffer,
 ) -> Option<SplicedAlignment> {
     if anchors.is_empty() || read.is_empty() {
         return None;
@@ -456,52 +456,82 @@ pub fn try_intron_chain_placement(
         return None;
     }
 
-    // Assembly : [Match(read_break)] N(intron) [Match(rest)]
-    // — pure M blocks, no soft clips, no indels.
-    let read_break = ((left.q_hi + right.q_lo) / 2) as usize;
-    let frag1_len = read_break;
-    let frag2_len = read.len() - read_break;
-    let mut cigar = Vec::with_capacity(3);
-    if frag1_len > 0 {
-        cigar.push(CigarOp::Match(frag1_len as u32));
-    }
-    cigar.push(CigarOp::RefSkip(intron_len as u32));
-    if frag2_len > 0 {
-        cigar.push(CigarOp::Match(frag2_len as u32));
-    }
-    if !cigar_conserving(&cigar, read.len()) {
+    // Reconstruct from the same fragment pair, rather than combining an
+    // EA-refined intron length with an unrelated midpoint M breakpoint.
+    // The existing split verification above remains the acceptance gate.
+    let refined = refine_junction_read(
+        reference,
+        read,
+        left.contig,
+        left.r_hi,
+        right.r_lo,
+        left.q_hi,
+        right.q_lo,
+        minus,
+        lib,
+        &SpliceParams {
+            max_intron: params.intron_max,
+            ..SpliceParams::default()
+        },
+    )
+    .unwrap_or_else(|| {
+        let junction = Junction {
+            contig: left.contig,
+            start: pair.intron_start,
+            end: pair.intron_end,
+            minus_strand: minus,
+        };
+        RefinedJunction {
+            known_support: lib.support(&junction),
+            signal: crate::splice::junction_signal(ctg, &junction),
+            junction,
+        }
+    });
+    let junction = refined.junction;
+    if junction.end <= junction.start
+        || junction.end - junction.start < MIN_INTRON
+        || junction.end - junction.start > params.intron_max
+    {
         return None;
     }
-
-    let refined = RefinedJunction {
-        junction: Junction {
-            contig: left.contig,
-            start: (donor_end + 1) as u32,
-            end: acceptor_start as u32,
-            minus_strand: minus,
-        },
-        signal: crate::gtf::SpliceSignal::NonCanonical,
-        known_support: 0,
-    };
-    let pos = left.off_lo().max(0) as u32;
-    let read_len32 = read.len() as u32;
+    let left_start = left.r_lo.saturating_sub(read.len() as u32);
+    let right_end = (right.r_hi as u64 + read.len() as u64).min(ctg.len as u64) as u32;
+    if left_start >= junction.start || junction.end >= right_end {
+        return None;
+    }
     let exon_bounds = vec![
-        (0u32, pos, pos + frag1_len as u32),
-        (
-            frag1_len as u32,
-            acceptor_start as u32,
-            acceptor_start as u32 + frag2_len as u32,
-        ),
+        (0, left_start, junction.start),
+        (junction.start - left_start, junction.end, right_end),
     ];
-    Some(SplicedAlignment {
-        extension: Extension {
-            read_start: 0,
-            read_end: read_len32,
-            ref_start: 0,
-            cigar: cigar.clone(),
-            score: read_len32 as i32 * 2,
+    let mut pseudo = ctg.slice_ascii(left_start, junction.start);
+    ctg.decode_append(junction.end, right_end, &mut pseudo);
+    let extension = extend_hint(
+        read,
+        &pseudo,
+        extend_params,
+        buf,
+        DiagHint {
+            offset: left.off_lo() - left_start as i64,
+            num: 1,
+            den: 1,
         },
-        junctions: vec![refined],
+    );
+    let junctions = vec![refined];
+    let cigar = stitch_cigar(
+        &extension.cigar,
+        extension.ref_start,
+        &exon_bounds,
+        &junctions,
+    );
+    if extension.score <= 0
+        || !cigar_conserving(&cigar, read.len())
+        || !cigar.iter().any(|op| matches!(op, CigarOp::RefSkip(_)))
+    {
+        return None;
+    }
+    Some(SplicedAlignment {
+        extension,
+        junctions,
         cigar,
         exon_bounds,
     })

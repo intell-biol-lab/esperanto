@@ -99,3 +99,11 @@ A generic candidate can still cover only the last two of three true exons:
 the missing first exon lacks chain anchors in this case. Recovery of that
 partial body does not establish full read recall, general accuracy, or MAPQ
 calibration. Human replay results belong in the separate research report.
+
+Dev.5 alone is not a freeze candidate: seam rejection exposed that the fast
+constructor already combined refined genomic coordinates with a midpoint
+query split. Some supported fast proposals disappeared when the generic
+chain could not reproduce them. Dev.6 reconstructs from the selected fragment
+pair using pseudo-reference extension and consistent stitching. Historical
+dev.5 output remains a failed scientific qualification candidate even though
+its interface and unit gates passed.
