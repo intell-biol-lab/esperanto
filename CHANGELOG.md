@@ -4,6 +4,16 @@
 
 ### Organization development
 
+- In `1.1.1-dev.15`, propose paired read-through endpoint inference from exact adapters and a
+  unique QC-domain overlap before sequence interning/alignment. Use explicitly
+  supported effective intervals, preserve raw SEQ/QUAL/CIGAR consumption, and
+  persist XF on placed/unplaced reads. Schema-2 diagnostics declare conditional
+  coverage. Exclude XF-bound reads from later raw collapsed rescue and preserve
+  excluded unresolved reads during unrelated rescue/eviction and restart.
+  This changes endpoint preprocessing/eligibility; it is not human-qualified,
+  adopted or released. See the paired-fragment endpoint contract and its
+  demonstrated biological adapter-mimic limitation.
+
 - In `1.1.1-dev.9`, add opt-in `map --candidate-diagnostics` JSONL evidence
   for positive legal independent and mate-window candidates, including those
   below primary coverage. Preserve input/mate identities and pass2 ordering;
@@ -29,6 +39,11 @@
 - Updated the human model bundle. The classifier is retrained on an expanded, donor-partitioned panel (64 training, 16 calibration, and 20 held-out evaluation donors), and the decision threshold is recalibrated on the calibration donors. The 27-feature contract, input requirements, and output formats are unchanged.
 
 ### Fixed
+
+- Remove two unjustified full-matrix `read_length<=reference_length` debug
+  assertions. Short splice pseudo-references are valid rectangular local
+  alignments. Keep release recurrence, widths, dispatch and scores unchanged;
+  expand scalar/AVX2 rectangular parity controls. See the local-window contract.
 
 - In `1.1.1-dev.14`, size both continuous extension windows using uncovered
   query ends as well as the existing flank. Sparse anchors no longer truncate

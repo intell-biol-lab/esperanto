@@ -381,6 +381,39 @@ pub fn map_stage_with_diagnostics(
     ),
     FlowError,
 > {
+    map_stage_with_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        true,
+    )
+}
+
+/// Mapping options shared by normal RNA flow and explicit endpoint ablations.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -388,7 +421,8 @@ pub fn map_stage_with_diagnostics(
     // Primary alignment uses all four bases. Hyperediting rescue uses
     // separate three-letter transforms (Porath, Carmi & Levanon,
     // Nat Commun 5:4726, 2014).
-    let config = AlignConfig::rna_default();
+    let mut config = AlignConfig::rna_default();
+    config.fragment_endpoints = fragment_endpoints;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,
@@ -603,6 +637,8 @@ fn rescue_collapsed(
     // excessive unexplained mismatches. Replace a deferred placement only
     // after a rescue direction passes all evidence checks.
     let original_seed_limits = collect_seed_limits(raw_bam)?;
+    let fragment_bound = collect_fragment_bounds(raw_bam)?;
+    fq.retain(|(name, _, _)| !fragment_bound.contains(name.as_bytes()));
     let n_unmapped = fq.len();
     fq.extend(collect_deferred(raw_bam)?);
     let dropped = dedup_pool(&mut fq);
@@ -1050,13 +1086,20 @@ fn rescue_collapsed(
     // exists, and an interrupted pass must leave the pool complete for the
     // re-run that resume schedules.
     {
+        // Re-read the complete durable pool, not only eligible rescue entrants:
+        // XF-bound reads were excluded from fq but remain unresolved reads.
+        use esperanto_map::fastq::RecordSource as _;
+        let mut original =
+            esperanto_map::fastq::FastqReader::open(&unm_path).map_err(stage_err("map"))?;
         let mut out = Vec::new();
-        for (name, seq, qual) in &fq[..n_unmapped] {
-            if !rescued_names.contains(name.as_str()) {
-                out.extend_from_slice(format!("@{name}\n").as_bytes());
-                out.extend_from_slice(seq);
+        while let Some(rec) = original.next_record().map_err(stage_err("map"))? {
+            if !rescued_names.contains(String::from_utf8_lossy(&rec.name).as_ref()) {
+                out.extend_from_slice(b"@");
+                out.extend_from_slice(&rec.name);
+                out.push(b'\n');
+                out.extend_from_slice(&rec.seq);
                 out.extend_from_slice(b"\n+\n");
-                out.extend_from_slice(qual);
+                out.extend_from_slice(&rec.qual);
                 out.push(b'\n');
             }
         }
@@ -1085,6 +1128,9 @@ fn merge_drops_record(
     rec: &rust_htslib::bam::Record,
     rescued_slots: &std::collections::HashSet<(Vec<u8>, usize)>,
 ) -> bool {
+    if has_fragment_endpoint(rec) {
+        return false;
+    }
     let slot = usize::from(rec.is_paired() && !rec.is_first_in_template());
     if rescued_slots.contains(&(rec.qname().to_vec(), slot)) {
         return true;
@@ -1172,6 +1218,46 @@ fn collect_seed_limits(raw_bam: &Path) -> Result<std::collections::HashSet<Vec<u
 /// shape so the passes below cannot tell them apart.
 type RescueRead = (String, Vec<u8>, Vec<u8>);
 
+/// A declared, valid effective prefix must not be realigned as a raw read.
+/// BAM integer storage can use any of the six widths even for one writer.
+fn has_fragment_endpoint(rec: &rust_htslib::bam::Record) -> bool {
+    use rust_htslib::bam::record::Aux;
+    let n = match rec.aux(b"XF") {
+        Ok(Aux::I8(n)) => i64::from(n),
+        Ok(Aux::U8(n)) => i64::from(n),
+        Ok(Aux::I16(n)) => i64::from(n),
+        Ok(Aux::U16(n)) => i64::from(n),
+        Ok(Aux::I32(n)) => i64::from(n),
+        Ok(Aux::U32(n)) => i64::from(n),
+        _ => return false,
+    };
+    n >= 31 && n < rec.seq_len() as i64
+}
+
+/// Durable primary identities, with mate slots matching unmapped FASTQ names.
+fn collect_fragment_bounds(
+    raw_bam: &Path,
+) -> Result<std::collections::HashSet<Vec<u8>>, FlowError> {
+    let mut rdr = rust_htslib::bam::Reader::from_path(raw_bam).map_err(stage_err("map"))?;
+    let mut bound = std::collections::HashSet::new();
+    for r in rdr.records() {
+        let rec = r.map_err(stage_err("map"))?;
+        if rec.is_secondary() || rec.is_supplementary() || !has_fragment_endpoint(&rec) {
+            continue;
+        }
+        let mut name = rec.qname().to_vec();
+        if rec.is_paired() {
+            name.extend_from_slice(if rec.is_first_in_template() {
+                b"/1"
+            } else {
+                b"/2"
+            });
+        }
+        bound.insert(name);
+    }
+    Ok(bound)
+}
+
 /// Return primary placements for rescue in their sequenced orientation.
 /// Eligible reads have aligned coverage below RESCUE_CLIPPED_COVERAGE or
 /// ordinary-mismatch density at least HYPEREDIT_MIN_DENSITY. Rescued records
@@ -1185,7 +1271,11 @@ fn collect_deferred(raw_bam: &Path) -> Result<Vec<RescueRead>, FlowError> {
     let mut out = Vec::new();
     for r in rdr.records() {
         let rec = r.map_err(stage_err("map"))?;
-        if rec.is_unmapped() || rec.is_secondary() || rec.is_supplementary() {
+        if rec.is_unmapped()
+            || rec.is_secondary()
+            || rec.is_supplementary()
+            || has_fragment_endpoint(&rec)
+        {
             continue;
         }
         // Decoy placements are explained reads: their source is absent from
@@ -1245,9 +1335,10 @@ fn collect_deferred(raw_bam: &Path) -> Result<Vec<RescueRead>, FlowError> {
     Ok(out)
 }
 
-/// Keep the first pool entry per (template name, mate slot). Unmapped reads
-/// precede deferred reads, preserving the prefix used during FASTQ eviction.
-/// This also prevents duplicate records after an interrupted BAM merge.
+/// Keep the first pool entry per (template name, mate slot). Unmapped entrants
+/// precede deferred reads. Eviction re-reads the complete original FASTQ pool,
+/// including endpoint-bound reads excluded here. This also prevents duplicate
+/// records after an interrupted BAM merge.
 fn dedup_pool(fq: &mut Vec<RescueRead>) -> usize {
     let mut seen = std::collections::HashSet::new();
     let before = fq.len();
@@ -2074,6 +2165,105 @@ mod rescue_tests {
     }
 
     #[test]
+    fn paired_fragment_bound_record_is_not_deferred_for_raw_clipping() {
+        use rust_htslib::bam::record::{Aux, Cigar, CigarString};
+        let d = std::env::temp_dir().join(format!("esp-fragment-deferred-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let bam = d.join("raw.bam");
+        let mut hdr = rust_htslib::bam::Header::new();
+        let mut sq = rust_htslib::bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chrT").push_tag(b"LN", 2000);
+        hdr.push_record(&sq);
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, supported) in [(b"fragment".as_slice(), true), (b"raw".as_slice(), false)] {
+                let mut r = rust_htslib::bam::Record::new();
+                r.set(
+                    name,
+                    Some(&CigarString(vec![Cigar::Match(80), Cigar::SoftClip(70)])),
+                    &vec![b'A'; 150],
+                    &vec![40; 150],
+                );
+                r.set_tid(0);
+                r.set_pos(100);
+                r.set_flags(0);
+                if supported {
+                    r.push_aux(b"XF", Aux::I32(80)).unwrap();
+                }
+                writer.write(&r).unwrap();
+            }
+        }
+        let pool = collect_deferred(&bam).unwrap();
+        assert_eq!(
+            pool.len(),
+            1,
+            "supported fragments must not re-enter raw rescue"
+        );
+        assert_eq!(pool[0].0, "raw");
+    }
+
+    #[test]
+    fn paired_fragment_boundary_registry_is_mate_specific_and_validates_tags() {
+        use rust_htslib::bam::record::Aux;
+        let d = std::env::temp_dir().join(format!("esp-fragment-registry-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let bam = d.join("raw.bam");
+        let hdr = rust_htslib::bam::Header::new();
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, flags, tag) in [
+                ("pair", 69, Some(Aux::U8(80))),
+                ("pair", 133, None),
+                ("standalone", 4, Some(Aux::I16(80))),
+                ("wide", 4, Some(Aux::U32(80))),
+                ("negative", 4, Some(Aux::I8(-1))),
+                ("too_short", 4, Some(Aux::U8(30))),
+                ("whole_read", 4, Some(Aux::I32(150))),
+                ("malformed", 4, Some(Aux::String("80"))),
+                ("secondary", 4 | 256, Some(Aux::I32(80))),
+                ("supplementary", 4 | 2048, Some(Aux::I32(80))),
+            ] {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(name.as_bytes(), None, &vec![b'A'; 150], &vec![40; 150]);
+                rec.set_flags(flags);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                if let Some(tag) = tag {
+                    rec.push_aux(b"XF", tag).unwrap();
+                }
+                writer.write(&rec).unwrap();
+            }
+        }
+        let bound = collect_fragment_bounds(&bam).unwrap();
+        assert_eq!(bound.len(), 3);
+        for name in ["pair/1", "standalone", "wide"] {
+            assert!(bound.contains(name.as_bytes()), "{name}");
+        }
+        assert!(!bound.contains(b"pair/2".as_slice()));
+    }
+
+    #[test]
+    fn paired_fragment_bound_record_cannot_be_dropped_as_stale_rescue() {
+        use rust_htslib::bam::record::Aux;
+        let mut rec = rust_htslib::bam::Record::new();
+        rec.set(b"bound", None, &vec![b'A'; 150], &vec![40; 150]);
+        rec.set_flags(4);
+        rec.push_aux(b"XF", Aux::I32(80)).unwrap();
+        rec.push_aux(b"RE", Aux::String("collapsed")).unwrap();
+        let mut slots = std::collections::HashSet::new();
+        assert!(!merge_drops_record(&rec, &slots));
+        slots.insert((b"bound".to_vec(), 0));
+        assert!(
+            !merge_drops_record(&rec, &slots),
+            "excluded identities cannot be replaced"
+        );
+    }
+
+    #[test]
     fn dedup_pool_drops_cross_source_duplicates() {
         let read = |n: &str| (n.to_string(), b"ACGT".to_vec(), b"IIII".to_vec());
         // The unmapped half comes first; the deferred half re-offers x/1
@@ -2128,15 +2318,25 @@ mod rescue_tests {
     /// same read from both pool halves. Every counter must stay singular.
     #[test]
     fn rescue_rerun_after_merge_without_eviction_does_not_double() {
-        rescue_roundtrip(false);
+        rescue_roundtrip(false, false, false);
     }
 
     #[test]
     fn limited_original_search_survives_complete_collapsed_rescue_and_rerun() {
-        rescue_roundtrip(true);
+        rescue_roundtrip(true, false, false);
     }
 
-    fn rescue_roundtrip(limited: bool) {
+    #[test]
+    fn paired_fragment_unmapped_boundary_survives_raw_rescue_and_restart() {
+        rescue_roundtrip(true, true, false);
+    }
+
+    #[test]
+    fn paired_fragment_mixed_rescue_preserves_excluded_unmapped_records() {
+        rescue_roundtrip(true, false, true);
+    }
+
+    fn rescue_roundtrip(limited: bool, bounded: bool, mixed: bool) {
         // Same period-7 fixture as the verify tests.
         let bg = b"CGTATGCCTAGG";
         let mut seq = Vec::with_capacity(400);
@@ -2150,8 +2350,10 @@ mod rescue_tests {
         let read = hyper_read(true_ref, 20, 20, 110);
         let qual = vec![b'I'; 150];
 
-        let d =
-            std::env::temp_dir().join(format!("esp-rescue-e2e-{}-{limited}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "esp-rescue-e2e-{}-{limited}-{bounded}-{mixed}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&d);
         let map_dir = d.join("map");
         fs::create_dir_all(&map_dir).unwrap();
@@ -2193,11 +2395,25 @@ mod rescue_tests {
                 rust_htslib::bam::record::Aux::String("mapq_src=seed_budget;seed_search=limited"),
             )
             .unwrap();
+            if bounded {
+                rec.push_aux(b"XF", rust_htslib::bam::record::Aux::I32(80))
+                    .unwrap();
+            }
             writer.write(&rec).unwrap();
+            if mixed {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(b"hyperbound", None, &read, &vec![40; read.len()]);
+                rec.set_flags(4);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                rec.push_aux(b"XF", rust_htslib::bam::record::Aux::I32(80))
+                    .unwrap();
+                writer.write(&rec).unwrap();
+            }
         }
         let unm = map_dir.join("unmapped.fq.gz");
         let write_unmapped = |with_read: bool| {
-            let text = if with_read {
+            let mut text = if with_read {
                 format!(
                     "@hyper1\n{}\n+\n{}\n",
                     String::from_utf8(read.clone()).unwrap(),
@@ -2206,6 +2422,13 @@ mod rescue_tests {
             } else {
                 String::new()
             };
+            if mixed {
+                text.push_str(&format!(
+                    "@hyperbound\n{}\n+\n{}\n",
+                    String::from_utf8(read.clone()).unwrap(),
+                    String::from_utf8(qual.clone()).unwrap(),
+                ));
+            }
             let f = fs::File::create(&unm).unwrap();
             let mut e = flate2::write::GzEncoder::new(f, flate2::Compression::new(1));
             use std::io::Write as _;
@@ -2244,10 +2467,58 @@ mod rescue_tests {
 
         // First pass: the read is rescued and the seal is written.
         let n1 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
+        let check_bound_unmapped = || {
+            if mixed {
+                use esperanto_map::fastq::RecordSource as _;
+                let mut fq = esperanto_map::fastq::FastqReader::open(&unm).unwrap();
+                let record = fq
+                    .next_record()
+                    .unwrap()
+                    .expect("excluded unmapped read must survive");
+                assert_eq!(record.name, b"hyperbound");
+                assert_eq!(record.seq, read);
+                assert_eq!(record.qual, qual);
+                assert!(fq.next_record().unwrap().is_none());
+                let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+                let mut found = 0;
+                for rec in rdr.records() {
+                    let rec = rec.unwrap();
+                    if rec.qname() == b"hyperbound" {
+                        assert!(rec.is_unmapped() && rec.aux(b"XF").is_ok());
+                        found += 1;
+                    }
+                }
+                assert_eq!(found, 1);
+            }
+        };
+        check_bound_unmapped();
+        if bounded {
+            assert_eq!(n1, 0, "supported endpoint must not re-enter raw rescue");
+            let before = fs::read(&raw_bam).unwrap();
+            let before_unmapped = fs::read(&unm).unwrap();
+            let n2 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
+            assert_eq!(n2, 0);
+            assert_eq!(fs::read(&raw_bam).unwrap(), before);
+            assert_eq!(fs::read(&unm).unwrap(), before_unmapped);
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr.records().next().unwrap().unwrap();
+            assert!(rec.is_unmapped());
+            assert!(rec.aux(b"XF").is_ok());
+            assert_eq!(rec.mapq(), 0);
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+            return;
+        }
         assert_eq!(n1, 1);
         if limited {
             let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
-            let rec = rdr.records().next().unwrap().unwrap();
+            let rec = rdr
+                .records()
+                .map(Result::unwrap)
+                .find(|rec| rec.qname() == b"hyper1")
+                .unwrap();
             assert_eq!(
                 rec.mapq(),
                 0,
@@ -2270,7 +2541,11 @@ mod rescue_tests {
         assert_eq!(n2, 1);
         if limited {
             let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
-            let rec = rdr.records().next().unwrap().unwrap();
+            let rec = rdr
+                .records()
+                .map(Result::unwrap)
+                .find(|rec| rec.qname() == b"hyper1")
+                .unwrap();
             assert_eq!(rec.mapq(), 0);
             let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
                 panic!("EK")
@@ -2280,6 +2555,7 @@ mod rescue_tests {
         assert_eq!(re_count(&raw_bam), 1);
         assert_eq!(rescued_tsv_rows(&map_dir), 1);
         assert_eq!(sealed_value(&map_dir), Some(1));
+        check_bound_unmapped();
         let _ = fs::remove_dir_all(&d);
     }
 }

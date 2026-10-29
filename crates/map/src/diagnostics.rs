@@ -18,6 +18,8 @@ pub struct CandidateEvidence {
     pub reference_start0: u32,
     pub strand: &'static str,
     pub cigar: String,
+    #[serde(skip)]
+    cigar_ops: Vec<CigarOp>,
     pub origin: &'static str,
     pub common_score: i32,
     pub editing_score_mode: &'static str,
@@ -70,6 +72,7 @@ impl CandidatePool {
                 reference_start0: p.pos,
                 strand: if p.strand == Strand::Plus { "+" } else { "-" },
                 cigar: cigar_text(&p.cigar),
+                cigar_ops: p.cigar.clone(),
                 origin: p.origin.label(),
                 common_score: p.strict.score,
                 editing_score_mode: match p.ea_dir {
@@ -163,6 +166,40 @@ pub(crate) fn write_row(
     independent: CandidatePool,
     mate_attempt: Option<CandidatePool>,
 ) -> Result<(), AlignError> {
+    write_row_with_fragment(
+        sink,
+        read,
+        mate,
+        primary_placed,
+        independent,
+        mate_attempt,
+        None,
+    )
+}
+
+pub(crate) fn write_row_with_fragment(
+    sink: &mut dyn Write,
+    read: &FastqRecord,
+    mate: Option<u8>,
+    primary_placed: bool,
+    mut independent: CandidatePool,
+    mut mate_attempt: Option<CandidatePool>,
+    fragment: Option<crate::fragment::FragmentEvidence>,
+) -> Result<(), AlignError> {
+    if let Some(fragment) = fragment {
+        let suffix = read.seq.len() - fragment.fragment_length;
+        for pool in std::iter::once(&mut independent).chain(mate_attempt.iter_mut()) {
+            for candidate in &mut pool.candidates {
+                let strand = if candidate.strand == "+" {
+                    Strand::Plus
+                } else {
+                    Strand::Minus
+                };
+                crate::fragment::lift_cigar(&mut candidate.cigar_ops, strand, suffix);
+                candidate.cigar = cigar_text(&candidate.cigar_ops);
+            }
+        }
+    }
     #[derive(Serialize)]
     struct Row<'a> {
         schema_version: u32,
@@ -171,6 +208,12 @@ pub(crate) fn write_row(
         mate: Option<u8>,
         read_length: usize,
         minimum_primary_query_bases: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effective_read_length: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effective_minimum_primary_query_bases: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fragment_evidence: Option<crate::fragment::FragmentEvidence>,
         pass2_primary_placed: bool,
         independent: CandidatePool,
         mate_attempt: Option<CandidatePool>,
@@ -182,13 +225,17 @@ pub(crate) fn write_row(
     let name = std::str::from_utf8(&read.name)
         .map_err(|e| error(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     let row = Row {
-        schema_version: 1,
+        schema_version: if fragment.is_some() { 2 } else { 1 },
         phase: "pass2_before_collapsed_rescue",
         read_name: name,
         mate,
         read_length: read.seq.len(),
         minimum_primary_query_bases: (REFUSE_MIN_ALIGNED_FRAC * read.seq.len() as f64).ceil()
             as usize,
+        effective_read_length: fragment.map(|f| f.fragment_length),
+        effective_minimum_primary_query_bases: fragment
+            .map(|f| (REFUSE_MIN_ALIGNED_FRAC * f.fragment_length as f64).ceil() as usize),
+        fragment_evidence: fragment,
         pass2_primary_placed: primary_placed,
         independent,
         mate_attempt,

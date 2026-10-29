@@ -57,6 +57,8 @@ pub struct AlignConfig {
     pub extend: ExtendParams,
     /// RNA mode: dense seeding + intron-aware chaining + splice machinery.
     pub rna: bool,
+    /// Infer conservative paired read-through endpoints before sequence caching.
+    pub fragment_endpoints: bool,
 }
 
 impl Default for AlignConfig {
@@ -67,6 +69,7 @@ impl Default for AlignConfig {
             chain: crate::chain::ChainParams::default(),
             extend: ExtendParams::default(),
             rna: false,
+            fragment_endpoints: false,
         }
     }
 }
@@ -79,6 +82,7 @@ impl AlignConfig {
             chain: crate::chain::ChainParams::rna_default(),
             extend: ExtendParams::default(),
             rna: true,
+            fragment_endpoints: true,
         }
     }
 }
@@ -3310,6 +3314,85 @@ mod tests {
                 let query = vec![if strand == Strand::Plus { b'A' } else { b'T' }; 150];
                 let result = aligner.arbitrate(&query, cache.placements.clone(), 5, true);
                 assert_eq!(result.is_some(), covered == 99);
+            }
+        }
+    }
+
+    #[test]
+    fn paired_fragment_diagnostic_52_53_uses_effective_coverage_in_both_pools() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [52, 53] {
+                let mut p = placement(
+                    0,
+                    100,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(80 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(80), &mut p);
+                let cache = CachedPlacements {
+                    placements: vec![p],
+                    n_seeds: 5,
+                    genomic_any: true,
+                    seed_budget: None,
+                };
+                let query = vec![if strand == Strand::Plus { b'A' } else { b'T' }; 80];
+                let result = aligner.arbitrate(&query, cache.placements.clone(), 5, true);
+                assert_eq!(result.is_some(), covered == 53);
+                let pool = cache.diagnostic_pool(aligner.index, 80, "independent");
+                let raw = crate::fastq::FastqRecord {
+                    name: b"boundary".to_vec(),
+                    seq: vec![b'A'; 150],
+                    qual: vec![b'I'; 150],
+                };
+                let fragment = crate::fragment::FragmentEvidence {
+                    fragment_length: 80,
+                    overlap_bases: 80,
+                    viable_offsets: 1,
+                    adapter_family: "truseq",
+                    adapter_bases_r1: 33,
+                    adapter_bases_r2: 33,
+                };
+                let mut bytes = Vec::new();
+                crate::diagnostics::write_row_with_fragment(
+                    &mut bytes,
+                    &raw,
+                    Some(1),
+                    result.is_some(),
+                    pool.clone(),
+                    Some(pool),
+                    Some(fragment),
+                )
+                .unwrap();
+                let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(row["schema_version"], 2);
+                assert_eq!(row["read_length"], 150);
+                assert_eq!(row["minimum_primary_query_bases"], 99);
+                assert_eq!(row["effective_read_length"], 80);
+                assert_eq!(row["effective_minimum_primary_query_bases"], 53);
+                for name in ["independent", "mate_attempt"] {
+                    assert_eq!(row[name]["scored_candidates"], 1);
+                    assert_eq!(row[name]["excluded_nonpositive"], 0);
+                    assert_eq!(row[name]["excluded_invalid_geometry"], 0);
+                    let c = &row[name]["candidates"][0];
+                    assert_eq!(c["informative_query_bases"], covered);
+                    assert_eq!(c["common_score"], 2 * covered);
+                    assert_eq!(
+                        c["eligibility"],
+                        if covered == 53 {
+                            "eligible"
+                        } else {
+                            "below_coverage"
+                        }
+                    );
+                    let expected = match (strand, covered) {
+                        (Strand::Plus, 52) => "52M98S",
+                        (Strand::Plus, _) => "53M97S",
+                        (Strand::Minus, 52) => "70S52M28S",
+                        (Strand::Minus, _) => "70S53M27S",
+                    };
+                    assert_eq!(c["cigar"], expected);
+                }
             }
         }
     }

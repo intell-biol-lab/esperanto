@@ -1,5 +1,15 @@
 # Known scientific qualification issues
 
+## Paired endpoint development proposal
+
+The worktree implements observable paired adapter/overlap inference, effective
+prefix alignment and raw-frame evidence. This remains a development proposal,
+not human-qualified/adopted software. It changes conditional coverage and
+raw collapsed-rescue admission. Identical adapter-like biological reads can
+lose real body sequence; synthetic checks explicitly preserve that limitation.
+See [the endpoint contract](paired-fragment-endpoints.md). The independent
+full replay, disabled ablation and source/family-heldout comparison remain.
+
 ## Sparse-anchor window qualification and remaining endpoint ties
 
 Dev.14 repairs continuous windows that omit available query ends; see

@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod extend;
 pub mod fasta;
 pub mod fastq;
+mod fragment;
 pub mod gtf;
 pub mod index;
 pub mod index_io;

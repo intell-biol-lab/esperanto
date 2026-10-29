@@ -11,6 +11,14 @@ The mapper aligns single-end or paired-end FASTQ reads to a `.paidx` genomic ind
 
 `AlignConfig::rna_default()` supplies the production parameters. Primary alignment uses strict four-letter matching. Junction discovery and a second alignment pass support unannotated splice junctions. Annotation and discovered junctions are combined deterministically.
 
+The paired-endpoint development proposal infers conservative read-through
+intervals before alignment/cache interning. RNA defaults enable it; DNA and
+single reads are unchanged. `map --no-fragment-endpoints` disables it.
+Supported effective intervals use the existing 0.66 fraction while preserving
+raw sequence/quality/output coordinates and declaring `XF:i:T` evidence.
+This is a new conditional eligibility/preprocessing policy, not scientific
+adoption; see [the endpoint contract](../../paired-fragment-endpoints.md).
+
 ## Coordinates and orientation
 
 Alignment positions and reference intervals use 0-based coordinates. CIGAR operations are `M`, `I`, `D`, `N`, and `S`; skipped introns use `N`. BAM sequence for a mapped minus-strand record is reverse-complemented and its qualities are reversed. Unmapped reads retain their original orientation.
@@ -26,6 +34,10 @@ The aligner can recover a read using an anchored mate. Alignment rescue and its 
 When `.ag.paidx` and `.tc.paidx` are present beside the primary index, the pipeline can realign unmapped and insufficiently covered reads using separate A-to-G and T-to-C transformations. These indexes use k=31 and w=10 and exclude decoy contigs.
 
 Placements must pass verification against the true four-letter reference. Required evidence includes an ungapped alignment, at most two non-editing mismatches, editing density at least 5%, editing-class purity above 60% (above 80% for reads of at most 60 bases), high-quality edited bases, and internal cluster geometry. Paired-end placements additionally require mate concordance. Accepted records carry `RE:Z:collapsed`; rescue outputs are sealed only after the merged BAM is complete.
+
+Valid XF-bound primary records, including unmapped ones, do not re-enter
+raw-read rescue or stale-rescue replacement. The complete original unmapped
+pool is preserved except for actual rescued identities, including after resume.
 
 ## Outputs
 

@@ -5,8 +5,9 @@
 evidence only: it does not supply primary/secondary BAM records, pileup inputs,
 confidence calibration, or biological-origin labels.
 
-Mapping policy, scoring, models and primary eligibility fraction (0.66) are
-unchanged. For a 150 bp read, the minimum informative coverage is 99 bp:
+The diagnostics flag does not change mapping policy, scoring, models or the
+primary eligibility fraction (0.66). Schema-1 rows use the raw read interval.
+For an unsupported 150 bp read, the minimum informative coverage is 99 bp:
 positive legal 96/98 bp candidates remain visible but cannot become primaries.
 An eligible fallback at another locus remains selectable, while a higher
 scoring short competitor still contributes to existing ambiguity handling.
@@ -19,7 +20,7 @@ discovery emits no rows.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `1` |
+| `schema_version` | Integer `1`, or `2` for directly inferred paired endpoints |
 | `phase` | `pass2_before_collapsed_rescue` |
 | `read_name` | Lossless UTF-8 FASTQ name, JSON escaped |
 | `mate` | `1` / `2` for paired reads, `null` for single reads |
@@ -28,6 +29,17 @@ discovery emits no rows.
 | `pass2_primary_placed` | Placement after pass2 mate arbitration |
 | `independent` | Independent normalized candidate pool |
 | `mate_attempt` | Last observed mate-window pool, or `null` if not attempted |
+
+The paired-endpoint development proposal additionally emits schema 2 for
+directly inferred pairs. It retains raw `read_length` and raw
+`minimum_primary_query_bases`, and adds `effective_read_length`,
+`effective_minimum_primary_query_bases` and `fragment_evidence`. Only these
+rows apply eligibility to the declared effective interval; their CIGARs still
+consume the complete raw query. The evidence records fragment length, overlap,
+viable offsets, adapter family and both adapter-prefix support lengths. See
+[the endpoint contract](paired-fragment-endpoints.md), including origin
+ambiguity, raw-rescue exclusions, ablation and independent audit requirements.
+Schema-1 consumers must not silently treat schema-2 eligibility as raw coverage.
 
 Collapsed rescue runs later in `map` and can change final BAM. Consumers must
 join final BAM independently; pass2 status is not final mapping status.

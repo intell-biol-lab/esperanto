@@ -31,11 +31,14 @@ pub struct MapArgs {
     /// Write pass2 candidate_diagnostics.jsonl before collapsed rescue (evidence only).
     #[arg(long)]
     candidate_diagnostics: bool,
+    /// Disable conservative paired read-through endpoint inference (ablation).
+    #[arg(long)]
+    no_fragment_endpoints: bool,
 }
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_diagnostics(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -44,6 +47,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         &a.out,
         crate::resolve::threads(a.threads),
         a.candidate_diagnostics,
+        !a.no_fragment_endpoints,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
