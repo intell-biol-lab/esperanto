@@ -2,6 +2,13 @@
 
 The mapper aligns single-end or paired-end FASTQ reads to a `.paidx` genomic index and writes BAM alignments. RNA alignment uses minimizer seeds, chaining, splice-aware extension, and paired-end evidence.
 
+Dev.17 adds bounded ordinary high-frequency context proposals after failure of
+both original chain rounds, while preserving old edge/splice/indel candidates.
+The additional scan/proposal cost and conservative MAPQ0 policy are specified
+in [the repeat-context contract](../../repeat-context-contract.md).
+`map --no-repeat-context` is a component ablation; converted rescue disables it.
+Human qualification and scientific adoption remain separate.
+
 In dev.16, an ordinary RNA query with no chain from either initial round can
 complete its query-edge seeds within the existing mid-round budgets. Successful
 rounds, the reference sketch, DNA and editing-variant paths are unchanged.

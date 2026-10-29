@@ -61,6 +61,8 @@ pub struct AlignConfig {
     pub rna: bool,
     /// Infer conservative paired read-through endpoints before sequence caching.
     pub fragment_endpoints: bool,
+    /// Additional bounded high-frequency ordinary context hypotheses.
+    pub repeat_context: bool,
 }
 
 impl Default for AlignConfig {
@@ -72,6 +74,7 @@ impl Default for AlignConfig {
             extend: ExtendParams::default(),
             rna: false,
             fragment_endpoints: false,
+            repeat_context: false,
         }
     }
 }
@@ -85,6 +88,7 @@ impl AlignConfig {
             extend: ExtendParams::default(),
             rna: true,
             fragment_endpoints: true,
+            repeat_context: true,
         }
     }
 }
@@ -816,10 +820,10 @@ impl<'a> Aligner<'a> {
             strand: best.strand,
             score: best.strict.score,
             second_score: second,
-            chain_score: if best.origin == crate::mapq::Origin::Genomic {
-                best.chain_score
-            } else {
+            chain_score: if best.origin == crate::mapq::Origin::L1 {
                 best.strict.score
+            } else {
+                best.chain_score
             },
             second_chain_score: 0,
             cigar: best.cigar.clone(),
@@ -1160,10 +1164,11 @@ impl<'a> Aligner<'a> {
         // even when the necessary k-mer lies wholly inside the retained query.
         // Only a complete chaining failure permits query-edge completion;
         // successful rounds, DNA and edit-variant search are left untouched.
-        if cfg.rna
+        let ordinary_failed = cfg.rna
             && !cfg.extend.edit_dir.is_on()
             && r1.as_ref().is_none_or(|r| r.best().is_none())
-            && r2.as_ref().is_none_or(|r| r.best().is_none())
+            && r2.as_ref().is_none_or(|r| r.best().is_none());
+        if ordinary_failed
             && append_query_edge_kmers(seq.len(), cfg.seed, &self.scratch.seed, &mut mins) > 0
         {
             if let Some(failed) = r2.take() {
@@ -1275,6 +1280,37 @@ impl<'a> Aligner<'a> {
             q.junctions = tmp.junctions;
         }
 
+        // Additional context candidates must not replace or consume the old
+        // chain/splice/indel extension work above. A perfect whole-query edge
+        // hit attains the ordinary score ceiling and bypasses this search.
+        if cfg.repeat_context
+            && ordinary_failed
+            && !placements.iter().any(|p| {
+                p.ext_score == cfg.extend.match_score * read_len as i32
+                    && p.cigar == [CigarOp::Match(read_len)]
+            })
+        {
+            if let Some((proposals, context)) =
+                crate::repeat_context::generate(self.index, seq, cfg.extend)
+            {
+                seed_budget
+                    .get_or_insert_with(Default::default)
+                    .repeat_context = Some(context);
+                placements.extend(proposals.into_iter().map(|p| {
+                    let mut candidate = Placement::from_genomic(
+                        p.contig,
+                        p.pos,
+                        p.strand,
+                        p.cigar,
+                        Vec::new(),
+                        0,
+                        p.score,
+                    );
+                    candidate.origin = crate::mapq::Origin::RepeatContext;
+                    candidate
+                }));
+            }
+        }
         let n_seeds = mins.len();
         self.scratch.mins_out = mins;
 
@@ -2490,6 +2526,9 @@ impl ReadAlignment {
 pub(crate) mod prefix_tests;
 
 #[cfg(test)]
+pub(crate) mod repeat_context_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2950,6 +2989,7 @@ mod tests {
                         eligible_anchors: 25000,
                         retained_anchors: 19000,
                         omitted_seeds: 1,
+                        repeat_context: None,
                     };
                     let result = aligner
                         .arbitrate_with_budget(&read, candidates, mins.len(), true, Some(budget))
@@ -3283,6 +3323,7 @@ mod tests {
             eligible_anchors: 25000,
             retained_anchors: 19000,
             omitted_seeds: 3,
+            repeat_context: None,
         };
         let result = aligner
             .arbitrate_with_budget(&read, vec![p.clone()], 30, true, Some(budget))

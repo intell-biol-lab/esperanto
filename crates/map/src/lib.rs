@@ -20,6 +20,7 @@ pub mod mapq;
 pub mod myers_ea;
 pub mod pair;
 pub mod pipeline;
+mod repeat_context;
 pub mod seed;
 pub mod sinks;
 pub mod span;

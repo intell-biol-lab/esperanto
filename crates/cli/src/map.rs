@@ -34,11 +34,14 @@ pub struct MapArgs {
     /// Disable conservative paired read-through endpoint inference (ablation).
     #[arg(long)]
     no_fragment_endpoints: bool,
+    /// Disable additional ordinary high-frequency context proposals (ablation).
+    #[arg(long)]
+    no_repeat_context: bool,
 }
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_context_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -48,7 +51,41 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         crate::resolve::threads(a.threads),
         a.candidate_diagnostics,
         !a.no_fragment_endpoints,
+        !a.no_repeat_context,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Probe {
+        #[command(flatten)]
+        map: MapArgs,
+    }
+
+    #[test]
+    fn repeat_context_has_independent_cli_ablation() {
+        assert!(Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--no-repeat-context",
+        ])
+        .is_ok());
+        let default = Probe::try_parse_from([
+            "probe", "--r1", "r.fq", "--index", "r.paidx", "--out", "out",
+        ])
+        .unwrap();
+        assert!(!default.map.no_repeat_context);
+        assert!(!default.map.no_fragment_endpoints);
+    }
 }

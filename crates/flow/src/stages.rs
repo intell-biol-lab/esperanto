@@ -414,6 +414,41 @@ pub fn map_stage_with_options(
     ),
     FlowError,
 > {
+    map_stage_with_context_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        true,
+    )
+}
+
+/// Independent repeat-context ablation; preserves the older options API.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_context_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -423,6 +458,7 @@ pub fn map_stage_with_options(
     // Nat Commun 5:4726, 2014).
     let mut config = AlignConfig::rna_default();
     config.fragment_endpoints = fragment_endpoints;
+    config.repeat_context = repeat_context;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,
@@ -730,6 +766,9 @@ fn rescue_collapsed(
             ..esperanto_map::align::AlignConfig::rna_default()
         };
         cfg.chain.k = idx.params.k as i32;
+        // This is the separate transformed rescue path, not the ordinary
+        // four-letter mapper proposal. Keep its historical search unchanged.
+        cfg.repeat_context = false;
         cfg.extend.edit_dir = esperanto_map::extend::EditDir::Off;
         // Ungapped by construction rather than by refusing the gapped answer
         // afterwards -- see [`RESCUE_GAP_PENALTY`].

@@ -41,6 +41,8 @@ pub enum Origin {
     Genomic,
     /// The transcriptome-first engine's projection (candidate generator).
     L1,
+    /// Bounded ordinary ungapped context verification, without a source chain.
+    RepeatContext,
     /// A decoy contig in the reference contract.
     Decoy,
 }
@@ -53,7 +55,8 @@ impl Origin {
         match self {
             Origin::Genomic => 0,
             Origin::L1 => 1,
-            Origin::Decoy => 2,
+            Origin::RepeatContext => 2,
+            Origin::Decoy => 3,
         }
     }
 
@@ -62,6 +65,7 @@ impl Origin {
         match self {
             Origin::L1 => "l1",
             Origin::Genomic => "genomic",
+            Origin::RepeatContext => "repeat_context",
             Origin::Decoy => "decoy",
         }
     }

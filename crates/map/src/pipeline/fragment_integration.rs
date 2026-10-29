@@ -28,6 +28,19 @@ fn run(
     lib: Option<Arc<JunctionLib>>,
     two_pass: bool,
 ) -> Observed {
+    run_with_context(name, index, pairs, enabled, lib, two_pass, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_context(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -47,6 +60,7 @@ fn run(
     let diag = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut config = AlignConfig::rna_default();
     config.fragment_endpoints = enabled;
+    config.repeat_context = repeat_context;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),
@@ -78,6 +92,90 @@ fn run(
         rows,
         discoveries,
         library,
+    }
+}
+
+#[test]
+fn ordinary_repeat_context_paired_bam_and_diagnostics_preserve_raw_frame() {
+    let (index, fragment) = crate::align::repeat_context_tests::fixture(false, false, 6000);
+    let pair = crate::fragment::tests::pair(&fragment, [150, 150], 0);
+    assert_eq!(
+        crate::fragment::infer(&pair[0], &pair[1])
+            .unwrap()
+            .fragment_length,
+        112
+    );
+    let off = run_with_context(
+        "repeat-context-off",
+        &index,
+        &[pair.clone()],
+        true,
+        None,
+        false,
+        false,
+    );
+    assert_eq!(off.records.len(), 2);
+    assert_eq!(off.rows.len(), 2);
+    assert!(off.records.iter().all(|r| r.flags().is_unmapped()));
+    for two_pass in [false, true] {
+        let name = if two_pass {
+            "repeat-context-two-pass"
+        } else {
+            "repeat-context-one-pass"
+        };
+        let on = run_with_context(name, &index, &[pair.clone()], true, None, two_pass, true);
+        assert_eq!(on.records.len(), 2);
+        assert_eq!(on.rows.len(), 2);
+        for (mate, (rec, row)) in on.records.iter().zip(&on.rows).enumerate() {
+            assert!(!rec.flags().is_unmapped());
+            assert_eq!(rec.reference_sequence_id().unwrap().unwrap(), 2);
+            assert_eq!(rec.alignment_start().unwrap().unwrap().get(), 121);
+            assert_eq!(rec.mapping_quality().unwrap().get(), 0);
+            assert_eq!(row["mate"], mate + 1);
+            assert_eq!(row["effective_read_length"], 112);
+            assert_eq!(row["pass2_primary_placed"], true);
+            assert_eq!(
+                row["independent"]["seed_budget"]["repeat_context"]["query_length"],
+                112
+            );
+            let ops: Vec<_> = rec
+                .cigar()
+                .iter()
+                .map(|p| {
+                    let p = p.unwrap();
+                    (format!("{:?}", p.kind()), p.len())
+                })
+                .collect();
+            assert_eq!(
+                ops,
+                if mate == 0 {
+                    vec![("Match".to_owned(), 112), ("SoftClip".to_owned(), 38)]
+                } else {
+                    vec![("SoftClip".to_owned(), 38), ("Match".to_owned(), 112)]
+                }
+            );
+            let mut seq: Vec<_> = rec.sequence().iter().collect();
+            let mut qual: Vec<_> = rec.quality_scores().iter().collect();
+            if rec.flags().is_reverse_complemented() {
+                seq = crate::align::revcomp(&seq);
+                qual.reverse();
+            }
+            assert_eq!(seq, pair[mate]);
+            assert_eq!(
+                qual,
+                (0..150)
+                    .map(|q| ((q + mate) % 41) as u8)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(rec.data().get(b"XF").unwrap().unwrap().as_int(), Some(112));
+            assert_eq!(
+                rec.data()
+                    .iter()
+                    .filter(|p| p.as_ref().unwrap().0 == *b"XF")
+                    .count(),
+                1
+            );
+        }
     }
 }
 

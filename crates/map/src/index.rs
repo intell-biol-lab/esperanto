@@ -249,16 +249,34 @@ pub fn collect_anchors_into(
 }
 
 /// Evidence about seed lists omitted to keep a chaining round within budget.
+/// Additional ordinary context verification, not ordinary retained anchors.
+/// Its presence denotes a conservative, ungapped-only limited search.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct RepeatContextBudget {
+    pub query_length: usize,
+    pub eligible_seed_lists: usize,
+    pub scanned_seed_lists: usize,
+    pub omitted_seed_lists: usize,
+    pub eligible_postings: usize,
+    pub scanned_postings: usize,
+    pub unique_intervals: usize,
+    pub positive_candidates: usize,
+    pub retained_candidates: usize,
+    pub omitted_candidates: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct AnchorBudget {
     pub eligible_anchors: usize,
     pub retained_anchors: usize,
     pub omitted_seeds: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_context: Option<RepeatContextBudget>,
 }
 
 impl AnchorBudget {
     pub fn limited(self) -> bool {
-        self.omitted_seeds != 0
+        self.omitted_seeds != 0 || self.repeat_context.is_some()
     }
 }
 
@@ -292,6 +310,7 @@ pub fn collect_anchors_budgeted_into(
             eligible_anchors,
             retained_anchors: anchors.len(),
             omitted_seeds: 0,
+            repeat_context: None,
         };
     }
     seeds.sort_unstable_by_key(|&(i, count)| {
@@ -320,6 +339,7 @@ pub fn collect_anchors_budgeted_into(
         eligible_anchors,
         retained_anchors: anchors.len(),
         omitted_seeds,
+        repeat_context: None,
     }
 }
 

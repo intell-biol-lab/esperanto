@@ -4,6 +4,15 @@
 
 ### Organization development
 
+- In `1.1.1-dev.17`, propose bounded high-frequency ordinary context candidates
+  after original chain failure. Preserve existing candidates/DP,verify legal
+  local M/S hypotheses and propagate typed additional posting-budget evidence
+  through the existing conservative MAPQ0 policy. Add independent
+  `map --no-repeat-context` ablation; converted rescue remains unchanged.
+  Generated AG/transversion both-strand failures reproduce on the parent.
+  This remains unadopted development pending full scientific qualification,
+  confidence and independent heldout evaluation.
+
 - In `1.1.1-dev.15`, propose paired read-through endpoint inference from exact adapters and a
   unique QC-domain overlap before sequence interning/alignment. Use explicitly
   supported effective intervals, preserve raw SEQ/QUAL/CIGAR consumption, and

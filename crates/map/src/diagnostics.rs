@@ -37,7 +37,7 @@ pub struct CandidatePool {
     pub excluded_nonpositive: usize,
     pub excluded_invalid_geometry: usize,
     pub candidates: Vec<CandidateEvidence>,
-    /// Present only when whole seed hit lists were omitted by the budget.
+    /// Limited ordinary anchor collection or additional ungapped context search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_budget: Option<crate::index::AnchorBudget>,
 }

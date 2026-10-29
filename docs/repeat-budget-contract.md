@@ -32,6 +32,13 @@ remains before collapsed rescue; join the final BAM to determine final status.
 Complete-search records keep the existing format. Consumers must tolerate the
 documented optional fields.
 
+Dev.17 adds optional nested `seed_budget.repeat_context` posting-scan evidence.
+It is a separate ordinary proposal family,not ordinary retained anchors; the
+old three counters may be0. Presence itself forces limited confidence in this
+development proposal,even if the selected lists fit. See
+`repeat-context-contract.md`. Do not apply an old "eligible_anchors>20000"
+assertion to context-only evidence; validate both domains independently.
+
 Executable controls in `index::budget_tests` cover complete-order equivalence,
 whole-list inclusion, budget boundaries, rare-seed preference and deterministic
 overflow ordering. The `align` tests cover 700 identical loci on both alignment

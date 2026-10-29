@@ -1,5 +1,21 @@
 # Known scientific qualification issues
 
+## Ordinary high-frequency candidate coverage (dev.17 proposal)
+
+Sparse substitutions in repetitive reads can remove every ancestor-consistent
+seed through the5000occurrence cap,while a lower-frequency wrong homolog remains.
+Dev.17 adds bounded ordinary ungapped context proposals,not a global cap increase
+or a truth-guided direction exception. See `repeat-context-contract.md`.
+Every attempted context search conservatively propagates MAPQ0,incomplete
+evidence and truthful nested posting-budget metadata. Existing splice/indel
+and query-edge candidates remain in competition. The ordinary cap witnesses
+also reproduce with transversions,not only editing substitutions.
+
+Synthetic recovery is not a human qualification result or a general mapper
+advantage. The dev.16 rejection and its terminal ALT/technical regressions are
+not overturned; no source/region/family-heldout or calibrated confidence claim
+follows. Final-BAM full-seed qualification and adverse accounting are required.
+
 ## Paired endpoint development proposal
 
 The worktree implements observable paired adapter/overlap inference, effective
