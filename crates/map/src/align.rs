@@ -1321,9 +1321,10 @@ impl<'a> Aligner<'a> {
                     }
                 }
             }
-            if segs.len() == 2 && is_best {
+            if segs.len() >= 2 && is_best {
                 // The intron fast path may choose any exon pair supported by
-                // the complete anchor pool; keep its own boundary geometry.
+                // the complete anchor pool; extra segments in this chain do
+                // not invalidate that pair. Keep its own boundary geometry.
                 let empty_lib = JunctionLib::default();
                 let lib = self.jlib.as_deref().unwrap_or(&empty_lib);
                 let query: &[u8] = match chain.strand {
@@ -3324,6 +3325,130 @@ mod tests {
                 assert_eq!(result.pos, full.pos);
                 assert_eq!(result.cigar, full.cigar);
                 assert_eq!(result.ea_tc, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn intron_pool_proposal_survives_three_segment_best_chain() {
+        // The intron constructor searches the complete anchor pool. Repeat
+        // anchors in the best chain must not disable an independent exon pair.
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading_clip in [false, true] {
+                let mut state = 0x719ac57bu64;
+                let mut genome: Vec<u8> = (0..6000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        b"ACGT"[(state & 3) as usize]
+                    })
+                    .collect();
+                genome[2064..2066].copy_from_slice(b"GT");
+                genome[3998..4000].copy_from_slice(b"AG");
+                genome[2063] = b'T';
+                genome[4000] = b'A';
+                let mut query = Vec::new();
+                if leading_clip {
+                    query.extend_from_slice(&b"N".repeat(15));
+                }
+                query.extend_from_slice(&genome[2000..2064]);
+                query.extend_from_slice(&genome[4000..4071]);
+                if !leading_clip {
+                    query.extend_from_slice(&b"N".repeat(15));
+                }
+                let offset = if leading_clip { 15 } else { 0 };
+                genome[100..115].copy_from_slice(&query[offset + 5..offset + 20]);
+                genome[1000..1030].copy_from_slice(&query[offset + 30..offset + 60]);
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let read = if strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let chain = Chain {
+                    contig: 0,
+                    strand,
+                    anchors: [
+                        (offset + 5, 100),
+                        (offset + 30, 1000),
+                        (offset + 45, 1015),
+                        (offset + 70, 4006),
+                    ]
+                    .map(|(q, r)| crate::seed::Anchor {
+                        contig: 0,
+                        strand,
+                        qpos: q as u32,
+                        rpos: r,
+                    })
+                    .to_vec(),
+                    score: 62,
+                };
+                assert_eq!(segment_chain(&chain, 15, 20).len(), 3);
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let mut all = Vec::new();
+                collect_anchors_into(aligner.index, &mins, 150, 15, MID_OCC_CAP, &mut all);
+                all.retain(|a| a.strand == strand);
+                let hit = crate::intron_chain::try_intron_chain_placement(
+                    aligner.index.reference,
+                    &JunctionLib::default(),
+                    &query,
+                    &all,
+                    15,
+                    &crate::intron_chain::IntronParams::default(),
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                )
+                .expect("complete pool independently supports the exon pair");
+                assert_eq!(hit.genomic_start(), 2000);
+                let expected = if leading_clip {
+                    vec![
+                        CigarOp::SoftClip(15),
+                        CigarOp::Match(64),
+                        CigarOp::RefSkip(1936),
+                        CigarOp::Match(71),
+                    ]
+                } else {
+                    vec![
+                        CigarOp::Match(64),
+                        CigarOp::RefSkip(1936),
+                        CigarOp::Match(71),
+                        CigarOp::SoftClip(15),
+                    ]
+                };
+                assert_eq!(hit.cigar, expected);
+                let mut candidates = Vec::new();
+                let mut budget = EXTEND_BUDGET;
+                aligner.extend_chain(
+                    &read,
+                    &mins,
+                    &chain,
+                    true,
+                    false,
+                    &revcomp(&read),
+                    &mut budget,
+                    &mut candidates,
+                );
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|p| p.pos == 2000 && p.cigar == expected),
+                    "three-segment best chain suppressed the independent pool proposal"
+                );
+                assert!(
+                    candidates.iter().any(|p| p.junctions.is_empty()),
+                    "pool proposal must preserve continuous competing explanations"
+                );
+                for p in &mut candidates {
+                    aligner.rescore_strict(&query, p);
+                }
+                dedup_by_footprint(&mut candidates, read.len());
+                sort_placements(&mut candidates);
+                let selected = aligner
+                    .arbitrate(&read, candidates, mins.len(), true)
+                    .expect("supported 135bp body clears the unchanged 99bp gate");
+                assert_eq!(selected.pos, 2000);
+                assert_eq!(selected.cigar, expected);
             }
         }
     }

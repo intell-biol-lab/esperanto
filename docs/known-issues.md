@@ -1,5 +1,16 @@
 # Known scientific qualification issues
 
+Dev.11 permits the existing full-anchor intron-pair proposal when the best
+chain has at least two segments. Requiring exactly two segments incorrectly
+disabled independently supported pairs when repeat-derived anchors added
+segments to that chain. Four synthetic scenarios reproduce suppression on
+both alignment strands with either terminal clip, preserve continuous
+competitors and select the supported pair under unchanged common scoring.
+The one-segment/non-best-chain gates and constructor verification remain.
+This does not resolve mid-occurrence pools above the 20,000-anchor cost limit,
+general repeat resolution, all multi-exon failures or MAPQ calibration.
+Scientific adoption requires separate replay and independent holdout evidence.
+
 Dev.10 corrects an orientation error in hyperediting re-arbitration: A>G/T>C
 must complement for candidates on opposite alignment strands to represent one
 original-read conversion domain. This does not resolve conflicting signature

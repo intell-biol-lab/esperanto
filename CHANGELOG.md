@@ -30,6 +30,13 @@
 
 ### Fixed
 
+- In `1.1.1-dev.11`, allow the existing full-anchor intron-pair proposal
+  when the best chain has at least two segments. Extra repeat-derived
+  segments no longer suppress an independently supported two-exon path.
+  Keep fragment verification, continuous competitors, common rescoring,
+  coverage, anchor/extension budgets and model unchanged. Synthetic cases
+  cover both alignment strands and either terminal clip.
+
 - In `1.1.1-dev.10`, keep hyperediting re-arbitration in one original-read
   conversion domain: complement A>G/T>C when a candidate's alignment strand
   differs from the signature-producing candidate. Apply that direction to

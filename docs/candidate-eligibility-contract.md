@@ -5,6 +5,20 @@ transcriptome and mate-window paths. It separates the score of an explanation
 from its eligibility to become a primary read placement. Its mechanism tests
 are synthetic and do not establish general mapping accuracy.
 
+## Independent full-anchor intron proposals
+
+For RNA, a best chain with at least two segments may invoke the existing
+two-fragment intron constructor on the complete same-contig/strand anchor
+pool. The chosen pair need not belong to that chain. Three or more segments
+do not disqualify a verified pair. Preserve the constructor's verification
+and geometry checks, generic spliced proposals, continuous segment competitors,
+common scoring and primary coverage gate.
+
+Executable regression:
+`intron_pool_proposal_survives_three_segment_best_chain` covers both read
+alignment strands, either terminal clip, pre-existing full-pool support,
+proposal generation before dedup, continuous competition and arbitration.
+
 ## Coverage eligibility
 
 For a read of length `L > 0`, let `Q` be informative query bases in M columns
