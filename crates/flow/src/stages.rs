@@ -1090,9 +1090,9 @@ fn rescue_collapsed(
     // Count rejection reasons separately by strand.
     let mut why: std::collections::BTreeMap<(&'static str, bool), u64> =
         std::collections::BTreeMap::new();
-    for (dir, ipath, from, to) in &dirs {
-        let owner = index_io::OwnedIndex::open(ipath).map_err(stage_err("map"))?;
-        let idx = owner.index();
+    let mut rescue_index = crate::rescue_index::RescueIndex::default();
+    for (pass, (dir, ipath, from, to)) in dirs.iter().enumerate() {
+        let idx = rescue_index.index_for(ipath).map_err(stage_err("map"))?;
         // Seed k/w and the chain anchor reward must match the transformed
         // index. `edit_dir` stays off: under the matching transform this
         // direction's edits are already identities, and exempting anything
@@ -1140,9 +1140,10 @@ fn rescue_collapsed(
                 .collect()
         });
         // Rayon workers and their aligners have joined. Results own their
-        // placements; neither verification nor the next direction needs this
-        // transformed reference/mmap any longer.
-        drop(owner);
+        // placements. Only an immediately following pass on the same immutable
+        // index retains the owner. No transformed index overlaps another;
+        // the final pass in each run releases before placement verification.
+        rescue_index.release_unless(dirs.get(pass + 1).map(|(_, path, _, _)| path.as_path()));
         for (&i, aln) in cand_idx.iter().zip(results) {
             let Some(mut a) = aln else { continue };
             inherit_seed_limit(&mut a, &fq[i].0, &original_seed_limits);

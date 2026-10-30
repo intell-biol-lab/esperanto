@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1-dev.33 (unreleased)
+
+- Reuse the immutable TC rescue index across its two adjacent passes. Preserve
+  AG/TC/TC/AG order, separate read transformations and candidate arbitration.
+  Release the owner before a different index loads and on errors.
+
 ## 1.1.1-dev.32 (unreleased)
 
 - Own directional rescue mmaps and decoded references, borrowing index/hit views

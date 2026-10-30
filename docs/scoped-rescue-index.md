@@ -8,10 +8,13 @@ the same strict paidx decoder but owns its mmap and decoded packed reference;
 manual unmapping of borrowed memory is used. A compile-fail example protects
 against dropping the owner while continuing to access its view.
 
-The rescue flow creates one owner per direction and releases it immediately
-after Rayon workers join and produce owned placements, before verifying those
-placements against the four-letter reference. Consequently AG storage is gone
-before TC loads. Ordinary Rust unwinding/early returns release storage as well.
+The rescue flow preserves the four pass order AG, TC, TC, AG. Since dev.33 it
+reuses one immutable TC owner across the two adjacent TC passes; each pass
+still builds its own aligners, transforms its reads and verifies its placements.
+After Rayon workers join and produce owned placements, the last pass using an
+index releases its owner before verification. Consequently AG storage is gone
+before TC loads, and TC is gone before the final AG loads. Ordinary Rust
+unwinding/early returns release storage as well.
 Standalone rescue owns its fallback four-letter reference for its whole call.
 Read order, candidate retention, transforms, search budgets, gates, scores and
 MAPQ are unchanged. Primary-map legacy storage remains process-lifetime; this
