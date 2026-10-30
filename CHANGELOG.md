@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.1-dev.35 (unreleased)
+
+- Combine independently qualified dev.33 adjacent TC reuse and dev.34 direct
+  GTF digest bypass. Preserve scientific mapping and cache integrity semantics.
+
+## 1.1.1-dev.34 (unreleased, annotation-only ablation)
+
+- Skip source checksum construction and updates during direct GTF parsing.
+  Cache creation and hit verification retain full content integrity checks.
+  This candidate independently isolates the change on dev.32.
+
 ## 1.1.1-dev.33 (unreleased)
 
 - Reuse the immutable TC rescue index across its two adjacent passes. Preserve

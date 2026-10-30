@@ -232,21 +232,22 @@ pub fn from_gtf<F: Fn(&str) -> u32>(
     path: &Path,
     contig_id_fn: F,
 ) -> Result<JunctionLib, AlignError> {
-    parse_gtf(path, contig_id_fn).map(|(lib, _)| lib)
+    parse_gtf::<false, _>(path, contig_id_fn).map(|(lib, _)| lib)
 }
 
-// Hash exactly the bytes consumed by the parser, including ignored columns/lines.
-fn parse_gtf<F: Fn(&str) -> u32>(
+// Cache publication hashes exactly the consumed bytes, including ignored
+// columns/lines. Direct parsing instantiates the checksum-free path.
+fn parse_gtf<const HASH_SOURCE: bool, F: Fn(&str) -> u32>(
     path: &Path,
     contig_id_fn: F,
-) -> Result<(JunctionLib, [u8; 32]), AlignError> {
+) -> Result<(JunctionLib, Option<[u8; 32]>), AlignError> {
     let io_error = |source| AlignError::FastaIo {
         path: path.display().to_string(),
         source,
     };
     let mut reader = BufReader::with_capacity(1 << 20, File::open(path).map_err(io_error)?);
     let mut raw = Vec::new();
-    let mut hasher = Sha256::new();
+    let mut hasher = HASH_SOURCE.then(Sha256::new);
     let mut junctions: Vec<Junction> = Vec::new();
     // transcript_id -> exons (contig, minus_strand, 0-based half-open list)
     let mut tx: HashMap<String, TranscriptExons> = HashMap::new();
@@ -257,7 +258,9 @@ fn parse_gtf<F: Fn(&str) -> u32>(
         if reader.read_until(b'\n', &mut raw).map_err(io_error)? == 0 {
             break;
         }
-        hasher.update(&raw);
+        if let Some(h) = &mut hasher {
+            h.update(&raw);
+        }
         lineno += 1;
         let text = String::from_utf8_lossy(&raw);
         let line = text.lines().next().unwrap_or("");
@@ -323,11 +326,35 @@ fn parse_gtf<F: Fn(&str) -> u32>(
         }
     }
 
-    Ok((JunctionLib::build(junctions), hasher.finalize().into()))
+    Ok((
+        JunctionLib::build(junctions),
+        hasher.map(|h| h.finalize().into()),
+    ))
 }
 
 struct TranscriptExons {
     contig: u32,
     minus_strand: bool,
     exons: Vec<(u32, u32)>,
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn checksum_is_optional_and_covers_ignored_source_bytes() {
+        let path = std::env::temp_dir().join(format!("esp-gtf-digest-{}.gtf", std::process::id()));
+        let bytes = b"# ignored\xff\r\nchr1\tx\texon\t1\t10\t.\t+\t.\ttranscript_id \"t\";\r\nchr1\tx\texon\t21\t30\t.\t+\t.\ttranscript_id \"t\";\textra";
+        std::fs::write(&path, bytes).unwrap();
+        let (plain, absent) = parse_gtf::<false, _>(&path, |_| 0).unwrap();
+        let (hashed, present) = parse_gtf::<true, _>(&path, |_| 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(absent, None, "cache bypass must not compute a digest");
+        assert_eq!(present, Some(Sha256::digest(bytes).into()));
+        assert_eq!(plain.junctions, hashed.junctions);
+        assert_eq!(plain.counts, hashed.counts);
+        assert_eq!(plain.by_end, hashed.by_end);
+        assert_eq!(plain.junctions.len(), 1);
+    }
 }

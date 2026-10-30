@@ -77,9 +77,9 @@ pub fn from_gtf_cached(
     if let Some(lib) = read_entry(&entry_path, &key) {
         return Ok((lib, CacheStatus::Hit));
     }
-    let (lib, parsed_sha) = parse_gtf(path, contig_id)?;
+    let (lib, parsed_sha) = parse_gtf::<true, _>(path, contig_id)?;
     // Do not publish under a digest from a different source read.
-    let published = parsed_sha == source_sha && publish(dir, &entry_path, &key, &lib).is_ok();
+    let published = parsed_sha == Some(source_sha) && publish(dir, &entry_path, &key, &lib).is_ok();
     Ok((
         lib,
         if published {
