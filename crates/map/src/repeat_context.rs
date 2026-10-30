@@ -100,6 +100,52 @@ fn background_score(query: &[u8], ep: ExtendParams) -> i32 {
         .unwrap_or(0)
 }
 
+/// A terminal constant run containing a whole seed is a coordinate-free
+/// explanation. Its boundary-crossing seeds are not independent flank anchors.
+fn terminal_runs(query: &[u8], k: usize) -> (usize, usize) {
+    let run = |q: &[u8], reverse: bool| {
+        let Some(&base) = (if reverse { q.last() } else { q.first() }) else {
+            return 0;
+        };
+        if !b"ACGT".contains(&base) {
+            return 0;
+        }
+        let n = if reverse {
+            q.iter().rev().take_while(|&&b| b == base).count()
+        } else {
+            q.iter().take_while(|&&b| b == base).count()
+        };
+        if n >= k {
+            n
+        } else {
+            0
+        }
+    };
+    (run(query, false), run(query, true))
+}
+
+fn independent_terminal_anchor(
+    query: &[u8],
+    reference: &[u8],
+    local: Local,
+    k: usize,
+    prefix: usize,
+    suffix: usize,
+) -> bool {
+    if prefix == 0 && suffix == 0 {
+        return true; // The existing seed-containing interval check suffices.
+    }
+    let start = local.start.max(prefix);
+    let end = local.end.min(query.len() - suffix);
+    if end.saturating_sub(start) < k {
+        return false;
+    }
+    query[start..end]
+        .windows(k)
+        .zip(reference[start..end].windows(k))
+        .any(|(q, r)| q == r && q.iter().all(|b| b"ACGT".contains(b)))
+}
+
 /// Positive local M/S proposals from a bounded union of complete hit lists.
 /// `None` means no additional search; `Some` is conservatively limited even
 /// when every selected list fits, because this family verifies ungapped
@@ -153,6 +199,7 @@ fn generate_impl(
         return None;
     }
     seeds.sort_unstable_by_key(|(count, m)| (*count, m.pos, m.kmer, m.strand as u8));
+    let (terminal_prefix, terminal_suffix) = terminal_runs(query, k);
     let mut budget = RepeatContextBudget {
         query_length: query.len(),
         eligible_seed_lists: seeds.len(),
@@ -160,6 +207,9 @@ fn generate_impl(
         background: background.then(|| ContextBackgroundBudget {
             score: background_score(query, ep),
             rejected_candidates: 0,
+            terminal_prefix_bases: terminal_prefix,
+            terminal_suffix_bases: terminal_suffix,
+            rejected_terminal_candidates: 0,
         }),
         ..RepeatContextBudget::default()
     };
@@ -214,6 +264,15 @@ fn generate_impl(
                     background.rejected_candidates += 1;
                     continue;
                 }
+                let (prefix, suffix) = if strand == Strand::Plus {
+                    (terminal_prefix, terminal_suffix)
+                } else {
+                    (terminal_suffix, terminal_prefix)
+                };
+                if !independent_terminal_anchor(q, &reference, best, k, prefix, suffix) {
+                    background.rejected_terminal_candidates += 1;
+                    continue;
+                }
             }
             budget.positive_candidates += 1;
             let mut cigar = Vec::with_capacity(3);
@@ -258,6 +317,72 @@ fn generate_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_background_runs_obey_k_and_reverse_complement_symmetry() {
+        for k in [7, 15, 21] {
+            for &base in b"ACGT" {
+                let other = if base == b'C' { b'G' } else { b'C' };
+                for n in [k - 1, k, k + 1] {
+                    let query = [vec![other; 3], vec![base; n]].concat();
+                    let expected = if n >= k { n } else { 0 };
+                    assert_eq!(terminal_runs(&query, k), (0, expected));
+                    assert_eq!(terminal_runs(&revcomp(&query), k), (expected, 0));
+                }
+            }
+        }
+        assert_eq!(terminal_runs(b"", 15), (0, 0));
+        assert_eq!(terminal_runs(&[b'N'; 40], 15), (0, 0));
+        assert_eq!(terminal_runs(&[b'A'; 40], 15), (40, 40));
+    }
+
+    #[test]
+    fn terminal_background_requires_exact_unambiguous_seed_in_selected_interval() {
+        let flank = b"CGTCGTACGATCGTC";
+        let query = [flank.to_vec(), vec![b'A'; 76]].concat();
+        let bounds = Local {
+            end: query.len(),
+            ..Local::default()
+        };
+        assert!(independent_terminal_anchor(
+            &query, &query, bounds, 15, 0, 76
+        ));
+        let mut reference = query.clone();
+        reference[7] = b'A';
+        assert!(!independent_terminal_anchor(
+            &query, &reference, bounds, 15, 0, 76
+        ));
+        let clipped = Local { start: 1, ..bounds };
+        assert!(!independent_terminal_anchor(
+            &query, &query, clipped, 15, 0, 76
+        ));
+        let ambiguous = [vec![b'N'; 15], vec![b'A'; 76]].concat();
+        assert!(!independent_terminal_anchor(
+            &ambiguous, &ambiguous, bounds, 15, 0, 76
+        ));
+    }
+
+    #[test]
+    fn terminal_background_both_end_runs_leave_only_the_middle_anchor() {
+        for n in [14, 15] {
+            let query = [
+                vec![b'A'; 30],
+                b"CGTCGTACGATCGTC"[15 - n..].to_vec(),
+                vec![b'T'; 30],
+            ]
+            .concat();
+            let (prefix, suffix) = terminal_runs(&query, 15);
+            assert_eq!((prefix, suffix), (30, 30));
+            let bounds = Local {
+                end: query.len(),
+                ..Local::default()
+            };
+            assert_eq!(
+                independent_terminal_anchor(&query, &query, bounds, 15, prefix, suffix),
+                n == 15
+            );
+        }
+    }
 
     #[test]
     fn independent_scan_and_retention_budgets_preserve_whole_lists() {

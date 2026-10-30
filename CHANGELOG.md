@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.29`, require an independent exact flank seed for additional
+  repeat-context candidates supported by a seed-length terminal constant run.
+  Keep background scores, ordinary candidates, 20000/8 budgets and MAPQ0;
+  record separate terminal-anchor rejections. Background-off retains the
+  preceding behavior. See `docs/terminal-background-anchor.md` for controls,
+  identical-input ambiguity and independent qualification limits.
 - In `1.1.1-dev.28`, expose independent experimental repeat-context posting and
   proposal budgets with unchanged 20000/8 defaults and conservative MAPQ0.
   Preserve whole seed lists, background/scoring rules and old flow APIs.

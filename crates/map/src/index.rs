@@ -253,6 +253,9 @@ pub fn collect_anchors_into(
 pub struct ContextBackgroundBudget {
     pub score: i32,
     pub rejected_candidates: usize,
+    pub terminal_prefix_bases: usize,
+    pub terminal_suffix_bases: usize,
+    pub rejected_terminal_candidates: usize,
 }
 
 /// Additional context verification, not ordinary retained anchors.

@@ -6,6 +6,129 @@ use crate::{
     seed::SeedParams,
 };
 
+/// A boundary kmer occurs once per copy, while the constant kmer's whole
+/// posting list exceeds either scan budget. All sequence is synthetic.
+fn terminal_background_fixture(flank: usize, remote: bool) -> (Index, Vec<u8>) {
+    let mut state = 0x4b7e1_u64;
+    let mut body = random(&mut state, 42);
+    body[38..].copy_from_slice(b"CGTC");
+    let query = [body.clone(), vec![b'A'; 76]].concat();
+    let homolog = [
+        vec![b'N'; 42 - flank],
+        body[42 - flank..].to_vec(),
+        vec![b'A'; 76],
+    ]
+    .concat();
+    let repeated = [vec![b'N'; 32], homolog.clone(), vec![b'N'; 32]]
+        .concat()
+        .repeat(6000);
+    let mut fasta = [
+        b">repeats\n".as_slice(),
+        &repeated,
+        b"\n>background\n",
+        &random(&mut state, 1_000_000),
+        b"\n",
+    ]
+    .concat();
+    if remote {
+        fasta.extend(
+            [
+                b">remote\n".as_slice(),
+                &[vec![b'N'; 120], homolog, vec![b'N'; 120]].concat(),
+                b"\n",
+            ]
+            .concat(),
+        );
+    }
+    let index = Index::build(
+        parse_fasta_bytes(&fasta).unwrap(),
+        SeedParams { k: 15, w: 5 },
+    );
+    assert!(index.freq_cutoff < 5000);
+    (index, query)
+}
+
+#[test]
+fn terminal_background_short_flank_cannot_buy_coordinate_support() {
+    let (index, query) = terminal_background_fixture(4, false);
+    for seq in [query.clone(), crate::align::revcomp(&query)] {
+        for postings in [20_000, 80_000] {
+            let mut config = AlignConfig::rna_default();
+            config.context_posting_budget = postings;
+            let (result, cache) = Aligner::new(&index, config).align_read_full(&seq);
+            assert!(
+                result.is_none(),
+                "four flank matches must not turn a constant tail into a primary: {result:?}"
+            );
+            let cache = cache.unwrap();
+            assert!(cache.placements.is_empty() && cache.seed_search_limited());
+            let budget = cache.seed_budget.unwrap().repeat_context.unwrap();
+            assert!(budget.scanned_postings > 0);
+            assert_eq!(budget.positive_candidates, 0);
+            let background = budget.background.unwrap();
+            assert_eq!(background.score, 152);
+            assert!(background.rejected_terminal_candidates > 0);
+            assert_eq!(
+                background.terminal_prefix_bases + background.terminal_suffix_bases,
+                76
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_background_ablation_reproduces_positive_tail_competitor() {
+    let (index, query) = terminal_background_fixture(4, false);
+    for seq in [query.clone(), crate::align::revcomp(&query)] {
+        let mut config = AlignConfig::rna_default();
+        config.context_background = false;
+        let result = Aligner::new(&index, config).align_read(&seq).unwrap();
+        assert_eq!(result.origin.label(), "repeat_context");
+        assert_eq!(result.score, 160);
+        assert_eq!(crate::mapq::mapq_of(&result), 0);
+    }
+}
+
+#[test]
+fn terminal_background_exact_seed_boundary_and_remote_ties() {
+    for flank in [14, 15, 42] {
+        let (index, query) = terminal_background_fixture(flank, true);
+        for seq in [query.clone(), crate::align::revcomp(&query)] {
+            let result = Aligner::new(&index, AlignConfig::rna_default()).align_read(&seq);
+            if flank < 15 {
+                assert!(
+                    result.is_none(),
+                    "k-1 flank bases do not establish an anchor"
+                );
+            } else {
+                let result = result.expect("a complete independent flank seed qualifies");
+                assert_eq!(result.origin.label(), "repeat_context");
+                assert_eq!(result.score, 2 * (76 + flank) as i32);
+                assert_eq!(result.score, result.second_score);
+                assert!(result.n_cands > 1 && result.seed_search_limited);
+                assert_eq!(crate::mapq::mapq_of(&result), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_background_identical_biological_and_technical_worlds_are_indistinguishable() {
+    let (index, query) = terminal_background_fixture(4, true);
+    // These labels deliberately have no API path into mapping. A genuine
+    // biological run with this exact evidence shares the conservative refusal.
+    let results: Vec<_> = ["biological", "technical"]
+        .iter()
+        .map(|_| {
+            Aligner::new(&index, AlignConfig::rna_default())
+                .align_read(&query)
+                .map(|a| (a.contig, a.pos, a.cigar, a.score))
+        })
+        .collect();
+    assert_eq!(results[0], results[1]);
+    assert!(results[0].is_none());
+}
+
 fn random(state: &mut u64, n: usize) -> Vec<u8> {
     (0..n)
         .map(|_| {
