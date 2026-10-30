@@ -71,10 +71,12 @@ impl FastqReader {
                     }
                     self.buf.push(byte[0]);
                 }
-                Err(e) => return Err(AlignError::FastqIo {
-                    path: "<fastq stream>".to_string(),
-                    source: e,
-                }),
+                Err(e) => {
+                    return Err(AlignError::FastqIo {
+                        path: "<fastq stream>".to_string(),
+                        source: e,
+                    })
+                }
             }
         }
         if self.buf.last() == Some(&b'\r') {

@@ -12,8 +12,9 @@ const HG38_FA_URL: &str = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_h
 /// Default transcript annotation (GENCODE v48 primary), same trigger.
 const GENCODE_GTF_URL: &str =
     "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_48/gencode.v48.primary_assembly.annotation.gtf.gz";
-/// Release tarball providing the model bundle when none is installed
-/// (same pin as install.sh).
+/// Inherited upstream v1.1.0 model fallback, used only when no local model
+/// bundle can be resolved. Organization source builds ship the separately
+/// hashed model under bundle/. See docs/development.md for model provenance.
 const RELEASE_TARBALL_URL: &str = "https://github.com/Zhazhupai603/esperanto/releases/download/v1.1.0/esperanto-1.1.0-linux-x86_64.tar.gz";
 
 /// Decoy sequence sources (Salmon selective-alignment rationale: reads whose

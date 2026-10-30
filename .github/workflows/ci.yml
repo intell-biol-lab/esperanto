@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "chore/**", "fix/**", "feat/**", "docs/**", "test/**"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-C target-cpu=x86-64"
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libclang-dev libssl-dev \
+            zlib1g-dev libbz2-dev liblzma-dev
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy
+          rustc --version
+          cargo --version
+      - name: Check formatting, tests, release build and model integrity
+        run: sh scripts/check.sh
+      - name: Record build identity
+        if: success()
+        run: |
+          git rev-parse HEAD
+          git status --short
+          sha256sum Cargo.lock target/release/esperanto
+          ./target/release/esperanto --version
