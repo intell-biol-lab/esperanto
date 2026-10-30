@@ -1,5 +1,11 @@
 # map — splice-aware read alignment
 
+Dev.24 makes extension and common candidate rescoring agree on affine gaps:
+`open + n*extension`, including extension on the first gap base. The shared
+core covers scalar/SIMD and traceback; scoring parameters and arbitration
+remain fixed. See [the gap domain contract](../../affine-gap-domain.md).
+Human qualification, adoption and mapper superiority require separate evidence.
+
 Dev.23 adds independently disableable pair-supported sparse-substitution endpoint
 competition. Accept only a strict conditioned score/coverage improvement with
 all original aligned columns preserved; output MAPQ0 and typed provenance.

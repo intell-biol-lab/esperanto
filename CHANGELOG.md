@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.24`, make extension's first gap base pay open+extension,
+  matching the existing common candidate domain for both insertions and
+  deletions. Shared scalar/SIMD/traceback logic now avoids selecting a path
+  using a gap discount removed by later rescoring. Preserve parameters,
+  editing domains, coverage, splice priors and confidence policy. Add
+  native indel/terminal and execution-path regression controls; see
+  `docs/affine-gap-domain.md`. Scientific adoption and superiority remain
+  separate and unproven.
+
 - In `1.1.1-dev.23`, add independently disableable paired RNA endpoint
   competition in a sparse substitution domain corroborated by both original
   mates. Keep every old aligned column, require strict conditioned score and

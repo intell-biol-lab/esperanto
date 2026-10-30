@@ -2629,6 +2629,95 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn affine_gap_extension_and_common_rescore_agree() {
+        let reference = sparse_window_body(160);
+        let mut aligner = aligner_on(std::str::from_utf8(&reference).unwrap());
+        for insertion in [false, true] {
+            for n in [1, 2, 3, 7] {
+                let mut query = reference.clone();
+                if insertion {
+                    let b = *b"ACGT"
+                        .iter()
+                        .find(|&&b| b != reference[79] && b != reference[80])
+                        .unwrap();
+                    query.splice(80..80, std::iter::repeat_n(b, n));
+                } else {
+                    query.drain(80..80 + n);
+                }
+                for dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    let mut edited = query.clone();
+                    if dir.is_on() {
+                        let (from, to) = if dir == EditDir::Ag {
+                            (b'A', b'G')
+                        } else {
+                            (b'T', b'C')
+                        };
+                        let q = (15..40).find(|&q| edited[q] == from).unwrap();
+                        edited[q] = to;
+                    }
+                    let params = ExtendParams {
+                        edit_dir: dir,
+                        ..Default::default()
+                    };
+                    let ext = crate::extend::extend(
+                        &edited,
+                        &reference,
+                        &params,
+                        &mut ExtendBuffer::default(),
+                    );
+                    let mut p = placement(0, ext.ref_start, &ext.cigar);
+                    aligner.rescore_with(&edited, &mut p, dir);
+                    assert_eq!(ext.score, p.strict.score,
+                        "extension/common disagreement: insertion={insertion}, n={n}, dir={dir:?}, cigar={:?}", ext.cigar);
+                }
+                for strand in [Strand::Plus, Strand::Minus] {
+                    let raw = if strand == Strand::Plus {
+                        query.clone()
+                    } else {
+                        revcomp(&query)
+                    };
+                    let mapped = aligner
+                        .align_read(&raw)
+                        .expect("true internal indel must remain mappable");
+                    assert_eq!(mapped.pos, 0);
+                    assert_eq!(mapped.strand, strand);
+                    assert_eq!(
+                        mapped.score,
+                        (160 - if insertion { 0 } else { n }) as i32 * 2 - 4 - 2 * n as i32
+                    );
+                    assert!(mapped.cigar.contains(&if insertion {
+                        CigarOp::Ins(n as u32)
+                    } else {
+                        CigarOp::Del(n as u32)
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_gap_native_terminal_competition_prefers_the_local_body() {
+        let body = crate::fragment::tests::body(120);
+        let reference = [body.clone(), b"TAGC".to_vec()].concat();
+        let query = [body, b"AGC".to_vec(), vec![b'N'; 27]].concat();
+        let mut aligner = aligner_on(std::str::from_utf8(&reference).unwrap());
+        for strand in [Strand::Plus, Strand::Minus] {
+            let raw = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let a = aligner
+                .align_read(&raw)
+                .expect("complex body meets coverage");
+            assert_eq!(a.pos, 0);
+            assert_eq!(a.strand, strand);
+            assert_eq!(a.score, 240);
+            assert_eq!(a.cigar, vec![CigarOp::Match(120), CigarOp::SoftClip(30)]);
+        }
+    }
+
     fn sparse_window_chain(n: u32, near_head: bool, strand: Strand, pos: u32) -> Chain {
         let qs = if near_head {
             [2, 12, 27]

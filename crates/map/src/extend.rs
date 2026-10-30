@@ -100,7 +100,8 @@ pub struct ExtendParams {
     pub match_score: i32,
     /// Mismatch penalty (stored negative).
     pub mismatch: i32,
-    /// Gap opening penalty (stored positive; subtracted).
+    /// Gap opening penalty (stored positive; subtracted in addition to the
+    /// per-base extension cost, including on the first gap base).
     pub gap_open: i32,
     /// Gap extension penalty per base (stored positive; subtracted).
     pub gap_ext: i32,
@@ -450,7 +451,9 @@ impl CoreParams {
     fn new(params: &ExtendParams) -> CoreParams {
         CoreParams {
             lut: SubstLut::new(params),
-            open_ext: -params.gap_open, // first gap base pays gap_open only
+            // Match common candidate rescoring: a length-n gap costs
+            // open + n*extension. Traceback/end trimming use this same core.
+            open_ext: -(params.gap_open + params.gap_ext),
             ext: -params.gap_ext,
         }
     }
@@ -2025,6 +2028,156 @@ mod avx2_band {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn affine_gap_score_matches_the_common_candidate_domain() {
+        let reference = crate::fragment::tests::body(160);
+        for insertion in [false, true] {
+            for n in [1, 2, 3, 7] {
+                let mut query = reference.clone();
+                if insertion {
+                    let b = *b"ACGT"
+                        .iter()
+                        .find(|&&b| b != reference[79] && b != reference[80])
+                        .unwrap();
+                    query.splice(80..80, std::iter::repeat_n(b, n));
+                } else {
+                    query.drain(80..80 + n);
+                }
+                for reverse in [false, true] {
+                    let (query, reference) = if reverse {
+                        (
+                            crate::align::revcomp(&query),
+                            crate::align::revcomp(&reference),
+                        )
+                    } else {
+                        (query.clone(), reference.clone())
+                    };
+                    for dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                        let parameters = ExtendParams {
+                            edit_dir: dir,
+                            ..Default::default()
+                        };
+                        let core = CoreParams::new(&parameters);
+                        for offset in [0, 37] {
+                            let window =
+                                [vec![b'N'; offset], reference.clone(), vec![b'N'; 11]].concat();
+                            for band in [None, Some((offset as i64, 1, 1, 30))] {
+                                let mut buf = ExtendBuffer::default();
+                                let expected_match = if insertion {
+                                    reference.len()
+                                } else {
+                                    query.len()
+                                };
+                                let expected = expected_match as i32 * parameters.match_score
+                                    - parameters.gap_open
+                                    - parameters.gap_ext * n as i32;
+                                let mut outputs = vec![
+                                    run_band(&query, &window, &core, &mut buf.packed, band).0,
+                                    run_band(&query, &window, &core, &mut buf.scalar, band).0,
+                                    run_dispatch(&query, &window, &parameters, &mut buf, band).0,
+                                    extend_hint(
+                                        &query,
+                                        &window,
+                                        &parameters,
+                                        &mut buf,
+                                        DiagHint {
+                                            offset: offset as i64,
+                                            num: 1,
+                                            den: 1,
+                                        },
+                                    ),
+                                ];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2_full::available() {
+                                    outputs.push(if band.is_some() {
+                                        avx2_band::run(
+                                            &query,
+                                            &window,
+                                            &core,
+                                            &mut buf.packed,
+                                            offset as i64,
+                                            1,
+                                            1,
+                                            30,
+                                        )
+                                        .0
+                                    } else {
+                                        avx2_full::run(&query, &window, &core, &mut buf.packed).0
+                                    });
+                                }
+                                for ext in &outputs {
+                                    assert_eq!(ext.score, expected,
+                                        "insertion={insertion}, n={n}, reverse={reverse}, dir={dir:?}, offset={offset}, band={band:?}, cigar={:?}", ext.cigar);
+                                    assert_eq!(ext.read_start, 0);
+                                    assert_eq!(ext.read_end as usize, query.len());
+                                    assert_eq!(ext.ref_start as usize, offset);
+                                    assert!(ext.cigar.contains(&if insertion {
+                                        CigarOp::Ins(n as u32)
+                                    } else {
+                                        CigarOp::Del(n as u32)
+                                    }));
+                                    assert_eq!(ext.cigar, outputs[0].cigar);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_gap_terminal_path_cannot_borrow_a_missing_extension_penalty() {
+        let body = crate::fragment::tests::body(120);
+        let reference = [body.clone(), b"TAGC".to_vec()].concat();
+        let query = [body, b"AGC".to_vec(), vec![b'N'; 27]].concat();
+        for reverse in [false, true] {
+            let (q, r) = if reverse {
+                (
+                    crate::align::revcomp(&query),
+                    crate::align::revcomp(&reference),
+                )
+            } else {
+                (query.clone(), reference.clone())
+            };
+            let ext = extend(
+                &q,
+                &r,
+                &ExtendParams::default(),
+                &mut ExtendBuffer::default(),
+            );
+            assert_eq!(
+                ext.score, 240,
+                "terminal 1D3M costs exactly its six match points"
+            );
+            assert!(
+                !ext.cigar
+                    .iter()
+                    .any(|op| matches!(op, CigarOp::Ins(_) | CigarOp::Del(_))),
+                "a neutral gap is not an informative diagonal tie: {:?}",
+                ext.cigar
+            );
+        }
+    }
+
+    #[test]
+    fn affine_gap_rescue_penalties_keep_an_ungapped_local_body() {
+        let reference = crate::fragment::tests::body(160);
+        let mut query = reference.clone();
+        query.remove(80);
+        let params = ExtendParams {
+            gap_open: 400,
+            gap_ext: 400,
+            ..Default::default()
+        };
+        let ext = extend(&query, &reference, &params, &mut ExtendBuffer::default());
+        assert!(ext.score > 0);
+        assert!(!ext
+            .cigar
+            .iter()
+            .any(|op| matches!(op, CigarOp::Ins(_) | CigarOp::Del(_))));
+    }
 
     #[test]
     fn neutral_outer_flanks_keep_edit_evidence_without_score_gain() {

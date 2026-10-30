@@ -247,3 +247,12 @@ technical sequences identical to terminal edit evidence, incomplete mapping
 and population MAPQ calibration remain unresolved. Five new synthetic tests
 include explicit positive-score and identical-input limits. Full independent
 replay must determine the actual per-read/body/event costs of the change.
+
+## Affine gap domain inconsistency found after dev.23
+
+Extension used `open + (n-1)*extension`, while common rescoring used
+`open + n*extension`. Synthetic extension/common arithmetic and native terminal
+competition tests reproduce the path selection error. Dev.24 corrects the
+shared first-gap-base charge, preserving the common domain and parameters.
+See [the contract](affine-gap-domain.md); human replay and scientific adoption
+remain separate gates.
