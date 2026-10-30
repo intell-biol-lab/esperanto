@@ -2,12 +2,241 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.29`, require an independent exact flank seed for additional
+  repeat-context candidates supported by a seed-length terminal constant run.
+  Keep background scores, ordinary candidates, 20000/8 budgets and MAPQ0;
+  record separate terminal-anchor rejections. Background-off retains the
+  preceding behavior. See `docs/terminal-background-anchor.md` for controls,
+  identical-input ambiguity and independent qualification limits.
+- In `1.1.1-dev.28`, expose independent experimental repeat-context posting and
+  proposal budgets with unchanged 20000/8 defaults and conservative MAPQ0.
+  Preserve whole seed lists, background/scoring rules and old flow APIs.
+  Add independent budget, CLI, repeat/strand and confidence controls for a
+  development-only factorial ablation with dev.27 weak-mate proposals.
+  See `docs/repeat-context-budgets.md`; no default/adoption change is implied.
+
+- In `1.1.1-dev.27`, add a default-off weak-mate candidate proposal experiment.
+  An exact but search-limited MAPQ0 mate may propose one ordinary window;
+  all original and remote candidates remain in competition, strict improvement
+  is required, and replacements remain MAPQ0. See `docs/weak-mate-proposals.md`.
+  Adoption requires independent old/fresh development audits; dev.26 remains
+  the frozen baseline and isolated test outcomes are not development inputs.
+
+- In `1.1.1-dev.26`, add independently disableable final projection of supported
+  complex-body columns outside an unidentifiable homopolymer boundary.
+  Preserve original candidates and prior short-body decisions; record the
+  uncertain interval in diagnostics and final BAM XB, with MAPQ0 qualification.
+  Add identical-world, repeat, raw-frame, biological-run and native pipeline
+  controls. See `docs/boundary-core.md`; adoption and superiority remain unproven.
+
+- In `1.1.1-dev.25`, add bounded mate-conditioned primary-index support for
+  otherwise unplaced exact unspliced short bodies. Preserve observable tail
+  boundaries, ordinary coverage, existing mapped reads and MAPQ0 qualification.
+  Keep global versus conditional support distinct and disclose whole-list
+  posting budgets. Add remote/local repeat, budget, query-frame and native
+  pipeline controls; see `docs/mate-conditioned-sketch.md`. Mapper superiority
+  and scientific adoption remain unproven.
+
+- In `1.1.1-dev.24`, make extension's first gap base pay open+extension,
+  matching the existing common candidate domain for both insertions and
+  deletions. Shared scalar/SIMD/traceback logic now avoids selecting a path
+  using a gap discount removed by later rescoring. Preserve parameters,
+  editing domains, coverage, splice priors and confidence policy. Add
+  native indel/terminal and execution-path regression controls; see
+  `docs/affine-gap-domain.md`. Scientific adoption and superiority remain
+  separate and unproven.
+
+- In `1.1.1-dev.23`, add independently disableable paired RNA endpoint
+  competition in a sparse substitution domain corroborated by both original
+  mates. Keep every old aligned column, require strict conditioned score and
+  coverage improvement, retain competitors, emit MAPQ0 and
+  `RE:Z:pair_substitution`, and isolate discovery and collapsed rescue.
+  See `docs/pair-substitution.md`. Generalization, confidence calibration,
+  scientific adoption and superiority remain unproven.
+
+- In `1.1.1-dev.22`, add a separately disableable paired RNA qualification
+  for otherwise unmapped exact short bodies. Require visible pure-tail
+  separation, complex exact body, two disjoint unique indexed minimizers,
+  trustworthy opposite mate and union-intron span <=1000; refuse distinct
+  passing paths. Preserve normal coverage and mapped results, emit MAPQ0 and
+  `RE:Z:mate_short_body`, and keep the fallback out of two-pass discovery
+  and collapsed re-rescue. See `docs/mate-short-body.md`; scientific adoption
+  and overall mapper superiority remain unproven.
+
+- In `1.1.1-dev.21`, subtract the union of both mates' intron intervals
+  when computing transcript-aware pair span. Shared/overlapping skips no
+  longer understate TLEN and insert summaries or incorrectly pass the
+  proper-pair span limit. Keep existing orientation/sign/coverage/scoring
+  semantics. See `docs/paired-span-union.md`; this is not a mapper advantage
+  or scientific adoption claim.
+
+- In `1.1.1-dev.20`, restore dev18 default arbitration in RNA config, CLI
+  and prior flow APIs after complete human development replay rejected dev19.
+  Retain the latter through `--experimental-exact-path-competition`; the
+  prior `--no-exact-path-competition` stays supported and conflicts with opt-in.
+  Native L1/cache, CLI and all old flow wrappers have behavioral regression
+  coverage. This does not establish general mapper superiority or adoption.
+
+### Organization development
+
+- In `1.1.1-dev.19`, retain distinct complete exact mappings at a shared locus.
+  Use fewer introns as the deterministic primary representation while keeping
+  ambiguity at MAPQ0, including cache/mate confidence overrides. Preserve raw
+  common scores and short-exon candidates; add independent
+  `map --no-exact-path-competition` ablation. Qualification/adoption are separate.
+
+- In `1.1.1-dev.18`, require additional ordinary repeat-context proposals to
+  beat the strict local score against constant A/C/G/T backgrounds. Retain old
+  candidate families and conservative MAPQ0; declare background score/rejection
+  counters and independent `map --no-context-background` ablation. Generated
+  both-strand and paired failures turn green while full low-complexity target
+  controls remain. Independent human qualification and adoption are separate.
+
+- In `1.1.1-dev.17`, propose bounded high-frequency ordinary context candidates
+  after original chain failure. Preserve existing candidates/DP,verify legal
+  local M/S hypotheses and propagate typed additional posting-budget evidence
+  through the existing conservative MAPQ0 policy. Add independent
+  `map --no-repeat-context` ablation; converted rescue remains unchanged.
+  Generated AG/transversion both-strand failures reproduce on the parent.
+  This remains unadopted development pending full scientific qualification,
+  confidence and independent heldout evaluation.
+
+- In `1.1.1-dev.15`, propose paired read-through endpoint inference from exact adapters and a
+  unique QC-domain overlap before sequence interning/alignment. Use explicitly
+  supported effective intervals, preserve raw SEQ/QUAL/CIGAR consumption, and
+  persist XF on placed/unplaced reads. Schema-2 diagnostics declare conditional
+  coverage. Exclude XF-bound reads from later raw collapsed rescue and preserve
+  excluded unresolved reads during unrelated rescue/eviction and restart.
+  This changes endpoint preprocessing/eligibility; it is not human-qualified,
+  adopted or released. See the paired-fragment endpoint contract and its
+  demonstrated biological adapter-mimic limitation.
+
+- In `1.1.1-dev.9`, add opt-in `map --candidate-diagnostics` JSONL evidence
+  for positive legal independent and mate-window candidates, including those
+  below primary coverage. Preserve input/mate identities and pass2 ordering;
+  label the phase before collapsed rescue. Mapping, MAPQ and the 0.66
+  coverage policy are unchanged. See the executable diagnostics contract.
+
+- Adopt `intell-biol-lab/esperanto` as the continuing development repository,
+  preserving upstream history, attribution and release tags.
+- Identify development builds as `1.1.1-dev.1`, with repository, source commit
+  and dirty-state information in `--version`. The software version change
+  intentionally prevents silent resume of runs stamped with upstream 1.1.0.
+- Pin Rust 1.94.0 and establish CI for formatting, locked workspace tests,
+  portable CLI release builds and bundled model integrity.
+- Disable self-update for development builds and replace the inherited binary
+  installer with source installation guidance. Future stable update endpoints
+  name the organization; stable release hardening is still required.
+- Record source/model adoption identities, contribution / release contracts
+  and the unresolved internal-soft-clip qualification failure. No mapper
+  repair or model change is included.
+
 ### Changed
 
 - Updated the human model bundle. The classifier is retrained on an expanded, donor-partitioned panel (64 training, 16 calibration, and 20 held-out evaluation donors), and the decision threshold is recalibrated on the calibration donors. The 27-feature contract, input requirements, and output formats are unchanged.
 
 ### Fixed
 
+- In `1.1.1-dev.16`, complete query-edge canonical seeds only after both
+  ordinary RNA chain rounds fail. Replace the failed bounded mid round with
+  the original/edge seed union, without changing the reference sketch,
+  occurrence/anchor limits, extension budget, scoring or successful rounds.
+  Retain limited-search MAPQ0. See the query-edge seed contract; this is not
+  scientific adoption or a general mapper superiority claim.
+
+- Remove two unjustified full-matrix `read_length<=reference_length` debug
+  assertions. Short splice pseudo-references are valid rectangular local
+  alignments. Keep release recurrence, widths, dispatch and scores unchanged;
+  expand scalar/AVX2 rectangular parity controls. See the local-window contract.
+
+- In `1.1.1-dev.14`, size both continuous extension windows using uncovered
+  query ends as well as the existing flank. Sparse anchors no longer truncate
+  a physically available full-read diagonal. Share geometry between Myers
+  and DP while preserving the prior maximum width, right cap and DP budget.
+  See the sparse-anchor window contract; independent qualification is required.
+
+- In `1.1.1-dev.13`, preserve the nonempty complete first round's extension
+  priority when repeat-seed search is limited. Other rounds still fill remaining
+  slots and compete by common sequence score. Keep the eight-chain shortlist,
+  shared two-DP budget, coverage, scoring, model and limited-search MAPQ 0.
+  See the limited-search extension-priority contract. Independent qualification
+  and per-read regression review remain required.
+
+- In `1.1.1-dev.12`, replace the mid-occurrence round's whole-round abort
+  with deterministic whole-seed-list selection within the same 20,000-anchor
+  budget. Preserve complete-input order, cap limited-search placements at
+  MAPQ 0 through cache/mate/override paths, and expose the limitation in EK
+  and optional diagnostic evidence. See the repeat-budget contract. This
+  remains a development proposal subject to per-read regression review.
+
+- In `1.1.1-dev.11`, allow the existing full-anchor intron-pair proposal
+  when the best chain has at least two segments. Extra repeat-derived
+  segments no longer suppress an independently supported two-exon path.
+  Keep fragment verification, continuous competitors, common rescoring,
+  coverage, anchor/extension budgets and model unchanged. Synthetic cases
+  cover both alignment strands and either terminal clip.
+
+- In `1.1.1-dev.10`, keep hyperediting re-arbitration in one original-read
+  conversion domain: complement A>G/T>C when a candidate's alignment strand
+  differs from the signature-producing candidate. Apply that direction to
+  genomic re-extension and common rescoring. Preserve signature thresholds,
+  score constants, primary coverage and model weights. Four synthetic tests
+  cover both strands/directions, L1/genomic paths and a same-strand negative
+  control. See the strand-aware editing-domain contract; development replays
+  do not establish independent qualification or calibrated MAPQ.
+
+- In `1.1.1-dev.8`, apply the existing score/ordinary-mismatch decision order
+  to score-neutral outer-flank normalization. Stop before ordinary mismatches
+  instead of extending through them to a later score tie. Preserve A>G/T>C
+  terminal evidence using the existing substitution classification. This
+  prevents neutral non-N technical tails from buying coverage at the cost
+  of extra ordinary mismatches. Positive-score tails and identical-sequence
+  origin ambiguity remain separate qualification limits.
+
+- In `1.1.1-dev.7`, retain score-neutral informative diagonal outer flanks
+  after local extension, preserving terminal editing evidence on score ties
+  while keeping negative and ambiguous clips. Same-score, same-mismatch
+  candidate ties prefer informative query coverage. Read-aware junction
+  refinement considers both transcript orientations, matching unstranded
+  common arbitration instead of equating mate direction with RNA direction.
+  Score constants, density/coverage thresholds and model weights are unchanged.
+
+- In `1.1.1-dev.6`, reconstruct fast intron candidates by extending a
+  pseudo-reference from their own fragment pair, then stitch at the same
+  refined junction. This replaces the midpoint M-N-M assembly that could
+  disagree with refined genomic boundaries and drops neither outer clips nor
+  indels. Existing split-verification thresholds remain unchanged. The dev.5
+  seam rejection alone lost supported fast candidates in human replay;
+  that failed candidate and its results remain historical evidence.
+
+- In `1.1.1-dev.5`, intron-chain fast proposals retain their own junction
+  geometry and must agree with their CIGAR reference skips. A fast proposal
+  also permits independent generic spliced candidate generation before common
+  rescoring; it no longer returns early and hides supported alternatives.
+  Scoring constants, coverage fraction, model and evaluator are unchanged.
+
+- In `1.1.1-dev.4`, read-coverage classes protect full candidates from being
+  erased by shorter high-scoring explanations. Primary selection continues
+  past ineligible score leaders, requires positive score and informative query
+  coverage, and keeps different-locus short evidence in the ambiguity margin.
+  Deleted reference columns no longer fill read coverage. Mate-window and
+  hyperediting arbitration apply the same rules; scoring constants and the
+  existing coverage fraction are unchanged. See
+  `docs/candidate-eligibility-contract.md`.
+- In `1.1.1-dev.3`, split/span rescue proposals are compared with their primary
+  using strict read-placement scores. A rewrite must improve sequence evidence
+  and exceed the existing split cost; a junction prior alone cannot displace an
+  equally good contiguous match. Segmented chains also retain the continuous
+  interpretation at each collinear segment even when splice construction
+  succeeds. This prevents a repeat-derived splice from hiding the better
+  contiguous placement before arbitration. Scoring constants and model weights
+  are unchanged; candidate generation and rescue eligibility change.
+- In `1.1.1-dev.2`, splice-tail and run-through rescue require both sides to
+  meet at the declared query and reference boundaries before accepting a
+  stitched CIGAR. Invalid local-extension seams fall back to the original
+  placement; valid outer soft clips and indels are retained. Right-tail
+  reextension also updates the alignment start and uses that start for the
+  short-tail mismatch gate. See `docs/cigar-rescue-contract.md`.
 - Score-stage likelihood quadrature no longer stalls on ultra-high-coverage sites. Sites with more than 63 observations were integrated with an adaptive Simpson rule whose refinement cost grows unpredictably on the sharply peaked likelihoods produced by extreme coverage (millions of observations at a single position), leaving affected runs effectively stuck in the score stage. All sites now use fixed 32-point Gauss-Legendre quadrature, so per-site cost scales linearly with observation count and extreme-coverage sites finish in well under a second. Site scores and VCF output are bit-identical to 1.1.0 on full-depth human RNA-seq runs.
 
 ## [1.1.0] - 2026-09-29
