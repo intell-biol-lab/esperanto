@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.22`, add a separately disableable paired RNA qualification
+  for otherwise unmapped exact short bodies. Require visible pure-tail
+  separation, complex exact body, two disjoint unique indexed minimizers,
+  trustworthy opposite mate and union-intron span <=1000; refuse distinct
+  passing paths. Preserve normal coverage and mapped results, emit MAPQ0 and
+  `RE:Z:mate_short_body`, and keep the fallback out of two-pass discovery
+  and collapsed re-rescue. See `docs/mate-short-body.md`; scientific adoption
+  and overall mapper superiority remain unproven.
+
 - In `1.1.1-dev.21`, subtract the union of both mates' intron intervals
   when computing transcript-aware pair span. Shared/overlapping skips no
   longer understate TLEN and insert summaries or incorrectly pass the

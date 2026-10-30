@@ -240,6 +240,7 @@ mod tests {
             mapq_override: None,
             seed_search_limited: false,
             exact_path_ambiguous: false,
+            short_body_qualified: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

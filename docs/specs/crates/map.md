@@ -1,5 +1,10 @@
 # map — splice-aware read alignment
 
+Dev.22 adds separately disableable MAPQ0 mate-supported short-body qualification
+after ordinary placement refusal. It preserves the ordinary coverage threshold
+and keeps these placements out of discovery and collapsed re-rescue. See
+[the contract](../../mate-short-body.md).
+
 Dev.21 computes paired transcript span by subtracting the union of both CIGARs'
 intron intervals,so shared skips are counted once. It retains the existing
 proper span cap and transcript-aware signed TLEN convention. See

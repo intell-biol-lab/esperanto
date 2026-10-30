@@ -40,6 +40,9 @@ pub struct MapArgs {
     /// Disable constant-base background competition for context proposals (ablation).
     #[arg(long)]
     no_context_background: bool,
+    /// Disable mate-supported exact short-body qualification (ablation).
+    #[arg(long)]
+    no_mate_short_body: bool,
     /// Enable experimental exact-path arbitration (rejected for general adoption).
     #[arg(long, conflicts_with = "no_exact_path_competition")]
     experimental_exact_path_competition: bool,
@@ -50,7 +53,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_exact_path_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_short_body_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -63,6 +66,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         !a.no_repeat_context,
         !a.no_context_background,
         a.experimental_exact_path_competition,
+        !a.no_mate_short_body,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -113,6 +117,21 @@ mod tests {
             "--no-context-background",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn short_body_has_independent_cli_ablation() {
+        let base = [
+            "probe", "--r1", "r.fq", "--index", "r.paidx", "--out", "out",
+        ];
+        let default = Probe::try_parse_from(base).unwrap();
+        assert!(!default.map.no_mate_short_body);
+        let mut off = base.to_vec();
+        off.push("--no-mate-short-body");
+        let off = Probe::try_parse_from(off).unwrap();
+        assert!(off.map.no_mate_short_body);
+        assert!(!off.map.no_fragment_endpoints);
+        assert!(!off.map.experimental_exact_path_competition);
     }
 
     #[test]

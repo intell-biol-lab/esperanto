@@ -88,7 +88,17 @@ pub(crate) fn aln_view(a: &ReadAlignment) -> AlnView {
     }
     tags.push(RawTag(*b"EK", TagValue::Str(evidence_tag(a))));
     if a.rescued {
-        tags.push(RawTag(*b"RE", TagValue::Str("unmapped".into())));
+        tags.push(RawTag(
+            *b"RE",
+            TagValue::Str(
+                if a.short_body_qualified {
+                    "mate_short_body"
+                } else {
+                    "unmapped"
+                }
+                .into(),
+            ),
+        ));
     }
     AlnView {
         contig: a.contig,
@@ -194,6 +204,7 @@ mod tests {
             mapq_override: None,
             seed_search_limited: false,
             exact_path_ambiguous: false,
+            short_body_qualified: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         }

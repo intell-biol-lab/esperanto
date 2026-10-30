@@ -446,6 +446,24 @@ pub fn run_pe(
                                 r2 = Some(n);
                             }
                         }
+                        // Qualification is pair-specific and never interned by
+                        // sequence. Already placed records keep their old result.
+                        if r1.is_none() && confident(&r2) {
+                            r1 = aligner.recover_short_body_observed(
+                                seq1,
+                                r2.as_ref().unwrap(),
+                                cache1.as_ref(),
+                                diagnostics_enabled.then_some(&mut diag1),
+                            );
+                        }
+                        if r2.is_none() && confident(&r1) {
+                            r2 = aligner.recover_short_body_observed(
+                                seq2,
+                                r1.as_ref().unwrap(),
+                                cache2.as_ref(),
+                                diagnostics_enabled.then_some(&mut diag2),
+                            );
+                        }
                         for (aln, raw_len, effective_len) in [
                             (&mut r1, a.seq.len(), seq1.len()),
                             (&mut r2, b.seq.len(), seq2.len()),
@@ -734,7 +752,12 @@ pub fn run_pe_2pass(
     out.bam = Some(Box::new(std::io::sink()));
     let real_unm = std::mem::replace(&mut out.unmapped_fq, Box::new(std::io::sink()));
     let real_diagnostics = out.diagnostics.take();
+    // Short-body MAPQ0 qualification cannot change the discovery library and
+    // thereby perturb ordinary pass2 placements. It runs only in final output.
+    let mate_short_body = out.config.mate_short_body;
+    out.config.mate_short_body = false;
     let pass1 = run_pe(out, r1, r2, threads);
+    out.config.mate_short_body = mate_short_body;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
@@ -1361,6 +1384,7 @@ mod tests {
             mapq_override: None,
             seed_search_limited: false,
             exact_path_ambiguous: false,
+            short_body_qualified: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

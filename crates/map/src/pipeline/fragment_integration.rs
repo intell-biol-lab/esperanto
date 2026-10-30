@@ -1,6 +1,224 @@
 //! Real paired pipeline controls for endpoint/splice and two-pass interactions.
 use super::*;
 
+#[test]
+fn short_body_native_pair_recovers_visible_boundary_without_changing_raw_reads() {
+    let genome = crate::fragment::tests::body(8000);
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">chrT\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    let body = &genome[2000..2080];
+    let tail = *b"ACGT"
+        .iter()
+        .find(|&&b| b != body[79] && b != genome[2080])
+        .unwrap();
+    let query = [body, &vec![tail; 70]].concat();
+    for minus in [false, true] {
+        let raw = if minus {
+            crate::align::revcomp(&query)
+        } else {
+            query.clone()
+        };
+        let mate = if minus {
+            genome[2300..2450].to_vec()
+        } else {
+            crate::align::revcomp(&genome[2300..2450])
+        };
+        for swapped in [false, true] {
+            let pair = if swapped {
+                [mate.clone(), raw.clone()]
+            } else {
+                [raw.clone(), mate.clone()]
+            };
+            let target = usize::from(swapped);
+            for two_pass in [false, true] {
+                for enabled in [false, true] {
+                    let observed = run_with_short_body(
+                        &format!("shortbody-{minus}-{swapped}-{two_pass}-{enabled}"),
+                        &index,
+                        &[pair.clone()],
+                        false,
+                        None,
+                        two_pass,
+                        true,
+                        true,
+                        false,
+                        None,
+                        enabled,
+                    );
+                    let record = &observed.records[target];
+                    assert_eq!(
+                        !record.flags().is_unmapped(), enabled,
+                        "exact 80bp body with visible 70bp tail and unique proper mate must qualify"
+                    );
+                    let sequence = if enabled { query.clone() } else { raw.clone() };
+                    assert_eq!(record.sequence().iter().collect::<Vec<_>>(), sequence);
+                    let mut qualities: Vec<_> =
+                        (0..150).map(|q| ((q + target) % 41) as u8).collect();
+                    if enabled && minus {
+                        qualities.reverse();
+                    }
+                    assert_eq!(
+                        record.quality_scores().iter().collect::<Vec<_>>(),
+                        qualities
+                    );
+                    if enabled {
+                        assert_eq!(record.alignment_start().unwrap().unwrap().get(), 2001);
+                        assert_eq!(record.mapping_quality().unwrap().get(), 0);
+                        assert!(record.flags().is_properly_segmented());
+                        assert_eq!(record.flags().is_reverse_complemented(), minus);
+                        assert_eq!(
+                            observed.rows[target]["mate_attempt"]["short_body"]["decision"],
+                            "qualified_mapq0"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn short_body_native_cache_is_pair_specific_and_full_genomic_tail_stays_mapped() {
+    let mut genome = crate::fragment::tests::body(8000);
+    let body = genome[2000..2080].to_vec();
+    let tail = *b"ACGT"
+        .iter()
+        .find(|&&b| b != body[79] && b != genome[2080])
+        .unwrap();
+    let query = [body.as_slice(), &vec![tail; 70]].concat();
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    let good = crate::align::revcomp(&genome[2300..2450]);
+    let pairs = [
+        [query.clone(), good.clone()],
+        [query.clone(), genome[2300..2450].to_vec()], // wrong same strand
+        [query.clone(), vec![b'N'; 150]],             // no mate
+        [query.clone(), crate::align::revcomp(&genome[6000..6150])], // excessive span
+        [query.clone(), good],                        // same cache key, valid pair again
+    ];
+    for two_pass in [false, true] {
+        let observed = run_with_short_body(
+            &format!("shortbody-cache-{two_pass}"),
+            &index,
+            &pairs,
+            false,
+            None,
+            two_pass,
+            true,
+            true,
+            false,
+            None,
+            true,
+        );
+        for i in 0..pairs.len() {
+            assert_eq!(
+                !observed.records[2 * i].flags().is_unmapped(),
+                i == 0 || i == 4
+            );
+        }
+    }
+    // A true genomic homopolymer remains a normal full alignment. The fallback
+    // cannot replace an already mapped result with a truncated interpretation.
+    genome[2080..2150].fill(tail);
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    for endpoints in [false, true] {
+        let pair = [query.clone(), crate::align::revcomp(&genome[2300..2450])];
+        let on = run_with_short_body(
+            &format!("shortbody-full-on-{endpoints}"),
+            &index,
+            &[pair.clone()],
+            endpoints,
+            None,
+            false,
+            true,
+            true,
+            false,
+            None,
+            true,
+        );
+        let off = run_with_short_body(
+            &format!("shortbody-full-off-{endpoints}"),
+            &index,
+            &[pair],
+            endpoints,
+            None,
+            false,
+            true,
+            true,
+            false,
+            None,
+            false,
+        );
+        assert!(!on.records[0].flags().is_unmapped());
+        assert_eq!(
+            on.records[0].cigar().as_ref(),
+            off.records[0].cigar().as_ref()
+        );
+        assert_eq!(
+            on.records[0].mapping_quality(),
+            off.records[0].mapping_quality()
+        );
+        assert_eq!(on.records[0].sequence().iter().collect::<Vec<_>>(), query);
+    }
+}
+
+#[test]
+fn short_body_native_splice_final_pass_does_not_change_discovery_library() {
+    let (index, body, junction) = splice_world(80);
+    let tail = *b"ACGT".iter().find(|&&b| b != body[79]).unwrap();
+    let query = [body.as_slice(), &vec![tail; 70]].concat();
+    let mate = crate::align::revcomp(&index.reference.contigs[0].slice_ascii(9200, 9350));
+    let lib = Arc::new(JunctionLib::build([junction]));
+    let pair = [query.clone(), mate];
+    for two_pass in [false, true] {
+        let on = run_with_short_body(
+            &format!("shortbody-splice-on-{two_pass}"),
+            &index,
+            &[pair.clone(), pair.clone()],
+            false,
+            Some(lib.clone()),
+            two_pass,
+            true,
+            true,
+            false,
+            None,
+            true,
+        );
+        let off = run_with_short_body(
+            &format!("shortbody-splice-off-{two_pass}"),
+            &index,
+            &[pair.clone(), pair.clone()],
+            false,
+            Some(lib.clone()),
+            two_pass,
+            true,
+            true,
+            false,
+            None,
+            false,
+        );
+        if two_pass {
+            assert_eq!(on.library, off.library);
+            assert_eq!(
+                format!("{:?}", on.discoveries),
+                format!("{:?}", off.discoveries)
+            );
+        }
+        assert!(!on.records[0].flags().is_unmapped());
+        assert!(off.records[0].flags().is_unmapped());
+        assert_eq!(on.records[0].mapping_quality().unwrap().get(), 0);
+        assert!(on.rows[0]["mate_attempt"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["cigar"] == "40M1000N40M70S"));
+    }
+}
+
 #[derive(Clone)]
 struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
 impl Write for Sink {
@@ -91,6 +309,35 @@ fn run_with_paths(
     exact_path_competition: bool,
     l1: Option<Arc<esperanto_engine::L1Index>>,
 ) -> Observed {
+    run_with_short_body(
+        name,
+        index,
+        pairs,
+        enabled,
+        lib,
+        two_pass,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        l1,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_short_body(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    l1: Option<Arc<esperanto_engine::L1Index>>,
+    mate_short_body: bool,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -113,6 +360,7 @@ fn run_with_paths(
     config.repeat_context = repeat_context;
     config.context_background = context_background;
     config.exact_path_competition = exact_path_competition;
+    config.mate_short_body = mate_short_body;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),

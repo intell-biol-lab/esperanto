@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Dev.22 short-body qualification is an observable evidence proposal, always
+MAPQ0, with supplied-index sketch support rather than exhaustive uniqueness.
+It cannot resolve an absent true source with identical observations, and
+conservatively refuses matching biological terminal runs. Software checks
+do not establish human qualification, calibrated confidence or superiority.
+See [the executable contract](mate-short-body.md).
+
 Dev.21 repairs double subtraction of shared introns in paired transcript span.
 Native generated and independent coordinate-mask controls cover the arithmetic;
 full development replay and independent generalization are separate. This

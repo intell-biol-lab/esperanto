@@ -126,6 +126,8 @@ pub struct ReadAlignment {
     pub seed_search_limited: bool,
     /// Distinct complete exact mappings at one locus remain unresolved.
     pub exact_path_ambiguous: bool,
+    /// Observable paired short-body qualification; not conversion rescue.
+    pub short_body_qualified: bool,
 }
 
 impl ReadAlignment {

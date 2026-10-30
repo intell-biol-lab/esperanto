@@ -67,6 +67,8 @@ pub struct AlignConfig {
     pub context_background: bool,
     /// Experimental full-query exact-path arbitration (disabled by default).
     pub exact_path_competition: bool,
+    /// Qualify otherwise unplaced exact short bodies with observable pair evidence.
+    pub mate_short_body: bool,
 }
 
 impl Default for AlignConfig {
@@ -81,6 +83,7 @@ impl Default for AlignConfig {
             repeat_context: false,
             context_background: false,
             exact_path_competition: false,
+            mate_short_body: false,
         }
     }
 }
@@ -97,6 +100,7 @@ impl AlignConfig {
             repeat_context: true,
             context_background: true,
             exact_path_competition: false,
+            mate_short_body: true,
         }
     }
 }
@@ -871,6 +875,7 @@ impl<'a> Aligner<'a> {
                 .count(),
             seed_search_limited: false,
             exact_path_ambiguous,
+            short_body_qualified: false,
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -2559,6 +2564,7 @@ fn dedup_by_footprint_with_options(
 }
 
 mod exact_path;
+mod short_body;
 
 impl ReadAlignment {
     #[cfg(test)]

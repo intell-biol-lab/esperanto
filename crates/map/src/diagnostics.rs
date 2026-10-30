@@ -31,6 +31,21 @@ pub struct CandidateEvidence {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ShortBodyCandidate {
+    pub rank_in_pool: usize,
+    /// Query start and canonical key; relative to the actual supplied index.
+    pub disjoint_unique_indexed_seeds: Vec<(u32, u64)>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ShortBodyDecision {
+    pub decision: &'static str,
+    pub query_coordinate_frame: &'static str,
+    pub qualified_paths: usize,
+    pub supported_candidates: Vec<ShortBodyCandidate>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CandidatePool {
     pub stage: &'static str,
     pub scored_candidates: usize,
@@ -40,6 +55,8 @@ pub struct CandidatePool {
     /// Limited ordinary anchor collection or additional ungapped context search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_budget: Option<crate::index::AnchorBudget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_body: Option<ShortBodyDecision>,
 }
 
 impl CandidatePool {
@@ -56,6 +73,7 @@ impl CandidatePool {
             excluded_invalid_geometry: 0,
             candidates: Vec::new(),
             seed_budget: None,
+            short_body: None,
         };
         for (rank, p) in placements.iter().enumerate() {
             if !legal_geometry(index, read_len, p) {
@@ -189,6 +207,19 @@ pub(crate) fn write_row_with_fragment(
     if let Some(fragment) = fragment {
         let suffix = read.seq.len() - fragment.fragment_length;
         for pool in std::iter::once(&mut independent).chain(mate_attempt.iter_mut()) {
+            if let Some(decision) = &mut pool.short_body {
+                for supported in &mut decision.supported_candidates {
+                    if pool
+                        .candidates
+                        .iter()
+                        .any(|c| c.rank_in_pool == supported.rank_in_pool && c.strand == "-")
+                    {
+                        for (position, _) in &mut supported.disjoint_unique_indexed_seeds {
+                            *position += suffix as u32;
+                        }
+                    }
+                }
+            }
             for candidate in &mut pool.candidates {
                 let strand = if candidate.strand == "+" {
                     Strand::Plus
@@ -280,6 +311,7 @@ mod tests {
             excluded_invalid_geometry: 0,
             candidates: vec![],
             seed_budget: None,
+            short_body: None,
         };
         let mut read = FastqRecord {
             name: b"quote\"and\nnewline".to_vec(),
