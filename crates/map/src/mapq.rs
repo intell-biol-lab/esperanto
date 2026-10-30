@@ -128,6 +128,8 @@ pub struct ReadAlignment {
     pub exact_path_ambiguous: bool,
     /// Observable paired short-body qualification; not conversion rescue.
     pub short_body_qualified: bool,
+    /// Terminal extension in a substitution domain witnessed by the original pair.
+    pub pair_substitution_qualified: bool,
 }
 
 impl ReadAlignment {

@@ -566,6 +566,49 @@ pub fn map_stage_with_short_body_options(
     ),
     FlowError,
 > {
+    map_stage_with_pair_substitution_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        true,
+    )
+}
+
+/// Full mapper options, including independent paired substitution competition.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_pair_substitution_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -579,6 +622,7 @@ pub fn map_stage_with_short_body_options(
     config.context_background = context_background;
     config.exact_path_competition = exact_path_competition;
     config.mate_short_body = mate_short_body;
+    config.pair_substitution = pair_substitution;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,
@@ -890,6 +934,7 @@ fn rescue_collapsed(
         // four-letter mapper proposal. Keep its historical search unchanged.
         cfg.repeat_context = false;
         cfg.mate_short_body = false;
+        cfg.pair_substitution = false;
         cfg.extend.edit_dir = esperanto_map::extend::EditDir::Off;
         // Ungapped by construction rather than by refusing the gapped answer
         // afterwards -- see [`RESCUE_GAP_PENALTY`].
@@ -1437,7 +1482,9 @@ fn collect_deferred(raw_bam: &Path) -> Result<Vec<RescueRead>, FlowError> {
             || has_fragment_endpoint(&rec)
             || matches!(
                 rec.aux(b"RE"),
-                Ok(rust_htslib::bam::record::Aux::String("mate_short_body"))
+                Ok(rust_htslib::bam::record::Aux::String(
+                    "mate_short_body" | "pair_substitution"
+                ))
             )
         {
             continue;
@@ -2346,6 +2393,7 @@ mod rescue_tests {
                 (b"fragment".as_slice(), true),
                 (b"raw".as_slice(), false),
                 (b"shortbody".as_slice(), false),
+                (b"pairsubst".as_slice(), false),
             ] {
                 let mut r = rust_htslib::bam::Record::new();
                 r.set(
@@ -2362,6 +2410,9 @@ mod rescue_tests {
                 }
                 if name == b"shortbody" {
                     r.push_aux(b"RE", Aux::String("mate_short_body")).unwrap();
+                }
+                if name == b"pairsubst" {
+                    r.push_aux(b"RE", Aux::String("pair_substitution")).unwrap();
                 }
                 writer.write(&r).unwrap();
             }

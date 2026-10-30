@@ -464,6 +464,40 @@ pub fn run_pe(
                                 diagnostics_enabled.then_some(&mut diag2),
                             );
                         }
+                        if cfg.rna && cfg.pair_substitution && fragments[i].is_some() {
+                            if let (Some(old1), Some(old2), Some(c1), Some(c2)) =
+                                (&r1, &r2, cache1.as_ref(), cache2.as_ref())
+                            {
+                                if let Some(witness) = crate::align::pair_substitution::witness(
+                                    index,
+                                    [seq1, seq2],
+                                    [&a.qual[..seq1.len()], &b.qual[..seq2.len()]],
+                                    [old1, old2],
+                                ) {
+                                    let next1 = aligner.extend_pair_substitution_observed(
+                                        seq1,
+                                        old1,
+                                        c1,
+                                        &witness,
+                                        diagnostics_enabled.then_some(&mut diag1),
+                                    );
+                                    let next2 = aligner.extend_pair_substitution_observed(
+                                        seq2,
+                                        old2,
+                                        c2,
+                                        &witness,
+                                        diagnostics_enabled.then_some(&mut diag2),
+                                    );
+                                    // Both decisions used the unchanged original pair.
+                                    if let Some(next) = next1 {
+                                        r1 = Some(next);
+                                    }
+                                    if let Some(next) = next2 {
+                                        r2 = Some(next);
+                                    }
+                                }
+                            }
+                        }
                         for (aln, raw_len, effective_len) in [
                             (&mut r1, a.seq.len(), seq1.len()),
                             (&mut r2, b.seq.len(), seq2.len()),
@@ -755,9 +789,12 @@ pub fn run_pe_2pass(
     // Short-body MAPQ0 qualification cannot change the discovery library and
     // thereby perturb ordinary pass2 placements. It runs only in final output.
     let mate_short_body = out.config.mate_short_body;
+    let pair_substitution = out.config.pair_substitution;
     out.config.mate_short_body = false;
+    out.config.pair_substitution = false;
     let pass1 = run_pe(out, r1, r2, threads);
     out.config.mate_short_body = mate_short_body;
+    out.config.pair_substitution = pair_substitution;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
@@ -1385,6 +1422,7 @@ mod tests {
             seed_search_limited: false,
             exact_path_ambiguous: false,
             short_body_qualified: false,
+            pair_substitution_qualified: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

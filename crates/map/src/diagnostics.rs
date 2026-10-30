@@ -46,6 +46,14 @@ pub struct ShortBodyDecision {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct PairSubstitutionDecision {
+    pub decision: &'static str,
+    pub reference_direction: &'static str,
+    pub shared_reference_positions0: Vec<u32>,
+    pub original_conditioned_score: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CandidatePool {
     pub stage: &'static str,
     pub scored_candidates: usize,
@@ -57,6 +65,8 @@ pub struct CandidatePool {
     pub seed_budget: Option<crate::index::AnchorBudget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub short_body: Option<ShortBodyDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_substitution: Option<PairSubstitutionDecision>,
 }
 
 impl CandidatePool {
@@ -74,6 +84,7 @@ impl CandidatePool {
             candidates: Vec::new(),
             seed_budget: None,
             short_body: None,
+            pair_substitution: None,
         };
         for (rank, p) in placements.iter().enumerate() {
             if !legal_geometry(index, read_len, p) {
@@ -312,6 +323,7 @@ mod tests {
             candidates: vec![],
             seed_budget: None,
             short_body: None,
+            pair_substitution: None,
         };
         let mut read = FastqRecord {
             name: b"quote\"and\nnewline".to_vec(),

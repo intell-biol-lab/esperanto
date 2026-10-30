@@ -240,6 +240,7 @@ impl Aligner<'_> {
             n_seeds,
             rescued: true,
             short_body_qualified: true,
+            pair_substitution_qualified: false,
             mapq_override: Some(0),
             origin: p.origin,
             n_cands: 1,

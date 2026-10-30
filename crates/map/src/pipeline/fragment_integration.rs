@@ -2,6 +2,200 @@
 use super::*;
 
 #[test]
+fn pair_substitution_native_sparse_terminal_edit_competes_with_clipping() {
+    let mut genome = crate::fragment::tests::body(8000);
+    let mut body = genome[2000..2131].to_vec();
+    // Both sequenced mates have Phred>=20 at the three internal positions
+    // under this helper's deliberately nonuniform quality pattern.
+    for position in [1, 21, 61, 62] {
+        genome[2000 + position] = b'T';
+        body[position] = b'C';
+    }
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    let pair = crate::fragment::tests::pair(&body, [150, 150], 0);
+    let result = run_with_paths(
+        "pair-substitution-red",
+        &index,
+        &[pair],
+        true,
+        None,
+        false,
+        true,
+        true,
+        false,
+        None,
+    );
+    for r in &result.records {
+        let aligned: usize = r
+            .cigar()
+            .iter()
+            .map(|op| {
+                let op = op.unwrap();
+                if op.kind().consumes_read() && op.kind().consumes_reference() {
+                    op.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(
+            aligned, 131,
+            "corroborated sparse terminal substitution must compete in the pair-supported domain"
+        );
+    }
+}
+
+#[test]
+fn pair_substitution_native_directions_orders_passes_and_ablation() {
+    for ag in [false, true] {
+        for terminal in [1, 129] {
+            let mut genome = crate::fragment::tests::body(8000);
+            let mut body = genome[2000..2131].to_vec();
+            for q in [terminal, 21, 61, 62] {
+                genome[2000 + q] = if ag { b'A' } else { b'T' };
+                body[q] = if ag { b'G' } else { b'C' };
+            }
+            let reference =
+                crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                    .unwrap();
+            let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+            for swapped in [false, true] {
+                // Reverse the molecule while retaining each sequencing mate's
+                // own adapter family; swapping entire FASTQs breaks that evidence.
+                let fragment = if swapped {
+                    crate::align::revcomp(&body)
+                } else {
+                    body.clone()
+                };
+                let pair = crate::fragment::tests::pair(&fragment, [150, 150], 0);
+                for two_pass in [false, true] {
+                    for enabled in [false, true] {
+                        let result = run_with_pair_substitution(
+                            &format!("pair-subst-{ag}-{terminal}-{swapped}-{two_pass}-{enabled}"),
+                            &index,
+                            &[pair.clone()],
+                            true,
+                            None,
+                            two_pass,
+                            true,
+                            true,
+                            false,
+                            None,
+                            true,
+                            enabled,
+                            Some(41),
+                        );
+                        for (mate, r) in result.records.iter().enumerate() {
+                            let aligned: usize = r
+                                .cigar()
+                                .iter()
+                                .map(|op| {
+                                    let op = op.unwrap();
+                                    if op.kind().consumes_read() && op.kind().consumes_reference() {
+                                        op.len()
+                                    } else {
+                                        0
+                                    }
+                                })
+                                .sum();
+                            assert_eq!(aligned, if enabled { 131 } else { 129 },
+                                "ag={ag} terminal={terminal} swapped={swapped} pass2={two_pass} enabled={enabled}");
+                            let reverse = r.flags().is_reverse_complemented();
+                            let expected = if reverse {
+                                crate::align::revcomp(&pair[mate])
+                            } else {
+                                pair[mate].clone()
+                            };
+                            assert_eq!(r.sequence().iter().collect::<Vec<_>>(), expected);
+                            assert_eq!(
+                                r.quality_scores().iter().collect::<Vec<_>>(),
+                                vec![41; 150]
+                            );
+                            if enabled {
+                                assert_eq!(r.mapping_quality().unwrap().get(), 0);
+                                assert_eq!(r.alignment_start().unwrap().unwrap().get(), 2001);
+                                assert!(format!("{:?}", r.data().get(b"RE"))
+                                    .contains("pair_substitution"));
+                                assert_eq!(
+                                    result.rows[mate]["mate_attempt"]["pair_substitution"]
+                                        ["decision"],
+                                    "extended_mapq0"
+                                );
+                            }
+                        }
+                        assert!(result.discoveries.is_empty());
+                        assert!(result.library.is_empty());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pair_substitution_native_quality_endpoint_and_cache_controls() {
+    let mut genome = crate::fragment::tests::body(8000);
+    let mut body = genome[2000..2131].to_vec();
+    for q in [1, 21, 61, 62] {
+        genome[2000 + q] = b'T';
+        body[q] = b'C';
+    }
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    let pair = crate::fragment::tests::pair(&body, [150, 150], 0);
+    let pairs = [
+        pair.clone(),
+        [pair[0].clone(), vec![b'N'; 150]],
+        pair.clone(),
+    ];
+    for two_pass in [false, true] {
+        let result = run_with_pair_substitution(
+            &format!("pair-subst-cache-{two_pass}"),
+            &index,
+            &pairs,
+            true,
+            None,
+            two_pass,
+            true,
+            true,
+            false,
+            None,
+            true,
+            true,
+            Some(41),
+        );
+        for i in [0, 2] {
+            assert!(format!("{:?}", result.records[2 * i].data().get(b"RE"))
+                .contains("pair_substitution"));
+        }
+        assert!(!format!("{:?}", result.records[2].data().get(b"RE")).contains("pair_substitution"));
+        for (endpoints, quality) in [(true, 19), (false, 41)] {
+            let result = run_with_pair_substitution(
+                &format!("pair-subst-no-witness-{two_pass}-{endpoints}-{quality}"),
+                &index,
+                &[pair.clone()],
+                endpoints,
+                None,
+                two_pass,
+                true,
+                true,
+                false,
+                None,
+                true,
+                true,
+                Some(quality),
+            );
+            for r in &result.records {
+                assert!(!format!("{:?}", r.data().get(b"RE")).contains("pair_substitution"));
+            }
+        }
+    }
+}
+
+#[test]
 fn short_body_native_pair_recovers_visible_boundary_without_changing_raw_reads() {
     let genome = crate::fragment::tests::body(8000);
     let reference =
@@ -338,6 +532,39 @@ fn run_with_short_body(
     l1: Option<Arc<esperanto_engine::L1Index>>,
     mate_short_body: bool,
 ) -> Observed {
+    run_with_pair_substitution(
+        name,
+        index,
+        pairs,
+        enabled,
+        lib,
+        two_pass,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        l1,
+        mate_short_body,
+        true,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_pair_substitution(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    l1: Option<Arc<esperanto_engine::L1Index>>,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    phred: Option<u8>,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -348,7 +575,7 @@ fn run_with_short_body(
             text.extend_from_slice(format!("@p{i}/{}\n", mate + 1).as_bytes());
             text.extend_from_slice(seq);
             text.extend_from_slice(b"\n+\n");
-            text.extend((0..seq.len()).map(|q| b'!' + ((q + mate) % 41) as u8));
+            text.extend((0..seq.len()).map(|q| b'!' + phred.unwrap_or(((q + mate) % 41) as u8)));
             text.push(b'\n');
         }
         std::fs::write(&paths[mate], text).unwrap();
@@ -361,6 +588,7 @@ fn run_with_short_body(
     config.context_background = context_background;
     config.exact_path_competition = exact_path_competition;
     config.mate_short_body = mate_short_body;
+    config.pair_substitution = pair_substitution;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),

@@ -1,5 +1,11 @@
 # map — splice-aware read alignment
 
+Dev.23 adds independently disableable pair-supported sparse-substitution endpoint
+competition. Accept only a strict conditioned score/coverage improvement with
+all original aligned columns preserved; output MAPQ0 and typed provenance.
+This does not establish calibrated confidence or mapper advantage. See
+[the contract](../../pair-substitution.md).
+
 Dev.22 adds separately disableable MAPQ0 mate-supported short-body qualification
 after ordinary placement refusal. It preserves the ordinary coverage threshold
 and keeps these placements out of discovery and collapsed re-rescue. See

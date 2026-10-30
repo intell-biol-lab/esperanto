@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.23`, add independently disableable paired RNA endpoint
+  competition in a sparse substitution domain corroborated by both original
+  mates. Keep every old aligned column, require strict conditioned score and
+  coverage improvement, retain competitors, emit MAPQ0 and
+  `RE:Z:pair_substitution`, and isolate discovery and collapsed rescue.
+  See `docs/pair-substitution.md`. Generalization, confidence calibration,
+  scientific adoption and superiority remain unproven.
+
 - In `1.1.1-dev.22`, add a separately disableable paired RNA qualification
   for otherwise unmapped exact short bodies. Require visible pure-tail
   separation, complex exact body, two disjoint unique indexed minimizers,

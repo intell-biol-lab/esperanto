@@ -1,5 +1,11 @@
 # Known scientific qualification issues
 
+Dev.23 adds a pair-supported sparse-substitution scoring proposal for clipped
+read-through ends. Every accepted extension is MAPQ0, so higher body coverage
+can reduce evidence admitted by the downstream MAPQ20 gate. Shared observations
+are not independent biological evidence. Full development replay and independent
+generalization remain separate; see [the contract](pair-substitution.md).
+
 Dev.22 short-body qualification is an observable evidence proposal, always
 MAPQ0, with supplied-index sketch support rather than exhaustive uniqueness.
 It cannot resolve an absent true source with identical observations, and

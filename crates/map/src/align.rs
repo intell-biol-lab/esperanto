@@ -69,6 +69,8 @@ pub struct AlignConfig {
     pub exact_path_competition: bool,
     /// Qualify otherwise unplaced exact short bodies with observable pair evidence.
     pub mate_short_body: bool,
+    /// Re-arbitrate clipped ends in a domain corroborated by both original mates.
+    pub pair_substitution: bool,
 }
 
 impl Default for AlignConfig {
@@ -84,6 +86,7 @@ impl Default for AlignConfig {
             context_background: false,
             exact_path_competition: false,
             mate_short_body: false,
+            pair_substitution: false,
         }
     }
 }
@@ -101,6 +104,7 @@ impl AlignConfig {
             context_background: true,
             exact_path_competition: false,
             mate_short_body: true,
+            pair_substitution: true,
         }
     }
 }
@@ -876,6 +880,7 @@ impl<'a> Aligner<'a> {
             seed_search_limited: false,
             exact_path_ambiguous,
             short_body_qualified: false,
+            pair_substitution_qualified: false,
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -2564,6 +2569,7 @@ fn dedup_by_footprint_with_options(
 }
 
 mod exact_path;
+pub(crate) mod pair_substitution;
 mod short_body;
 
 impl ReadAlignment {

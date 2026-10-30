@@ -93,6 +93,8 @@ pub(crate) fn aln_view(a: &ReadAlignment) -> AlnView {
             TagValue::Str(
                 if a.short_body_qualified {
                     "mate_short_body"
+                } else if a.pair_substitution_qualified {
+                    "pair_substitution"
                 } else {
                     "unmapped"
                 }
@@ -205,6 +207,7 @@ mod tests {
             seed_search_limited: false,
             exact_path_ambiguous: false,
             short_body_qualified: false,
+            pair_substitution_qualified: false,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         }
