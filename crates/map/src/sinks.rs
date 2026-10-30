@@ -242,6 +242,7 @@ mod tests {
             exact_path_ambiguous: false,
             short_body_qualified: false,
             pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

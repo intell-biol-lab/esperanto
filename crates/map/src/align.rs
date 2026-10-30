@@ -71,6 +71,8 @@ pub struct AlignConfig {
     pub mate_short_body: bool,
     /// Re-arbitrate clipped ends in a domain corroborated by both original mates.
     pub pair_substitution: bool,
+    /// Project only invariant complex columns at an unidentifiable run boundary.
+    pub boundary_core: bool,
 }
 
 impl Default for AlignConfig {
@@ -87,6 +89,7 @@ impl Default for AlignConfig {
             exact_path_competition: false,
             mate_short_body: false,
             pair_substitution: false,
+            boundary_core: false,
         }
     }
 }
@@ -105,6 +108,7 @@ impl AlignConfig {
             exact_path_competition: false,
             mate_short_body: true,
             pair_substitution: true,
+            boundary_core: true,
         }
     }
 }
@@ -881,6 +885,7 @@ impl<'a> Aligner<'a> {
             exact_path_ambiguous,
             short_body_qualified: false,
             pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
         };
 
         // Only the transcriptome layer could place the read. Its apparent

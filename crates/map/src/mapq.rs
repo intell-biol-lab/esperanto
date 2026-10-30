@@ -130,6 +130,8 @@ pub struct ReadAlignment {
     pub short_body_qualified: bool,
     /// Terminal extension in a substitution domain witnessed by the original pair.
     pub pair_substitution_qualified: bool,
+    /// Unknown boundary columns, in raw alignment query orientation (start,length).
+    pub boundary_core_uncertainty: Option<(u32, u32)>,
 }
 
 impl ReadAlignment {

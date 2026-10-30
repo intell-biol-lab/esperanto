@@ -503,6 +503,11 @@ pub fn run_pe(
                             (&mut r2, b.seq.len(), seq2.len()),
                         ] {
                             if let Some(aln) = aln {
+                                if aln.strand == crate::seed::Strand::Minus {
+                                    if let Some((start, _)) = &mut aln.boundary_core_uncertainty {
+                                        *start += (raw_len - effective_len) as u32;
+                                    }
+                                }
                                 crate::fragment::lift_cigar(
                                     &mut aln.cigar,
                                     aln.strand,
@@ -1423,6 +1428,7 @@ mod tests {
             exact_path_ambiguous: false,
             short_body_qualified: false,
             pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };

@@ -1,7 +1,9 @@
 //! Observable qualification of coverage-ineligible paired RNA candidates.
 //! Indexed sketch support is not exhaustive uniqueness; output is always MAPQ0.
 use super::*;
-use crate::diagnostics::{ShortBodyCandidate, ShortBodyDecision, ShortBodySketchAttempt};
+use crate::diagnostics::{
+    BoundaryCoreProposal, ShortBodyCandidate, ShortBodyDecision, ShortBodySketchAttempt,
+};
 use crate::index::unpack_pos;
 
 /// Exact, complex body with one observably separated canonical terminal tail.
@@ -219,6 +221,71 @@ fn same_path(a: &Placement, b: &Placement) -> bool {
     a.contig == b.contig && a.pos == b.pos && a.strand == b.strand && a.cigar == b.cigar
 }
 
+/// Project only columns invariant to biological/technical boundary assignment.
+/// Neither the run nor its soft clip is asserted to be technical sequence.
+fn boundary_core(index: &Index, query: &[u8], p: &Placement) -> Option<(Placement, u32, u32, u8)> {
+    if p.primary_eligible(query.len()) || p.strict.score <= 0 {
+        return None;
+    }
+    let (prefix, clipped, aligned) = match p.cigar.as_slice() {
+        [CigarOp::SoftClip(s), CigarOp::Match(m)] => (true, *s, *m),
+        [CigarOp::Match(m), CigarOp::SoftClip(s)] => (false, *s, *m),
+        _ => return None,
+    };
+    if clipped < 30 || aligned == 0 || clipped as usize + aligned as usize != query.len() {
+        return None;
+    }
+    let clipped = clipped as usize;
+    let aligned = aligned as usize;
+    let (tail, body) = if prefix {
+        (&query[..clipped], &query[clipped..])
+    } else {
+        (&query[aligned..], &query[..aligned])
+    };
+    let base = tail[0].to_ascii_uppercase();
+    if !b"ACGT".contains(&base) || tail.iter().any(|b| b.to_ascii_uppercase() != base) {
+        return None;
+    }
+    let reference = index.reference.contigs.get(p.contig as usize)?;
+    let end = p.pos.checked_add(aligned as u32)?;
+    if end > reference.len
+        || body.iter().enumerate().any(|(i, &b)| {
+            !b"ACGT".contains(&b.to_ascii_uppercase())
+                || reference.base(p.pos + i as u32).to_ascii() != b.to_ascii_uppercase()
+        })
+    {
+        return None;
+    }
+    let run = if prefix {
+        body.iter()
+            .take_while(|b| b.to_ascii_uppercase() == base)
+            .count()
+    } else {
+        body.iter()
+            .rev()
+            .take_while(|b| b.to_ascii_uppercase() == base)
+            .count()
+    };
+    if run == 0 || run == aligned {
+        return None;
+    }
+    let mut core = p.clone();
+    let n = (aligned - run) as u32;
+    let s = (clipped + run) as u32;
+    core.cigar = if prefix {
+        core.pos = core.pos.checked_add(run as u32)?;
+        vec![CigarOp::SoftClip(s), CigarOp::Match(n)]
+    } else {
+        vec![CigarOp::Match(n), CigarOp::SoftClip(s)]
+    };
+    Some((
+        core,
+        if prefix { clipped as u32 } else { n },
+        run as u32,
+        base,
+    ))
+}
+
 impl Aligner<'_> {
     /// Pipeline-only fallback; callers must preserve every already mapped read.
     /// Full mate geometry is essential; coordinate-only legacy APIs do not use it.
@@ -267,40 +334,79 @@ impl Aligner<'_> {
             let query = if p.strand == Strand::Minus { &rc } else { seq };
             self.rescore_strict(query, p);
         }
+        let mut boundary_core_proposals = Vec::new();
+        let original_count = placements.len();
         let mut qualifying: Vec<(usize, Vec<(u32, u64)>, &'static str)> = Vec::new();
         let mut conditional_sketch_attempts = Vec::new();
-        for (rank, p) in placements.iter().enumerate() {
-            if p.contig != mate.contig || p.strand == mate.strand {
-                continue;
+        for round in 0..2 {
+            if round == 1 {
+                // Preserve every previously accepted or ambiguously qualified
+                // original decision. Partial-core evidence is a final fallback.
+                if !self.config.boundary_core || !qualifying.is_empty() {
+                    break;
+                }
+                for source_rank in 0..original_count {
+                    let p = &placements[source_rank];
+                    let query = if p.strand == Strand::Minus { &rc } else { seq };
+                    if let Some((mut core, start, length, base)) =
+                        boundary_core(self.index, query, p)
+                    {
+                        self.rescore_strict(query, &mut core);
+                        boundary_core_proposals.push(BoundaryCoreProposal {
+                            source_rank,
+                            rank_in_pool: placements.len(),
+                            uncertainty_query_start: start,
+                            uncertainty_bases: length,
+                            run_base: match base {
+                                b'A' => "A",
+                                b'C' => "C",
+                                b'G' => "G",
+                                _ => "T",
+                            },
+                            assignment: "unknown_biological_or_technical",
+                        });
+                        placements.push(core);
+                    }
+                }
             }
-            let query = if p.strand == Strand::Minus { &rc } else { seq };
-            let geometry = ReadAlignment {
-                contig: p.contig,
-                pos: p.pos,
-                strand: p.strand,
-                cigar: p.cigar.clone(),
-                ..Default::default()
-            };
-            if crate::pair::relate(&geometry, mate) != crate::pair::PairRelation::Proper {
-                continue;
-            }
-            let (seeds, scope) = if let Some(seeds) = indexed_support(self.index, query, p) {
-                (seeds, "global_index")
-            } else {
-                let mut attempt = ShortBodySketchAttempt {
-                    rank_in_pool: rank,
+            for (rank, p) in
+                placements
+                    .iter()
+                    .enumerate()
+                    .skip(if round == 0 { 0 } else { original_count })
+            {
+                if p.contig != mate.contig || p.strand == mate.strand {
+                    continue;
+                }
+                let query = if p.strand == Strand::Minus { &rc } else { seq };
+                let geometry = ReadAlignment {
+                    contig: p.contig,
+                    pos: p.pos,
+                    strand: p.strand,
+                    cigar: p.cigar.clone(),
                     ..Default::default()
                 };
-                let seeds = mate_conditioned_support(self.index, query, p, mate, &mut attempt);
-                conditional_sketch_attempts.push(attempt);
-                let Some(seeds) = seeds else { continue };
-                (seeds, "mate_conditioned_index")
-            };
-            if !qualifying
-                .iter()
-                .any(|(i, _, _)| same_path(&placements[*i], p))
-            {
-                qualifying.push((rank, seeds, scope));
+                if crate::pair::relate(&geometry, mate) != crate::pair::PairRelation::Proper {
+                    continue;
+                }
+                let (seeds, scope) = if let Some(seeds) = indexed_support(self.index, query, p) {
+                    (seeds, "global_index")
+                } else {
+                    let mut attempt = ShortBodySketchAttempt {
+                        rank_in_pool: rank,
+                        ..Default::default()
+                    };
+                    let seeds = mate_conditioned_support(self.index, query, p, mate, &mut attempt);
+                    conditional_sketch_attempts.push(attempt);
+                    let Some(seeds) = seeds else { continue };
+                    (seeds, "mate_conditioned_index")
+                };
+                if !qualifying
+                    .iter()
+                    .any(|(i, _, _)| same_path(&placements[*i], p))
+                {
+                    qualifying.push((rank, seeds, scope));
+                }
             }
         }
         if let Some(slot) = diagnostic {
@@ -311,6 +417,7 @@ impl Aligner<'_> {
                 "mate_short_body",
             );
             pool.seed_budget = budget;
+            pool.boundary_core_proposals = boundary_core_proposals.clone();
             pool.short_body = Some(ShortBodyDecision {
                 query_coordinate_frame: "raw_alignment_query",
                 decision: match qualifying.len() {
@@ -368,6 +475,20 @@ impl Aligner<'_> {
             rescued: true,
             short_body_qualified: true,
             pair_substitution_qualified: false,
+            boundary_core_uncertainty: boundary_core_proposals
+                .iter()
+                .filter(|proposal| same_path(&placements[proposal.rank_in_pool], p))
+                .fold(None, |range, proposal| {
+                    let start = proposal.uncertainty_query_start;
+                    let end = start + proposal.uncertainty_bases;
+                    Some(match range {
+                        None => (start, end - start),
+                        Some((old_start, length)) => {
+                            let left = start.min(old_start);
+                            (left, end.max(old_start + length) - left)
+                        }
+                    })
+                }),
             mapq_override: Some(0),
             origin: p.origin,
             n_cands: 1,
@@ -454,6 +575,363 @@ mod tests {
                 vec![CigarOp::Match(80), CigarOp::SoftClip(70)],
             ),
         )
+    }
+
+    #[test]
+    fn boundary_core_identical_worlds_share_only_complex_columns() {
+        for &base in b"ACGT" {
+            for run in [1usize, 4, 7, 31] {
+                for prefix in [false, true] {
+                    let mut genome = crate::fragment::tests::body(8000);
+                    let different = *b"ACGT".iter().find(|&&b| b != base).unwrap();
+                    if prefix {
+                        genome[2000..2000 + run].fill(base);
+                        genome[2000 + run] = different;
+                    } else {
+                        genome[2080 - run..2080].fill(base);
+                        genome[2079 - run] = different;
+                    }
+                    let body = genome[2000..2080].to_vec();
+                    let oriented = if prefix {
+                        [&vec![base; 70], body.as_slice()].concat()
+                    } else {
+                        [body.as_slice(), &vec![base; 70]].concat()
+                    };
+                    let idx = index(&genome);
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let p = candidate(
+                            2000,
+                            strand,
+                            if prefix {
+                                vec![CigarOp::SoftClip(70), CigarOp::Match(80)]
+                            } else {
+                                vec![CigarOp::Match(80), CigarOp::SoftClip(70)]
+                            },
+                        );
+                        assert!(
+                            indexed_support(&idx, &oriented, &p).is_none(),
+                            "the biological/technical boundary remains unidentified"
+                        );
+                        let raw = if strand == Strand::Minus {
+                            revcomp(&oriented)
+                        } else {
+                            oriented.clone()
+                        };
+                        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+                        let mut diagnostic = None;
+                        let result = aligner.recover_short_body_observed(
+                            &raw,&mate(2300,strand.flip()),Some(&cache(vec![p])),
+                            Some(&mut diagnostic),
+                        ).expect("invariant complex columns can emit without identifying the run boundary");
+                        let expected = if prefix {
+                            vec![
+                                CigarOp::SoftClip((70 + run) as u32),
+                                CigarOp::Match((80 - run) as u32),
+                            ]
+                        } else {
+                            vec![
+                                CigarOp::Match((80 - run) as u32),
+                                CigarOp::SoftClip((70 + run) as u32),
+                            ]
+                        };
+                        assert_eq!(result.cigar, expected);
+                        assert_eq!(result.pos, 2000 + if prefix { run as u32 } else { 0 });
+                        assert_eq!(crate::mapq::mapq_of(&result), 0);
+                        // Every possible assignment of the same observed run to
+                        // biological sequence contains the emitted core. These
+                        // labels never enter recover_short_body_observed.
+                        let core_start = if prefix { 70 + run } else { 0 };
+                        let core_end = core_start + 80 - run;
+                        for biological_run in 0..=run {
+                            let true_start = if prefix { 70 + run - biological_run } else { 0 };
+                            let true_end = if prefix {
+                                150
+                            } else {
+                                80 - run + biological_run
+                            };
+                            assert!(core_start >= true_start && core_end <= true_end);
+                        }
+                        let value = serde_json::to_value(diagnostic.unwrap()).unwrap();
+                        assert_eq!(
+                            value["boundary_core_proposals"][0]["uncertainty_bases"],
+                            run
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_core_merged_provenance_is_order_independent_and_ablatable() {
+        let mut genome = crate::fragment::tests::body(8000);
+        genome[2073..2080].fill(b'A');
+        genome[2072] = b'C';
+        let seq = [&genome[2000..2080], &vec![b'A'; 70]].concat();
+        let idx = index(&genome);
+        let original = candidate(
+            2000,
+            Strand::Plus,
+            vec![CigarOp::Match(80), CigarOp::SoftClip(70)],
+        );
+        let alternative = candidate(
+            2000,
+            Strand::Plus,
+            vec![CigarOp::Match(79), CigarOp::SoftClip(71)],
+        );
+        for order in [
+            vec![original.clone(), alternative.clone()],
+            vec![alternative.clone(), original.clone()],
+        ] {
+            let cached = cache(order);
+            let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+            let result = aligner
+                .recover_short_body_observed(&seq, &mate(2300, Strand::Minus), Some(&cached), None)
+                .unwrap();
+            assert_eq!(
+                result.cigar,
+                vec![CigarOp::Match(73), CigarOp::SoftClip(77)]
+            );
+            assert_eq!(result.boundary_core_uncertainty, Some((73, 7)));
+            let view = crate::bam::aln_view(&result);
+            assert!(view.tags.iter().any(|tag| tag.0 == *b"XB"
+                && matches!(&tag.1, esperanto_bamio::TagValue::Str(s)
+                    if s=="query_start=73;length=7;assignment=unknown")));
+            aligner.config.boundary_core = false;
+            assert!(aligner
+                .recover_short_body_observed(&seq, &mate(2300, Strand::Minus), Some(&cached), None)
+                .is_none());
+        }
+        // An already qualifying full exact-body decision must take precedence
+        // over any new partial proposal from another source path.
+        let (genome, seq, p) = fixture();
+        let idx = index(&genome);
+        let cached = cache(vec![p]);
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        let mut diagnostic = None;
+        assert!(aligner
+            .recover_short_body_observed(
+                &seq,
+                &mate(2300, Strand::Minus),
+                Some(&cached),
+                Some(&mut diagnostic)
+            )
+            .is_some());
+        assert!(diagnostic.unwrap().boundary_core_proposals.is_empty());
+    }
+
+    #[test]
+    fn boundary_core_rejects_invalid_sources_and_unsupported_mates() {
+        let mut genome = crate::fragment::tests::body(8000);
+        genome[2076..2080].fill(b'A');
+        genome[2075] = b'C';
+        let seq = [&genome[2000..2080], &vec![b'A'; 70]].concat();
+        let idx = index(&genome);
+        let p = candidate(
+            2000,
+            Strand::Plus,
+            vec![CigarOp::Match(80), CigarOp::SoftClip(70)],
+        );
+        for location in [10usize, 100] {
+            let mut bad = seq.clone();
+            bad[location] = b'N';
+            assert!(boundary_core(&idx, &bad, &p).is_none());
+        }
+        let mut mismatch = seq.clone();
+        mismatch[10] = if mismatch[10] == b'A' { b'C' } else { b'A' };
+        assert!(boundary_core(&idx, &mismatch, &p).is_none());
+        for cigar in [
+            vec![
+                CigarOp::Match(40),
+                CigarOp::Ins(1),
+                CigarOp::Match(39),
+                CigarOp::SoftClip(70),
+            ],
+            vec![
+                CigarOp::Match(40),
+                CigarOp::Del(1),
+                CigarOp::Match(40),
+                CigarOp::SoftClip(70),
+            ],
+            vec![
+                CigarOp::Match(40),
+                CigarOp::RefSkip(20),
+                CigarOp::Match(40),
+                CigarOp::SoftClip(70),
+            ],
+            vec![
+                CigarOp::SoftClip(1),
+                CigarOp::Match(79),
+                CigarOp::SoftClip(70),
+            ],
+        ] {
+            assert!(boundary_core(&idx, &seq, &candidate(2000, Strand::Plus, cigar)).is_none());
+        }
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        let cached = cache(vec![p]);
+        for mut m in [
+            mate(2300, Strand::Plus),
+            mate(4000, Strand::Minus),
+            mate(2300, Strand::Minus),
+        ] {
+            if m.pos == 2300 && m.strand == Strand::Minus {
+                m.rescued = true;
+            }
+            assert!(aligner
+                .recover_short_body_observed(&seq, &m, Some(&cached), None)
+                .is_none());
+        }
+        for quality in [0, 19, 255] {
+            let mut m = mate(2300, Strand::Minus);
+            m.mapq_override = Some(quality);
+            assert!(aligner
+                .recover_short_body_observed(&seq, &m, Some(&cached), None)
+                .is_none());
+        }
+        let run_index = index(&vec![b'A'; 8000]);
+        assert!(boundary_core(
+            &run_index,
+            &vec![b'A'; 150],
+            &candidate(
+                2000,
+                Strand::Plus,
+                vec![CigarOp::Match(80), CigarOp::SoftClip(70)]
+            )
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn boundary_core_nearby_omitted_repeat_refuses() {
+        let mut genome = crate::fragment::tests::body(8000);
+        genome[2076..2080].fill(b'A');
+        genome[2075] = b'C';
+        let body = genome[2000..2080].to_vec();
+        genome[2500..2580].copy_from_slice(&body);
+        let seq = [body.as_slice(), &vec![b'A'; 70]].concat();
+        let idx = index(&genome);
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        assert!(aligner
+            .recover_short_body_observed(
+                &seq,
+                &mate(2300, Strand::Minus),
+                Some(&cache(vec![candidate(
+                    2000,
+                    Strand::Plus,
+                    vec![CigarOp::Match(80), CigarOp::SoftClip(70)]
+                )])),
+                None
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn boundary_core_distinct_supported_projections_refuse_in_either_order() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let mut middle = genome[3000..3080].to_vec();
+        middle[..4].fill(b'A');
+        middle[4] = b'G';
+        middle[75] = b'G';
+        middle[76..].fill(b'C');
+        let seq = [&vec![b'A'; 90][..], &middle, &vec![b'C'; 90]].concat();
+        genome[2000..2260].copy_from_slice(&seq);
+        genome[3000..3080].fill(b'G');
+        let idx = index(&genome);
+        let left = candidate(
+            2000,
+            Strand::Plus,
+            vec![CigarOp::Match(170), CigarOp::SoftClip(90)],
+        );
+        let right = candidate(
+            2090,
+            Strand::Plus,
+            vec![CigarOp::SoftClip(90), CigarOp::Match(170)],
+        );
+        // Each projection has independent indexed support, but they emit
+        // different sets of columns. A shared locus cannot erase that choice.
+        for p in [&left, &right] {
+            let (mut core, _, _, _) = boundary_core(&idx, &seq, p).unwrap();
+            let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+            aligner.rescore_strict(&seq, &mut core);
+            assert!(indexed_support(&idx, &seq, &core).is_some());
+        }
+        for order in [
+            vec![left.clone(), right.clone()],
+            vec![right.clone(), left.clone()],
+        ] {
+            let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+            let mut diagnostic = None;
+            assert!(aligner
+                .recover_short_body_observed(
+                    &seq,
+                    &mate(2400, Strand::Minus),
+                    Some(&cache(order)),
+                    Some(&mut diagnostic),
+                )
+                .is_none());
+            let pool = diagnostic.unwrap();
+            assert_eq!(pool.boundary_core_proposals.len(), 2);
+            let decision = pool.short_body.unwrap();
+            assert_eq!(decision.decision, "ambiguous_paths");
+            assert_eq!(decision.supported_candidates.len(), 2);
+        }
+    }
+
+    #[test]
+    fn boundary_core_effective_fragment_lifts_uncertainty_and_seed_coordinates() {
+        let mut genome = crate::fragment::tests::body(8000);
+        genome[2076..2080].fill(b'A');
+        genome[2075] = b'C';
+        let seq = [&genome[2000..2080], &vec![b'A'; 70]].concat();
+        let raw = revcomp(&seq);
+        let idx = index(&genome);
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        let mut diagnostic = None;
+        let result = aligner
+            .recover_short_body_observed(
+                &raw,
+                &mate(2300, Strand::Plus),
+                Some(&cache(vec![candidate(
+                    2000,
+                    Strand::Minus,
+                    vec![CigarOp::Match(80), CigarOp::SoftClip(70)],
+                )])),
+                Some(&mut diagnostic),
+            )
+            .unwrap();
+        assert_eq!(result.boundary_core_uncertainty, Some((76, 4)));
+        let record = crate::fastq::FastqRecord {
+            name: b"core-fragment/1".to_vec(),
+            seq: [raw.as_slice(), &vec![b'C'; 50]].concat(),
+            qual: vec![b'I'; 200],
+        };
+        let mut out = Vec::new();
+        crate::diagnostics::write_row_with_fragment(
+            &mut out,
+            &record,
+            Some(1),
+            true,
+            crate::diagnostics::CandidatePool::capture(&idx, 150, &[], "independent"),
+            diagnostic,
+            Some(crate::fragment::FragmentEvidence {
+                fragment_length: 150,
+                overlap_bases: 100,
+                viable_offsets: 1,
+                adapter_family: "synthetic",
+                adapter_bases_r1: 50,
+                adapter_bases_r2: 50,
+            }),
+        )
+        .unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            row["mate_attempt"]["boundary_core_proposals"][0]["uncertainty_query_start"],
+            126
+        );
+        assert_eq!(
+            row["mate_attempt"]["boundary_core_proposals"][0]["uncertainty_bases"],
+            4
+        );
     }
 
     #[test]

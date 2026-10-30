@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.26`, add independently disableable final projection of supported
+  complex-body columns outside an unidentifiable homopolymer boundary.
+  Preserve original candidates and prior short-body decisions; record the
+  uncertain interval in diagnostics and final BAM XB, with MAPQ0 qualification.
+  Add identical-world, repeat, raw-frame, biological-run and native pipeline
+  controls. See `docs/boundary-core.md`; adoption and superiority remain unproven.
+
 - In `1.1.1-dev.25`, add bounded mate-conditioned primary-index support for
   otherwise unplaced exact unspliced short bodies. Preserve observable tail
   boundaries, ordinary coverage, existing mapped reads and MAPQ0 qualification.

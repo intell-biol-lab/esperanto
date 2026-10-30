@@ -196,6 +196,137 @@ fn pair_substitution_native_quality_endpoint_and_cache_controls() {
 }
 
 #[test]
+fn boundary_core_native_frames_orders_threads_and_ablation() {
+    let mut genome = crate::fragment::tests::body(8000);
+    genome[2076..2080].fill(b'A');
+    genome[2075] = b'C';
+    // A concrete negative-score flank prevents a different mismatching DP
+    // extension from replacing the exact source path this test exercises.
+    genome[2080..2230].fill(b'C');
+    let query = [&genome[2000..2080], &vec![b'A'; 70]].concat();
+    let index = Index::build(
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap(),
+        crate::seed::SeedParams { k: 15, w: 5 },
+    );
+    for minus in [false, true] {
+        let raw = if minus {
+            crate::align::revcomp(&query)
+        } else {
+            query.clone()
+        };
+        let mate = if minus {
+            genome[2300..2450].to_vec()
+        } else {
+            crate::align::revcomp(&genome[2300..2450])
+        };
+        for swapped in [false, true] {
+            let pair = if swapped {
+                [mate.clone(), raw.clone()]
+            } else {
+                [raw.clone(), mate.clone()]
+            };
+            let target = usize::from(swapped);
+            for two_pass in [false, true] {
+                for threads in [1, 3] {
+                    for enabled in [false, true] {
+                        let out = run_with_boundary_core(
+                            &format!(
+                                "core-native-{minus}-{swapped}-{two_pass}-{threads}-{enabled}"
+                            ),
+                            &index,
+                            &[pair.clone()],
+                            false,
+                            None,
+                            two_pass,
+                            true,
+                            true,
+                            false,
+                            None,
+                            true,
+                            true,
+                            None,
+                            enabled,
+                            threads,
+                        );
+                        let r = &out.records[target];
+                        assert_eq!(!r.flags().is_unmapped(), enabled,
+                            "minus={minus} swapped={swapped} two_pass={two_pass} threads={threads} enabled={enabled} rows={:?}",
+                            out.rows);
+                        if enabled {
+                            assert_eq!(r.alignment_start().unwrap().unwrap().get(), 2001);
+                            assert_eq!(r.mapping_quality().unwrap().get(), 0);
+                            assert_eq!(r.flags().is_reverse_complemented(), minus);
+                            assert_eq!(r.sequence().iter().collect::<Vec<_>>(), query);
+                            assert!(format!("{:?}", r.data().get(b"XB").unwrap().unwrap())
+                                .contains("query_start=76;length=4;assignment=unknown"));
+                            let mut qualities: Vec<_> =
+                                (0..150).map(|q| ((q + target) % 41) as u8).collect();
+                            if minus {
+                                qualities.reverse();
+                            }
+                            assert_eq!(r.quality_scores().iter().collect::<Vec<_>>(), qualities);
+                            assert!(r.flags().is_properly_segmented());
+                            assert!(!out.rows[target]["mate_attempt"]["boundary_core_proposals"]
+                                .as_array()
+                                .unwrap()
+                                .is_empty());
+                        } else {
+                            assert!(r.data().get(b"XB").is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn boundary_core_fully_biological_mapped_run_is_preserved() {
+    let mut genome = crate::fragment::tests::body(8000);
+    genome[2080..2150].fill(b'A');
+    genome[2079] = b'C';
+    genome[2150] = b'C';
+    let query = genome[2000..2150].to_vec();
+    let mate = crate::align::revcomp(&genome[2300..2450]);
+    let index = Index::build(
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap(),
+        crate::seed::SeedParams { k: 15, w: 5 },
+    );
+    for enabled in [false, true] {
+        let out = run_with_boundary_core(
+            &format!("core-biological-{enabled}"),
+            &index,
+            &[[query.clone(), mate.clone()]],
+            false,
+            None,
+            true,
+            true,
+            true,
+            false,
+            None,
+            true,
+            true,
+            None,
+            enabled,
+            2,
+        );
+        let r = &out.records[0];
+        assert!(!r.flags().is_unmapped());
+        assert_eq!(r.sequence().iter().collect::<Vec<_>>(), query);
+        assert_eq!(r.alignment_start().unwrap().unwrap().get(), 2001);
+        assert_eq!(
+            r.cigar().iter().map(|op| op.unwrap().len()).sum::<usize>(),
+            150
+        );
+        assert!(r
+            .cigar()
+            .iter()
+            .all(|op| op.unwrap().kind().consumes_reference()));
+        assert!(r.data().get(b"XB").is_none());
+    }
+}
+
+#[test]
 fn short_body_conditional_native_remote_repeat_mate_orders_and_passes() {
     let mut genome = crate::fragment::tests::body(8000);
     let body = genome[2000..2080].to_vec();
@@ -626,6 +757,43 @@ fn run_with_pair_substitution(
     pair_substitution: bool,
     phred: Option<u8>,
 ) -> Observed {
+    run_with_boundary_core(
+        name,
+        index,
+        pairs,
+        enabled,
+        lib,
+        two_pass,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        l1,
+        mate_short_body,
+        pair_substitution,
+        phred,
+        true,
+        2,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_boundary_core(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    l1: Option<Arc<esperanto_engine::L1Index>>,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    phred: Option<u8>,
+    boundary_core: bool,
+    threads: usize,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -650,6 +818,7 @@ fn run_with_pair_substitution(
     config.exact_path_competition = exact_path_competition;
     config.mate_short_body = mate_short_body;
     config.pair_substitution = pair_substitution;
+    config.boundary_core = boundary_core;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),
@@ -660,10 +829,10 @@ fn run_with_pair_substitution(
         l1,
     };
     let (discoveries, library) = if two_pass {
-        let (_, kept, library, _) = run_pe_2pass(&mut out, &paths[0], &paths[1], 2).unwrap();
+        let (_, kept, library, _) = run_pe_2pass(&mut out, &paths[0], &paths[1], threads).unwrap();
         (kept, library)
     } else {
-        run_pe(&mut out, &paths[0], &paths[1], 2).unwrap();
+        run_pe(&mut out, &paths[0], &paths[1], threads).unwrap();
         (Vec::new(), Vec::new())
     };
     drop(out);

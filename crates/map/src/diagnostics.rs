@@ -51,6 +51,16 @@ pub struct ShortBodySketchAttempt {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct BoundaryCoreProposal {
+    pub source_rank: usize,
+    pub rank_in_pool: usize,
+    pub uncertainty_query_start: u32,
+    pub uncertainty_bases: u32,
+    pub run_base: &'static str,
+    pub assignment: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ShortBodyDecision {
     pub decision: &'static str,
     pub query_coordinate_frame: &'static str,
@@ -81,6 +91,8 @@ pub struct CandidatePool {
     pub short_body: Option<ShortBodyDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pair_substitution: Option<PairSubstitutionDecision>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub boundary_core_proposals: Vec<BoundaryCoreProposal>,
 }
 
 impl CandidatePool {
@@ -99,6 +111,7 @@ impl CandidatePool {
             seed_budget: None,
             short_body: None,
             pair_substitution: None,
+            boundary_core_proposals: Vec::new(),
         };
         for (rank, p) in placements.iter().enumerate() {
             if !legal_geometry(index, read_len, p) {
@@ -232,6 +245,15 @@ pub(crate) fn write_row_with_fragment(
     if let Some(fragment) = fragment {
         let suffix = read.seq.len() - fragment.fragment_length;
         for pool in std::iter::once(&mut independent).chain(mate_attempt.iter_mut()) {
+            for proposal in &mut pool.boundary_core_proposals {
+                if pool
+                    .candidates
+                    .iter()
+                    .any(|c| c.rank_in_pool == proposal.rank_in_pool && c.strand == "-")
+                {
+                    proposal.uncertainty_query_start += suffix as u32;
+                }
+            }
             if let Some(decision) = &mut pool.short_body {
                 for supported in &mut decision.supported_candidates {
                     if pool
@@ -334,6 +356,7 @@ mod tests {
     #[test]
     fn diagnostic_io_errors_and_invalid_utf8_are_reported() {
         let empty = || CandidatePool {
+            boundary_core_proposals: Vec::new(),
             stage: "independent",
             scored_candidates: 0,
             excluded_nonpositive: 0,

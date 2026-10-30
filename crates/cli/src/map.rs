@@ -46,6 +46,9 @@ pub struct MapArgs {
     /// Disable endpoint re-arbitration in a pair-supported substitution domain.
     #[arg(long)]
     no_pair_substitution: bool,
+    /// Disable projection of invariant columns at uncertain homopolymer boundaries.
+    #[arg(long)]
+    no_boundary_core: bool,
     /// Enable experimental exact-path arbitration (rejected for general adoption).
     #[arg(long, conflicts_with = "no_exact_path_competition")]
     experimental_exact_path_competition: bool,
@@ -56,7 +59,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_pair_substitution_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_boundary_core_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -71,6 +74,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         a.experimental_exact_path_competition,
         !a.no_mate_short_body,
         !a.no_pair_substitution,
+        !a.no_boundary_core,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -121,6 +125,21 @@ mod tests {
             "--no-context-background",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn boundary_core_has_independent_cli_ablation() {
+        let base = [
+            "probe", "--r1", "r.fq", "--index", "r.paidx", "--out", "out",
+        ];
+        assert!(!Probe::try_parse_from(base).unwrap().map.no_boundary_core);
+        let mut args = base.to_vec();
+        args.push("--no-boundary-core");
+        let off = Probe::try_parse_from(args).unwrap();
+        assert!(off.map.no_boundary_core);
+        assert!(!off.map.no_mate_short_body);
+        assert!(!off.map.no_pair_substitution);
+        assert!(!off.map.no_fragment_endpoints);
     }
 
     #[test]

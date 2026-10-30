@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Dev.26 proposes a final invariant-column fallback when homopolymer boundary
+assignment is unidentifiable. It emits only supported complex-body columns,
+records uncertainty in XB/diagnostics and leaves all new projections at MAPQ0.
+It intentionally cannot certify biological/technical segmentation or recover
+biological bases inside the uncertain run. Full ablation/qualification/adverse
+accounting and independent generalization remain separate; see `boundary-core.md`.
+
 Dev.25 proposes mate-conditioned primary-index support for otherwise unplaced
 exact unspliced bodies with observably separated homopolymer clips. This can
 distinguish remote represented repeats only under the actual mate geometry;
