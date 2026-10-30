@@ -10,7 +10,7 @@ The `esperanto` executable parses arguments, resolves reference and model paths,
 | `index` | `--fasta`, `--out` | `--gtf`, `--k` (15), `--w` (5), repeatable `--decoy`; build alignment indexes |
 | `run` | `--out` and FASTQ or BAM input | `--r1`, `--r2`, `--bam`, `--sites`, `--index`, `--fasta`, `--gtf`, `--bundle`, `--l1-bundle`, `--sample`, `--threads`, `--stop-after` |
 | `resume` | Run directory | Validate and continue a compatible interrupted run |
-| `map` | `--r1`, `--index`, `--out` | `--r2`, `--gtf`, `--l1-bundle`, `--threads`; write unsorted BAM |
+| `map` | `--r1`, `--index`, `--out` | `--r2`, `--gtf`, `--l1-bundle`, `--threads`, `--candidate-diagnostics`, `--no-fragment-endpoints`, `--no-repeat-context`; write unsorted BAM |
 | `scan` | `--bam`, `--out` | `--fasta`, `--threads`; unified candidate discovery |
 | `score` | `--bam`, `--sites`, `--out` | `--fasta`, `--bundle`, `--threads`; unified classifier scores |
 | `report` | `--out` | `--fasta`, `--gtf`; regenerate HTML from a finished run |

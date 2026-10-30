@@ -13,9 +13,10 @@
 
 use crate::extend::{push_op, CigarOp, ExtendBuffer};
 use crate::gtf::RefinedJunction;
-use crate::intron_chain::cigar_conserving;
 use crate::splice::junction_signal;
-use crate::split::{cigar_before_read_depth, extend_tail, SplitContext, SplitRescue};
+use crate::split::{
+    cigar_before_read_depth, extend_tail, rescue_cigar_valid, SplitContext, SplitRescue,
+};
 
 /// Micro-tail threshold: shorter tails are exact-matched, longer ones go
 /// through extension.
@@ -131,6 +132,9 @@ pub fn rescue_span(ctx: &SplitContext, buf: &mut ExtendBuffer) -> Option<SplitRe
             let Some((_, ext)) = extend_tail(ctg, tail, j.end, hi, &ctx.extend_params, buf) else {
                 continue;
             };
+            if ext.read_start != 0 || ext.ref_start != 0 {
+                continue;
+            }
             ext.cigar.clone()
         };
 
@@ -140,7 +144,7 @@ pub fn rescue_span(ctx: &SplitContext, buf: &mut ExtendBuffer) -> Option<SplitRe
         for op in &tail_ops {
             push_op(&mut cigar, *op);
         }
-        if !cigar_conserving(&cigar, ctx.read.len()) {
+        if !rescue_cigar_valid(ctx.pos, &cigar, ctx.read.len(), j) {
             continue;
         }
 
@@ -157,4 +161,55 @@ pub fn rescue_span(ctx: &SplitContext, buf: &mut ExtendBuffer) -> Option<SplitRe
         });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        extend::ExtendParams,
+        gtf::{Junction, JunctionLib},
+        seed::{SeedParams, Strand},
+        splice::SpliceParams,
+    };
+
+    #[test]
+    fn span_rejects_internal_tail_clip_and_acceptor_offset() {
+        for (acceptor_prefix, read_prefix) in [("", "AAAA"), ("AAAA", "")] {
+            let seq = format!(
+                "{}GT{}AG{acceptor_prefix}{}",
+                "C".repeat(60),
+                "T".repeat(96),
+                "G".repeat(60)
+            );
+            let reference =
+                crate::fasta::parse_fasta_bytes(format!(">synthetic\n{seq}\n").as_bytes()).unwrap();
+            let read = format!("{}{read_prefix}{}", "C".repeat(40), "G".repeat(40));
+            let lib = JunctionLib::build([Junction {
+                contig: 0,
+                start: 60,
+                end: 160,
+                minus_strand: false,
+            }]);
+            let cigar = vec![CigarOp::Match(read.len() as u32)];
+            let ctx = SplitContext {
+                reference: &reference,
+                index: None,
+                lib: &lib,
+                read: read.as_bytes(),
+                contig: 0,
+                strand: Strand::Plus,
+                pos: 20,
+                ref_end: 20 + read.len() as u32,
+                read_start: 0,
+                read_end: read.len() as u32,
+                cigar: &cigar,
+                seed_params: SeedParams { k: 15, w: 5 },
+                splice_params: SpliceParams::default(),
+                extend_params: ExtendParams::default(),
+            };
+            let rescue = rescue_span(&ctx, &mut ExtendBuffer::default());
+            assert!(rescue.is_none(), "unanchored run-through tail: {rescue:?}");
+        }
+    }
 }

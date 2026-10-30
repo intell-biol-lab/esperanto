@@ -238,6 +238,11 @@ mod tests {
             n_seeds: 14,
             rescued: false,
             mapq_override: None,
+            seed_search_limited: false,
+            exact_path_ambiguous: false,
+            short_body_qualified: false,
+            pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         };
@@ -251,6 +256,35 @@ mod tests {
         // one PE-shaped record (mate fields + tlen) to cover the mate encode
         out[0].mate = Some((0, 55, 120));
         out
+    }
+
+    #[test]
+    fn unmapped_evidence_survives_fast_and_slow_bam_encoders() {
+        let index = tiny_index();
+        let header = crate::bam::build_header(&index);
+        let mut rec = crate::bam::record_se(b"limited/1", b"ACGT", b"IIII", None);
+        rec.unmapped_tags.push(esperanto_bamio::RawTag(
+            *b"EK",
+            esperanto_bamio::TagValue::Str("mapq_src=seed_budget;seed_search=limited".into()),
+        ));
+        for slow in [false, true] {
+            let cell = Arc::new(Mutex::new(Vec::new()));
+            let mut writer =
+                esperanto_bamio::create_writer(Box::new(SharedSink(cell.clone())), &header, 1)
+                    .unwrap();
+            if slow {
+                esperanto_bamio::write_record_slow(&mut writer, &header, &rec).unwrap();
+            } else {
+                esperanto_bamio::write_record(&mut writer, &header, &rec).unwrap();
+            }
+            writer.into_inner().finish().unwrap();
+            let mut raw = Vec::new();
+            flate2::read::MultiGzDecoder::new(cell.lock().unwrap().as_slice())
+                .read_to_end(&mut raw)
+                .unwrap();
+            let expected = b"EKZmapq_src=seed_budget;seed_search=limited\0";
+            assert!(raw.windows(expected.len()).any(|w| w == expected));
+        }
     }
 
     #[test]
@@ -275,12 +309,9 @@ mod tests {
         }
         let new_bam_cell = Arc::new(Mutex::new(Vec::new()));
         {
-            let mut sinks = RecordSinks::new(
-                Some(Box::new(SharedSink(new_bam_cell.clone()))),
-                &index,
-                1,
-            )
-            .expect("sinks");
+            let mut sinks =
+                RecordSinks::new(Some(Box::new(SharedSink(new_bam_cell.clone()))), &index, 1)
+                    .expect("sinks");
             for r in &records {
                 sinks.write(r).expect("sink write");
             }
