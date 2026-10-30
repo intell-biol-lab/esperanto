@@ -413,6 +413,39 @@ pub fn run_pe(
                         let mut r2 = base2.clone();
                         let mut diag1 = None;
                         let mut diag2 = None;
+                        // Default-off extra candidate generation. Both directions
+                        // see the original pair and full cached competition.
+                        if cfg.weak_mate_proposals {
+                            if let (Some(old1), Some(old2), Some(c1), Some(c2)) = (
+                                base1.as_ref(),
+                                base2.as_ref(),
+                                cache1.as_ref(),
+                                cache2.as_ref(),
+                            ) {
+                                let next1 = aligner.propose_from_weak_mate(
+                                    seq1,
+                                    old1,
+                                    seq2,
+                                    old2,
+                                    c1,
+                                    diagnostics_enabled.then_some(&mut diag1),
+                                );
+                                let next2 = aligner.propose_from_weak_mate(
+                                    seq2,
+                                    old2,
+                                    seq1,
+                                    old1,
+                                    c2,
+                                    diagnostics_enabled.then_some(&mut diag2),
+                                );
+                                if let Some(next) = next1 {
+                                    r1 = Some(next);
+                                }
+                                if let Some(next) = next2 {
+                                    r2 = Some(next);
+                                }
+                            }
+                        }
                         // Pair-anchored arbitration: a mate whose own
                         // placement is poor (unplaced, mostly clipped, or
                         // below the pileup gate) is re-arbitrated with the
@@ -795,11 +828,14 @@ pub fn run_pe_2pass(
     // thereby perturb ordinary pass2 placements. It runs only in final output.
     let mate_short_body = out.config.mate_short_body;
     let pair_substitution = out.config.pair_substitution;
+    let weak_mate_proposals = out.config.weak_mate_proposals;
     out.config.mate_short_body = false;
     out.config.pair_substitution = false;
+    out.config.weak_mate_proposals = false;
     let pass1 = run_pe(out, r1, r2, threads);
     out.config.mate_short_body = mate_short_body;
     out.config.pair_substitution = pair_substitution;
+    out.config.weak_mate_proposals = weak_mate_proposals;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;

@@ -654,6 +654,54 @@ pub fn map_stage_with_boundary_core_options(
     ),
     FlowError,
 > {
+    map_stage_with_weak_mate_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        pair_substitution,
+        boundary_core,
+        false,
+    )
+}
+
+/// Default-off weak-mate proposal experiment. Existing entry points preserve
+/// the frozen mapper policy by passing false.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_weak_mate_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    boundary_core: bool,
+    weak_mate_proposals: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -669,6 +717,7 @@ pub fn map_stage_with_boundary_core_options(
     config.mate_short_body = mate_short_body;
     config.pair_substitution = pair_substitution;
     config.boundary_core = boundary_core;
+    config.weak_mate_proposals = weak_mate_proposals;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,

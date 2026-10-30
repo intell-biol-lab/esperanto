@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.27`, add a default-off weak-mate candidate proposal experiment.
+  An exact but search-limited MAPQ0 mate may propose one ordinary window;
+  all original and remote candidates remain in competition, strict improvement
+  is required, and replacements remain MAPQ0. See `docs/weak-mate-proposals.md`.
+  Adoption requires independent old/fresh development audits; dev.26 remains
+  the frozen baseline and isolated test outcomes are not development inputs.
+
 - In `1.1.1-dev.26`, add independently disableable final projection of supported
   complex-body columns outside an unidentifiable homopolymer boundary.
   Preserve original candidates and prior short-body decisions; record the

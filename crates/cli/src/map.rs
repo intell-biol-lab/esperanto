@@ -49,6 +49,9 @@ pub struct MapArgs {
     /// Disable projection of invariant columns at uncertain homopolymer boundaries.
     #[arg(long)]
     no_boundary_core: bool,
+    /// Experiment: exact MAPQ0 mates may propose a locus without pruning rivals.
+    #[arg(long)]
+    experimental_weak_mate_proposals: bool,
     /// Enable experimental exact-path arbitration (rejected for general adoption).
     #[arg(long, conflicts_with = "no_exact_path_competition")]
     experimental_exact_path_competition: bool,
@@ -59,7 +62,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_boundary_core_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_weak_mate_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -75,6 +78,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         !a.no_mate_short_body,
         !a.no_pair_substitution,
         !a.no_boundary_core,
+        a.experimental_weak_mate_proposals,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -111,6 +115,23 @@ mod tests {
         assert!(!default.map.no_repeat_context);
         assert!(!default.map.no_fragment_endpoints);
         assert!(!default.map.no_context_background);
+        assert!(!default.map.experimental_weak_mate_proposals);
+    }
+
+    #[test]
+    fn weak_mate_proposals_require_explicit_opt_in() {
+        let parsed = Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--experimental-weak-mate-proposals",
+        ])
+        .unwrap();
+        assert!(parsed.map.experimental_weak_mate_proposals);
     }
     #[test]
     fn context_background_has_independent_cli_ablation() {

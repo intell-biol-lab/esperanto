@@ -73,6 +73,8 @@ pub struct AlignConfig {
     pub pair_substitution: bool,
     /// Project only invariant complex columns at an unidentifiable run boundary.
     pub boundary_core: bool,
+    /// Experimental extra loci from exact MAPQ0 mates; disabled by default.
+    pub weak_mate_proposals: bool,
 }
 
 impl Default for AlignConfig {
@@ -90,6 +92,7 @@ impl Default for AlignConfig {
             mate_short_body: false,
             pair_substitution: false,
             boundary_core: false,
+            weak_mate_proposals: false,
         }
     }
 }
@@ -109,6 +112,7 @@ impl AlignConfig {
             mate_short_body: true,
             pair_substitution: true,
             boundary_core: true,
+            weak_mate_proposals: false,
         }
     }
 }
@@ -2576,6 +2580,7 @@ fn dedup_by_footprint_with_options(
 mod exact_path;
 pub(crate) mod pair_substitution;
 mod short_body;
+mod weak_mate;
 
 impl ReadAlignment {
     #[cfg(test)]
