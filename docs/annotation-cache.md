@@ -14,7 +14,11 @@ outcome/timing does not enter scientific QC or alter mapping parameters.
 Non-regular inputs (pipes, /dev/stdin, process substitution) bypass caching and
 are parsed once, preserving stream contents and parse errors.
 
-Each regular-file invocation hashes the entire GTF. Keys include that digest, the reference
+Since dev.34, direct parsing (cache disabled or non-regular source) does not
+construct or update a source checksum. Parsing and its error semantics are
+shared with the checksum-enabled instantiation.
+
+Each cache-enabled regular-file invocation hashes the entire GTF. Keys include that digest, the reference
 FASTA SHA256, ordered contig names/lengths, and parser/schema version. Each hit
 also verifies the stored key/schema, canonical payload SHA256, sorted unique
 junctions, positive counts and valid intervals, then reconstructs the acceptor

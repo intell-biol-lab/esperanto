@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1-dev.34 (unreleased, annotation-only ablation)
+
+- Skip source checksum construction and updates during direct GTF parsing.
+  Cache creation and hit verification retain full content integrity checks.
+  This candidate independently isolates the change on dev.32.
+
 ## 1.1.1-dev.32 (unreleased)
 
 - Own directional rescue mmaps and decoded references, borrowing index/hit views
