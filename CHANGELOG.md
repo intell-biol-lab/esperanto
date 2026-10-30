@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1-dev.37 (unreleased)
+
+- Roll forward L1 read k-mer codes across overlapping windows. Preserve every
+  offset/code, case-insensitive base encoding and invalid-base reseeding for
+  k=1..32, while decoding each input byte at most once.
+
 ## 1.1.1-dev.36 (unreleased)
 
 - Add opt-in stage wall-time profiling with `ESP_PROFILE_STAGES=1`. Separate
