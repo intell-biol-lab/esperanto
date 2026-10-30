@@ -1,5 +1,10 @@
 # map — splice-aware read alignment
 
+Dev.21 computes paired transcript span by subtracting the union of both CIGARs'
+intron intervals,so shared skips are counted once. It retains the existing
+proper span cap and transcript-aware signed TLEN convention. See
+[the pair-span contract](../../paired-span-union.md).
+
 Dev.20 restores dev18 default arbitration after full development replay rejected
 the dev.19 fewest-intron primary policy. Exact structural competition and durable
 MAPQ0 remain available through `map --experimental-exact-path-competition`;

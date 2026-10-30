@@ -1,5 +1,11 @@
 # Known scientific qualification issues
 
+Dev.21 repairs double subtraction of shared introns in paired transcript span.
+Native generated and independent coordinate-mask controls cover the arithmetic;
+full development replay and independent generalization are separate. This
+does not repair the outstanding short-body qualification or boundary ambiguity.
+See [the pair-span contract](paired-span-union.md).
+
 Full development replay rejected dev.19 exact-path default arbitration: 187
 correct body bases gained versus 475 lost; ordinary controls net -99 bases.
 Dev.20 disables it by default in config, CLI and old flow APIs, retaining

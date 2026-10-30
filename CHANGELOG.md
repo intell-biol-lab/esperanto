@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.21`, subtract the union of both mates' intron intervals
+  when computing transcript-aware pair span. Shared/overlapping skips no
+  longer understate TLEN and insert summaries or incorrectly pass the
+  proper-pair span limit. Keep existing orientation/sign/coverage/scoring
+  semantics. See `docs/paired-span-union.md`; this is not a mapper advantage
+  or scientific adoption claim.
+
 - In `1.1.1-dev.20`, restore dev18 default arbitration in RNA config, CLI
   and prior flow APIs after complete human development replay rejected dev19.
   Retain the latter through `--experimental-exact-path-competition`; the

@@ -206,6 +206,79 @@ fn exact_paths_native_paired_bam_keeps_ambiguity_and_raw_frame() {
 }
 
 #[test]
+fn intron_union_native_paired_splice_has_nonzero_signed_template_span() {
+    let genome = crate::fragment::tests::body(4000);
+    let fasta = [b">chrUnion\n".to_vec(), genome.clone(), b"\n".to_vec()].concat();
+    let index = Index::build(
+        crate::fasta::parse_fasta_bytes(&fasta).unwrap(),
+        crate::seed::SeedParams { k: 15, w: 5 },
+    );
+    // Transcript[200,300)+[2300,2400), two overlapping150bp mates.
+    let r1 = [genome[200..300].to_vec(), genome[2300..2350].to_vec()].concat();
+    let r2 = [genome[250..300].to_vec(), genome[2300..2400].to_vec()].concat();
+    let lib = Arc::new(JunctionLib::build([Junction {
+        contig: 0,
+        start: 300,
+        end: 2300,
+        minus_strand: false,
+    }]));
+    for reverse_order in [false, true] {
+        let pair = if reverse_order {
+            [crate::align::revcomp(&r2), r1.clone()]
+        } else {
+            [r1.clone(), crate::align::revcomp(&r2)]
+        };
+        for two_pass in [false, true] {
+            let result = run_with_paths(
+                &format!("intron-union-{reverse_order}-{two_pass}"),
+                &index,
+                &[pair.clone()],
+                false,
+                Some(lib.clone()),
+                two_pass,
+                true,
+                true,
+                false,
+                None,
+            );
+            assert_eq!(result.records.len(), 2);
+            for (mate, record) in result.records.iter().enumerate() {
+                assert!(!record.flags().is_unmapped());
+                assert!(record.flags().is_properly_segmented());
+                assert_eq!(
+                    record.template_length(),
+                    if (mate == 0) == reverse_order {
+                        -200
+                    } else {
+                        200
+                    },
+                    "shared intron must not produce zero template length"
+                );
+                let is_left = (mate == 0) != reverse_order;
+                assert_eq!(
+                    record.alignment_start().unwrap().unwrap().get(),
+                    if is_left { 201 } else { 251 }
+                );
+                assert_eq!(
+                    record.mate_alignment_start().unwrap().unwrap().get(),
+                    if is_left { 251 } else { 201 }
+                );
+                let expected = if is_left { r1.clone() } else { r2.clone() };
+                assert_eq!(record.sequence().iter().collect::<Vec<_>>(), expected);
+                let mut qualities: Vec<_> = (0..150).map(|q| ((q + mate) % 41) as u8).collect();
+                if !is_left {
+                    qualities.reverse();
+                }
+                assert_eq!(
+                    record.quality_scores().iter().collect::<Vec<_>>(),
+                    qualities
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn context_background_paired_refusal_preserves_unmapped_raw_evidence() {
     let (index, fragment) = crate::align::background_tests::fixture(false);
     let pair = crate::fragment::tests::pair(&fragment, [150, 150], 0);
