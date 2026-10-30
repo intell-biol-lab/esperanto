@@ -237,12 +237,113 @@ fn streaming_parser_matches_legacy_bytes_and_errors() {
     cases.push(b"chr1\tx\texon\t1\tbad\t.\t+\t.\tx".to_vec());
     for bytes in cases {
         fs::write(&path, bytes).unwrap();
-        let old = legacy_from_gtf(&path, |_| 0);
-        let new = gtf::from_gtf(&path, |_| 0);
+        let contig = |name: &str| if name == "chr1" { 0 } else { 1 };
+        let old = legacy_from_gtf(&path, contig);
+        let new = gtf::from_gtf(&path, contig);
         match (old, new) {
             (Ok(a), Ok(b)) => equal(&a, &b),
             (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
             (a, b) => panic!("legacy/streaming mismatch: {a:?} {b:?}"),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn piped_annotation_is_consumed_once_and_errors_are_preserved() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for (bytes, expected) in [
+        (b"chr1\tx\texon\t1\t10\t.\t+\t.\ttranscript_id \"a\";\nchr1\tx\texon\t21\t30\t.\t+\t.\ttranscript_id \"a\";\n".as_slice(), "valid"),
+        (b"# line 1\nchr1\tx\texon\tbad\t10\t.\t+\t.\ttranscript_id \"a\";\n".as_slice(), "error"),
+    ] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "piped_annotation_child", "--nocapture"])
+            .env("ESP_TEST_PIPE", expected)
+            .stdin(Stdio::piped())
+            .spawn().unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn piped_annotation_child() {
+    let Ok(expected) = std::env::var("ESP_TEST_PIPE") else {
+        return;
+    };
+    let f = Fixture::new();
+    let reference = fasta::parse_fasta_bytes(b">chr1\nACGT\n").unwrap();
+    let result = gtf::from_gtf_cached(
+        Path::new("/dev/stdin"),
+        &reference,
+        Some(&f.0.join("cache")),
+    );
+    if expected == "valid" {
+        let (lib, status) = result.unwrap();
+        assert_eq!(status, CacheStatus::Disabled);
+        assert_eq!(lib.junctions.len(), 1);
+        assert_eq!(lib.junctions[0].start, 10);
+        assert_eq!(lib.junctions[0].end, 20);
+    } else {
+        assert!(result.unwrap_err().to_string().contains("line 2"));
+    }
+}
+
+#[test]
+fn cache_verification_fields_are_independently_required() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let path = f.0.join("a.gtf");
+    let cache = f.0.join("cache");
+    fs::write(&path, GTF).unwrap();
+    let reference = fasta::parse_fasta_bytes(b">chr1\nACGT\n>chr2\nTGCA\n").unwrap();
+    let (baseline, _) = gtf::from_gtf_cached(&path, &reference, Some(&cache)).unwrap();
+    // The invalid-UTF8 transcript begins on chr1/+ but ends on chr2/-.
+    assert!(baseline
+        .junctions
+        .iter()
+        .any(|j| j.contig == 0 && j.start == 2 && j.end == 4 && !j.minus_strand));
+    let file = fs::read_dir(&cache)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let valid: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    for field in ["format", "key", "invalid_record"] {
+        let mut entry = valid.clone();
+        if field == "invalid_record" {
+            entry["records"][0][2] = entry["records"][0][1].clone();
+            let payload = serde_json::to_vec(&entry["records"]).unwrap();
+            entry["payload_sha256"] = format!("{:x}", Sha256::digest(&payload)).into();
+        } else {
+            entry[field] = "wrong".into();
+        }
+        fs::write(&file, serde_json::to_vec(&entry).unwrap()).unwrap();
+        let (lib, status) = gtf::from_gtf_cached(&path, &reference, Some(&cache)).unwrap();
+        assert_eq!(status, CacheStatus::Rebuilt);
+        equal(&lib, &baseline);
+    }
+    for change in ["order", "name", "length"] {
+        let mut other = fasta::parse_fasta_bytes(b">chr1\nACGT\n>chr2\nTGCA\n").unwrap();
+        match change {
+            "order" => other.contigs.swap(0, 1),
+            "name" => other.contigs[0].name = "renamed".into(),
+            _ => other.contigs[0].len += 1,
+        }
+        assert_eq!(other.fasta_sha256, reference.fasta_sha256);
+        assert_eq!(
+            gtf::from_gtf_cached(&path, &other, Some(&cache)).unwrap().1,
+            CacheStatus::Rebuilt
+        );
+    }
+    // An ignored comment byte is still part of source identity.
+    let mut bytes = GTF.to_vec();
+    bytes[2] ^= 1;
+    fs::write(&path, bytes).unwrap();
+    let (lib, status) = gtf::from_gtf_cached(&path, &reference, Some(&cache)).unwrap();
+    assert_eq!(status, CacheStatus::Rebuilt);
+    equal(&lib, &baseline);
 }

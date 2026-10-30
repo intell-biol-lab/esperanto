@@ -50,6 +50,17 @@ pub fn from_gtf_cached(
     let Some(dir) = cache_dir else {
         return super::from_gtf(path, contig_id).map(|lib| (lib, CacheStatus::Disabled));
     };
+    // Pipes, /dev/stdin and process-substitution streams cannot be replayed.
+    // Inspect without consuming bytes, before the preliminary digest read.
+    if !fs::metadata(path)
+        .map_err(|source| AlignError::FastaIo {
+            path: path.display().to_string(),
+            source,
+        })?
+        .is_file()
+    {
+        return super::from_gtf(path, contig_id).map(|lib| (lib, CacheStatus::Disabled));
+    }
     let source_sha = hash_file(path)?;
     let mut key_hash = Sha256::new();
     key_hash.update(FORMAT);

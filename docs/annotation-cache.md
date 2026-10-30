@@ -11,7 +11,10 @@ By default map uses `$XDG_CACHE_HOME/esperanto/annotation-v1`, or
 is available caching is disabled. Cache errors fall back to parsing; the stderr
 outcome/timing does not enter scientific QC or alter mapping parameters.
 
-Each invocation hashes the entire GTF. Keys include that digest, the reference
+Non-regular inputs (pipes, /dev/stdin, process substitution) bypass caching and
+are parsed once, preserving stream contents and parse errors.
+
+Each regular-file invocation hashes the entire GTF. Keys include that digest, the reference
 FASTA SHA256, ordered contig names/lengths, and parser/schema version. Each hit
 also verifies the stored key/schema, canonical payload SHA256, sorted unique
 junctions, positive counts and valid intervals, then reconstructs the acceptor
