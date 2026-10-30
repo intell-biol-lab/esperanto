@@ -75,9 +75,47 @@ impl Contig {
     ///
     /// Panics if the range is out of bounds; callers use validated ranges.
     pub fn decode_into(&self, start: u32, end: u32, out: &mut Vec<u8>) {
-        for pos in start..end {
-            out.push(self.base(pos).to_ascii());
+        let mut pos = start;
+        while pos < end {
+            let (is_n, stop) = self.ambiguity_span(pos, end);
+            if is_n {
+                let new_len = out
+                    .len()
+                    .checked_add((stop - pos) as usize)
+                    .expect("capacity overflow");
+                out.resize(new_len, b'N');
+            } else {
+                for p in pos..stop {
+                    let byte = self.packed[(p >> 2) as usize];
+                    let shift = 6 - 2 * (p & 3);
+                    out.push(b"ACGT"[((byte >> shift) & 3) as usize]);
+                }
+            }
+            pos = stop;
         }
+    }
+
+    // Return the N decision and the exclusive upper bound over which every
+    // comparison on this exact is_n decision-tree path stays unchanged.
+    // This also preserves old behavior for publicly constructible malformed
+    // interval tables: do not assume sorting/merging beyond what is_n did.
+    fn ambiguity_span(&self, pos: u32, end: u32) -> (bool, u32) {
+        let (mut lo, mut hi, mut stop) = (0, self.n_intervals.len(), end);
+        while lo < hi {
+            #[cfg(test)]
+            decode_tests::N_PROBES.with(|n| n.set(n.get() + 1));
+            let mid = (lo + hi) / 2;
+            let interval = &self.n_intervals[mid];
+            if pos < interval.start {
+                stop = stop.min(interval.start);
+                hi = mid;
+            } else if pos >= interval.end {
+                lo = mid + 1;
+            } else {
+                return (true, stop.min(interval.end));
+            }
+        }
+        (false, stop)
     }
 
     /// Append `[start, end)` ASCII bases to `out` (same as [`decode_into`]).
@@ -120,6 +158,8 @@ impl Contig {
         let mut lo = 0usize;
         let mut hi = self.n_intervals.len();
         while lo < hi {
+            #[cfg(test)]
+            decode_tests::N_PROBES.with(|n| n.set(n.get() + 1));
             let mid = (lo + hi) / 2;
             let iv = &self.n_intervals[mid];
             if pos < iv.start {
@@ -131,6 +171,160 @@ impl Contig {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::{Contig, Interval};
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static N_PROBES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn contig(len: u32, n_intervals: Vec<Interval>) -> Contig {
+        Contig {
+            name: "decode-fixture".into(),
+            len,
+            packed: (0..len.div_ceil(4))
+                .map(|i| (i.wrapping_mul(73).wrapping_add(27)) as u8)
+                .collect(),
+            n_intervals,
+        }
+    }
+
+    // Independent scalar oracle; retains the original decision tree even for
+    // arbitrary publicly constructible interval tables, not just valid FASTA.
+    fn scalar(c: &Contig, start: u32, end: u32, out: &mut Vec<u8>) {
+        for pos in start..end {
+            let (mut lo, mut hi, mut is_n) = (0, c.n_intervals.len(), false);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let interval = &c.n_intervals[mid];
+                if pos < interval.start {
+                    hi = mid;
+                } else if pos >= interval.end {
+                    lo = mid + 1;
+                } else {
+                    is_n = true;
+                    break;
+                }
+            }
+            out.push(if is_n {
+                b'N'
+            } else {
+                b"ACGT"[((c.packed[(pos >> 2) as usize] >> (6 - 2 * (pos & 3))) & 3) as usize]
+            });
+        }
+    }
+
+    #[test]
+    fn decode_ranges_preserve_prefix_and_scalar_ambiguity_semantics() {
+        let tables = [
+            vec![],
+            vec![Interval { start: 0, end: 37 }],
+            vec![
+                Interval { start: 1, end: 3 },
+                Interval { start: 3, end: 6 },
+                Interval { start: 9, end: 11 },
+                Interval { start: 35, end: 37 },
+            ],
+            // Public fields and old loader permit these: avoid silently
+            // assuming merged or sorted interval tables in the optimization.
+            vec![
+                Interval { start: 17, end: 28 },
+                Interval { start: 2, end: 5 },
+                Interval { start: 8, end: 32 },
+                Interval { start: 19, end: 12 },
+            ],
+        ];
+        for intervals in tables {
+            let c = contig(37, intervals);
+            for start in 0..=37 {
+                for end in start..=37 {
+                    let mut expected = b"existing-prefix".to_vec();
+                    scalar(&c, start, end, &mut expected);
+                    let mut actual = b"existing-prefix".to_vec();
+                    c.decode_into(start, end, &mut actual);
+                    assert_eq!(actual, expected, "{start}..{end}");
+                    let mut appended = b"existing-prefix".to_vec();
+                    c.decode_append(start, end, &mut appended);
+                    assert_eq!(appended, expected);
+                }
+            }
+            let mut unchanged = b"prefix".to_vec();
+            c.decode_into(20, 10, &mut unchanged);
+            c.decode_into(u32::MAX, u32::MAX, &mut unchanged);
+            assert_eq!(unchanged, b"prefix");
+        }
+    }
+
+    #[test]
+    fn decode_matches_scalar_for_arbitrary_interval_decision_trees() {
+        let mut state = 0x68a93e7103d95b21u64;
+        for _case in 0..256 {
+            let mut intervals = Vec::new();
+            for _ in 0..16 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let start = ((state >> 32) % 96) as u32;
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let end = ((state >> 32) % 96) as u32;
+                intervals.push(Interval { start, end });
+            }
+            let c = contig(96, intervals);
+            for start in 0..96 {
+                let end = (start + 31).min(96);
+                let mut expected = Vec::new();
+                scalar(&c, start, end, &mut expected);
+                assert_eq!(c.slice_ascii(start, end), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_reuses_ambiguity_decisions_across_a_long_plain_span() {
+        let c = contig(
+            8192,
+            vec![
+                Interval { start: 0, end: 8 },
+                Interval {
+                    start: 8000,
+                    end: 8010,
+                },
+            ],
+        );
+        let mut expected = Vec::new();
+        scalar(&c, 64, 4160, &mut expected);
+        N_PROBES.with(|n| n.set(0));
+        let actual = c.slice_ascii(64, 4160);
+        let probes = N_PROBES.with(Cell::get);
+        assert_eq!(actual, expected);
+        assert!(
+            probes <= 4,
+            "Repeated N-table probes for one plain span: {probes}"
+        );
+    }
+
+    #[test]
+    fn decode_preserves_ordinary_bounds_panics_and_ambiguity_first_access() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        for intervals in [
+            vec![],
+            vec![Interval { start: 2, end: 12 }],
+            vec![Interval { start: 2, end: 7 }],
+        ] {
+            let mut c = contig(4, intervals);
+            c.packed.truncate(1);
+            for end in [4, 7, 12, 15] {
+                let mut expected = b"prefix".to_vec();
+                let mut actual = expected.clone();
+                let old = catch_unwind(AssertUnwindSafe(|| scalar(&c, 0, end, &mut expected)));
+                let new = catch_unwind(AssertUnwindSafe(|| c.decode_into(0, end, &mut actual)));
+                assert_eq!(new.is_err(), old.is_err());
+                assert_eq!(actual, expected);
+            }
+        }
     }
 }
 

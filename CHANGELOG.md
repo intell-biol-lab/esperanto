@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1-dev.38 (unreleased)
+
+- Decode reference fragments by contiguous ambiguity-decision spans, avoiding
+  an N-interval binary search at every base. Preserve the original decision
+  tree even for arbitrary interval tables, and keep append/base access APIs.
+
 ## 1.1.1-dev.37 (unreleased)
 
 - Roll forward L1 read k-mer codes across overlapping windows. Preserve every
