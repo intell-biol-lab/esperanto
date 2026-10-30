@@ -41,6 +41,8 @@ pub enum Origin {
     Genomic,
     /// The transcriptome-first engine's projection (candidate generator).
     L1,
+    /// Bounded ordinary ungapped context verification, without a source chain.
+    RepeatContext,
     /// A decoy contig in the reference contract.
     Decoy,
 }
@@ -53,7 +55,8 @@ impl Origin {
         match self {
             Origin::Genomic => 0,
             Origin::L1 => 1,
-            Origin::Decoy => 2,
+            Origin::RepeatContext => 2,
+            Origin::Decoy => 3,
         }
     }
 
@@ -62,6 +65,7 @@ impl Origin {
         match self {
             Origin::L1 => "l1",
             Origin::Genomic => "genomic",
+            Origin::RepeatContext => "repeat_context",
             Origin::Decoy => "decoy",
         }
     }
@@ -114,8 +118,20 @@ pub struct ReadAlignment {
     pub mapq_override: Option<u8>,
     /// Layer that produced the winning placement.
     pub origin: Origin,
-    /// Number of distinct-locus candidates the arbiter saw.
+    /// Number of primary-eligible locus representatives. Coverage-ineligible
+    /// different-locus evidence can still contribute to `second_score`.
     pub n_cands: usize,
+    /// Eligible seed lists were omitted from the requested genomic round.
+    /// A retained-path margin cannot establish uniqueness after this pruning.
+    pub seed_search_limited: bool,
+    /// Distinct complete exact mappings at one locus remain unresolved.
+    pub exact_path_ambiguous: bool,
+    /// Observable paired short-body qualification; not conversion rescue.
+    pub short_body_qualified: bool,
+    /// Terminal extension in a substitution domain witnessed by the original pair.
+    pub pair_substitution_qualified: bool,
+    /// Unknown boundary columns, in raw alignment query orientation (start,length).
+    pub boundary_core_uncertainty: Option<(u32, u32)>,
 }
 
 impl ReadAlignment {
@@ -272,7 +288,13 @@ const MATCH_SCORE: f32 = 2.0;
 /// survived to extension. `unique` means neither domain found a competitor;
 /// `policy` identifies an explicit [`ReadAlignment::mapq_override`].
 pub fn margin(aln: &ReadAlignment) -> (i32, i32, &'static str) {
-    if aln.mapq_override.is_some() {
+    if aln.seed_search_limited {
+        (aln.score, 0, "seed_budget")
+    } else if aln.exact_path_ambiguous {
+        // This is a sequence-equivalence policy margin, not the two raw
+        // annotation-prior scores. The separate candidate table keeps those.
+        (aln.score, aln.score, "exact_path_tie")
+    } else if aln.mapq_override.is_some() {
         (aln.score, 0, "policy")
     } else if aln.second_score > 0 {
         (aln.score, aln.second_score, "ext_margin")
@@ -290,6 +312,9 @@ pub fn margin(aln: &ReadAlignment) -> (i32, i32, &'static str) {
 /// uniqueness is weaker than the four-letter reference can attest — so it may
 /// enter the pileup but must not outrank a directly seeded placement.
 pub fn mapq_of(aln: &ReadAlignment) -> u8 {
+    if aln.seed_search_limited || aln.exact_path_ambiguous {
+        return 0;
+    }
     let q = match aln.mapq_override {
         Some(q) => q,
         None => scored_mapq(aln),
@@ -338,7 +363,11 @@ fn scored_mapq(aln: &ReadAlignment) -> u8 {
     let v = base * margin_term;
     let q = if v.is_finite() { v as i32 } else { 0 };
     // minimap2's floor: a strictly better best than second is worth at least 1.
-    let mut q = if q <= 0 && second < best { 1 } else { q.clamp(0, 60) };
+    let mut q = if q <= 0 && second < best {
+        1
+    } else {
+        q.clamp(0, 60)
+    };
     // A sufficiently separated runner-up permits the pileup floor when
     // identity, anchor support and length also clear that floor.
     if second > 0

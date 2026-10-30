@@ -9,8 +9,13 @@
 //! scoring machinery on top.
 
 use crate::error::AlignError;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+mod cache;
+pub use cache::{from_gtf_cached, CacheStatus};
 use std::path::Path;
 
 /// A 0-based half-open intron `[start, end)` on `contig`.
@@ -159,9 +164,7 @@ impl JunctionLib {
     /// read's orientation.
     pub fn contains_any_strand(&self, contig: u32, start: u32, end: u32) -> bool {
         self.junctions
-            .binary_search_by_key(&(contig, start, end), |x| {
-                (x.contig, x.start, x.end)
-            })
+            .binary_search_by_key(&(contig, start, end), |x| (x.contig, x.start, x.end))
             .is_ok()
     }
 
@@ -204,7 +207,6 @@ impl JunctionLib {
     }
 }
 
-
 /// Extract `key "value"` from a GTF attributes column.
 pub fn extract_attr(attrs: &str, key: &str) -> Option<String> {
     for part in attrs.split(';') {
@@ -230,22 +232,42 @@ pub fn from_gtf<F: Fn(&str) -> u32>(
     path: &Path,
     contig_id_fn: F,
 ) -> Result<JunctionLib, AlignError> {
-    let bytes = fs::read(path).map_err(|source| AlignError::FastaIo {
+    parse_gtf(path, contig_id_fn).map(|(lib, _)| lib)
+}
+
+// Hash exactly the bytes consumed by the parser, including ignored columns/lines.
+fn parse_gtf<F: Fn(&str) -> u32>(
+    path: &Path,
+    contig_id_fn: F,
+) -> Result<(JunctionLib, [u8; 32]), AlignError> {
+    let io_error = |source| AlignError::FastaIo {
         path: path.display().to_string(),
         source,
-    })?;
-    let text = String::from_utf8_lossy(&bytes);
+    };
+    let mut reader = BufReader::with_capacity(1 << 20, File::open(path).map_err(io_error)?);
+    let mut raw = Vec::new();
+    let mut hasher = Sha256::new();
     let mut junctions: Vec<Junction> = Vec::new();
     // transcript_id -> exons (contig, minus_strand, 0-based half-open list)
     let mut tx: HashMap<String, TranscriptExons> = HashMap::new();
 
-    for (idx, line) in text.lines().enumerate() {
-        let lineno = idx + 1;
+    let mut lineno = 0;
+    loop {
+        raw.clear();
+        if reader.read_until(b'\n', &mut raw).map_err(io_error)? == 0 {
+            break;
+        }
+        hasher.update(&raw);
+        lineno += 1;
+        let text = String::from_utf8_lossy(&raw);
+        let line = text.lines().next().unwrap_or("");
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
+        let mut fields = line.split('\t');
+        let cols: [&str; 9] = std::array::from_fn(|_| fields.next().unwrap_or(""));
+        // Empty ninth field is legal; count separators to distinguish short lines.
+        if line.bytes().filter(|&b| b == b'\t').take(8).count() < 8 {
             continue;
         }
         if cols[2] != "exon" {
@@ -271,8 +293,8 @@ pub fn from_gtf<F: Fn(&str) -> u32>(
             }
         };
         let minus_strand = cols[6] == "-";
-        let transcript = extract_attr(cols[8], "transcript_id")
-            .unwrap_or_else(|| format!("__line_{}", lineno));
+        let transcript =
+            extract_attr(cols[8], "transcript_id").unwrap_or_else(|| format!("__line_{}", lineno));
         let entry = tx.entry(transcript).or_insert_with(|| TranscriptExons {
             contig,
             minus_strand,
@@ -301,7 +323,7 @@ pub fn from_gtf<F: Fn(&str) -> u32>(
         }
     }
 
-    Ok(JunctionLib::build(junctions))
+    Ok((JunctionLib::build(junctions), hasher.finalize().into()))
 }
 
 struct TranscriptExons {
