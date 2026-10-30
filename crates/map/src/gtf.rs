@@ -159,9 +159,7 @@ impl JunctionLib {
     /// read's orientation.
     pub fn contains_any_strand(&self, contig: u32, start: u32, end: u32) -> bool {
         self.junctions
-            .binary_search_by_key(&(contig, start, end), |x| {
-                (x.contig, x.start, x.end)
-            })
+            .binary_search_by_key(&(contig, start, end), |x| (x.contig, x.start, x.end))
             .is_ok()
     }
 
@@ -203,7 +201,6 @@ impl JunctionLib {
         &self.by_end[lo..hi]
     }
 }
-
 
 /// Extract `key "value"` from a GTF attributes column.
 pub fn extract_attr(attrs: &str, key: &str) -> Option<String> {
@@ -271,8 +268,8 @@ pub fn from_gtf<F: Fn(&str) -> u32>(
             }
         };
         let minus_strand = cols[6] == "-";
-        let transcript = extract_attr(cols[8], "transcript_id")
-            .unwrap_or_else(|| format!("__line_{}", lineno));
+        let transcript =
+            extract_attr(cols[8], "transcript_id").unwrap_or_else(|| format!("__line_{}", lineno));
         let entry = tx.entry(transcript).or_insert_with(|| TranscriptExons {
             contig,
             minus_strand,

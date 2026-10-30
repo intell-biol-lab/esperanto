@@ -23,7 +23,18 @@ use clap::{Parser, Subcommand};
 
 /// ESPERANTO RNA editing analysis.
 #[derive(Parser)]
-#[command(name = "esperanto", version, about, propagate_version = true)]
+#[command(
+    name = "esperanto",
+    version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nrepository: https://github.com/intell-biol-lab/esperanto",
+        "\ncommit: ", env!("ESP_BUILD_GIT_SHA"),
+        "\nworktree: ", env!("ESP_BUILD_WORKTREE"),
+    ),
+    about,
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
