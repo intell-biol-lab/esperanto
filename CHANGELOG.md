@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.30`, read L1 transcript-index entries through owned, demand-paged mappings and
+  borrowed hit views instead of eagerly decoding whole key/payload tables.
+  Preserve both index formats, exact ordered hits, validation and legacy APIs.
+  See `docs/mapped-l1-index.md` for lifetime, compatibility and qualification.
 - In `1.1.1-dev.29`, require an independent exact flank seed for additional
   repeat-context candidates supported by a seed-length terminal constant run.
   Keep background scores, ordinary candidates, 20000/8 budgets and MAPQ0;

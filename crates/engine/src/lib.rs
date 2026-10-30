@@ -345,6 +345,10 @@ pub trait Tidx {
     /// Look up a canonical k-mer; `(tx_id, offset)` pairs in ascending
     /// order, empty on miss.
     fn lookup(&self, canonical_kmer: u64) -> &[(u32, u32)];
+    /// Borrowed entry view; existing providers retain their slice behavior.
+    fn lookup_hits(&self, canonical_kmer: u64) -> esperanto_tidx::LookupHits<'_> {
+        esperanto_tidx::LookupHits::from_slice(self.lookup(canonical_kmer))
+    }
     /// Display name of transcript `tx_id` (empty when out of range).
     fn transcript_name(&self, tx_id: u32) -> &str;
     /// Performance hint only; default no-op, no semantic effect.
@@ -634,12 +638,12 @@ fn collect_extensions(
         let exhausted = batch.len() < batch_size;
         for (pos, code) in batch.iter().copied() {
             let canon = kmer::canonical(code, k);
-            let hits = tidx.lookup(canon);
+            let hits = tidx.lookup_hits(canon);
             stats.queries += 1;
             if hits.len() > cfg.max_hits_per_kmer {
                 continue;
             }
-            for &(tx_id, tx_off) in hits {
+            for (tx_id, tx_off) in hits.iter() {
                 if raw_hits >= cfg.max_raw_hits {
                     break 'seeding;
                 }
