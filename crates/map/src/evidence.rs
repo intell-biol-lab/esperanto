@@ -10,10 +10,13 @@
 //! `seed_budget` takes precedence over every other MAPQ source when eligible
 //! seed lists were omitted. Those records append `;seed_search=limited` after
 //! the frozen fields and always have MAPQ 0; complete records are unchanged.
+//! `exact_path_tie` denotes different complete exact mappings at one locus.
+//! Its policy margin is tied (`chain=sub`, `dq=0`) despite potentially
+//! different annotation priors. Raw common scores remain in diagnostics.
 //! The pair comes from [`crate::mapq::margin`], so the tag cannot disagree
 //! with the MAPQ it explains. `origin` names the layer whose candidate won
 //! the unified strict arbitration and `cand` counts the distinct-locus
-//! candidates that arbitration saw.
+//! candidates that arbitration saw, including retained exact structural paths.
 
 use crate::mapq::{margin, ReadAlignment};
 

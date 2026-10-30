@@ -64,6 +64,33 @@ fn run_with_background(
     repeat_context: bool,
     context_background: bool,
 ) -> Observed {
+    run_with_paths(
+        name,
+        index,
+        pairs,
+        enabled,
+        lib,
+        two_pass,
+        repeat_context,
+        context_background,
+        true,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_paths(
+    name: &str,
+    index: &Index,
+    pairs: &[[Vec<u8>; 2]],
+    enabled: bool,
+    lib: Option<Arc<JunctionLib>>,
+    two_pass: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    l1: Option<Arc<esperanto_engine::L1Index>>,
+) -> Observed {
     let dir = std::env::temp_dir().join(format!("esp-fragment-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = [dir.join("r1.fq"), dir.join("r2.fq")];
@@ -85,6 +112,7 @@ fn run_with_background(
     config.fragment_endpoints = enabled;
     config.repeat_context = repeat_context;
     config.context_background = context_background;
+    config.exact_path_competition = exact_path_competition;
     let mut out = PipelineOut {
         bam: Some(Box::new(Sink(raw.clone()))),
         unmapped_fq: Box::new(std::io::sink()),
@@ -92,7 +120,7 @@ fn run_with_background(
         index,
         config,
         jlib: lib,
-        l1: None,
+        l1,
     };
     let (discoveries, library) = if two_pass {
         let (_, kept, library, _) = run_pe_2pass(&mut out, &paths[0], &paths[1], 2).unwrap();
@@ -116,6 +144,64 @@ fn run_with_background(
         rows,
         discoveries,
         library,
+    }
+}
+
+#[test]
+fn exact_paths_native_paired_bam_keeps_ambiguity_and_raw_frame() {
+    let (index, query, lib, l1) = crate::align::exact_path_tests::native_l1_fixture();
+    let mut mate = Vec::new();
+    index.reference.contigs[0].decode_append(550, 700, &mut mate);
+    for minus in [false, true] {
+        let pair = if minus {
+            [crate::align::revcomp(&query), mate.clone()]
+        } else {
+            [query.clone(), crate::align::revcomp(&mate)]
+        };
+        for two_pass in [false, true] {
+            for enabled in [false, true] {
+                let result = run_with_paths(
+                    &format!("exact-path-{minus}-{two_pass}-{enabled}"),
+                    &index,
+                    &[pair.clone()],
+                    true,
+                    Some(lib.clone()),
+                    two_pass,
+                    true,
+                    true,
+                    enabled,
+                    Some(l1.clone()),
+                );
+                let record = &result.records[0];
+                assert_eq!(
+                    record.mapping_quality().unwrap().get(),
+                    if enabled { 0 } else { 60 }
+                );
+                let evidence = format!("{:?}", record.data().get(b"EK").unwrap().unwrap());
+                assert_eq!(evidence.contains("exact_path_tie"), enabled);
+                let sequence = if minus {
+                    crate::align::revcomp(&pair[0])
+                } else {
+                    pair[0].clone()
+                };
+                assert_eq!(record.sequence().iter().collect::<Vec<_>>(), sequence);
+                let mut qualities: Vec<_> = (0..150).map(|q| (q % 41) as u8).collect();
+                if minus {
+                    qualities.reverse();
+                }
+                assert_eq!(
+                    record.quality_scores().iter().collect::<Vec<_>>(),
+                    qualities
+                );
+                assert_eq!(
+                    result.rows[0]["independent"]["candidates"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    if enabled { 2 } else { 1 }
+                );
+            }
+        }
     }
 }
 

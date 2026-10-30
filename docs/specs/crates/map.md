@@ -1,5 +1,10 @@
 # map — splice-aware read alignment
 
+Dev.19 retains full-query exact structural alternatives at one locus, displays
+a deterministic representative and preserves MAPQ0 ambiguity regardless of
+annotation rewards. See [the exact-path contract](../../exact-path-competition.md).
+`map --no-exact-path-competition` independently restores dev18 policy.
+
 Dev.18 tests additional context proposals against a constant-base background
 in the same strict score domain. `map --no-context-background` independently
 restores the dev17 policy. See [the contract](../../context-background-contract.md).

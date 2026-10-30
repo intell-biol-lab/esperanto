@@ -124,6 +124,8 @@ pub struct ReadAlignment {
     /// Eligible seed lists were omitted from the requested genomic round.
     /// A retained-path margin cannot establish uniqueness after this pruning.
     pub seed_search_limited: bool,
+    /// Distinct complete exact mappings at one locus remain unresolved.
+    pub exact_path_ambiguous: bool,
 }
 
 impl ReadAlignment {
@@ -282,6 +284,10 @@ const MATCH_SCORE: f32 = 2.0;
 pub fn margin(aln: &ReadAlignment) -> (i32, i32, &'static str) {
     if aln.seed_search_limited {
         (aln.score, 0, "seed_budget")
+    } else if aln.exact_path_ambiguous {
+        // This is a sequence-equivalence policy margin, not the two raw
+        // annotation-prior scores. The separate candidate table keeps those.
+        (aln.score, aln.score, "exact_path_tie")
     } else if aln.mapq_override.is_some() {
         (aln.score, 0, "policy")
     } else if aln.second_score > 0 {
@@ -300,7 +306,7 @@ pub fn margin(aln: &ReadAlignment) -> (i32, i32, &'static str) {
 /// uniqueness is weaker than the four-letter reference can attest — so it may
 /// enter the pileup but must not outrank a directly seeded placement.
 pub fn mapq_of(aln: &ReadAlignment) -> u8 {
-    if aln.seed_search_limited {
+    if aln.seed_search_limited || aln.exact_path_ambiguous {
         return 0;
     }
     let q = match aln.mapq_override {

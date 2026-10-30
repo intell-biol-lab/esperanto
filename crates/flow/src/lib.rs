@@ -18,7 +18,8 @@ pub use error::FlowError;
 pub use params::{Entry, RunParams};
 pub use stages::{
     map_stage, map_stage_with_background_options, map_stage_with_context_options,
-    map_stage_with_diagnostics, map_stage_with_options, run_from,
+    map_stage_with_diagnostics, map_stage_with_exact_path_options, map_stage_with_options,
+    run_from,
 };
 
 /// Run the pipeline selected by `params.entry()`.

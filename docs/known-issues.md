@@ -1,5 +1,11 @@
 # Known scientific qualification issues
 
+Dev.19 proposes exact full-query structural-path competition. Sequence-identical
+paths at one locus cannot establish a source isoform; the deterministic primary
+is not truth and MAPQ remains 0. This does not repair partial/indel path omission,
+general lowcoverage qualification, inherited human regressions or calibration.
+See [the contract](exact-path-competition.md). Human replay/adoption are separate.
+
 ## Ordinary high-frequency candidate coverage (dev.17 proposal)
 
 Sparse substitutions in repetitive reads can remove every ancestor-consistent

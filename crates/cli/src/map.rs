@@ -40,11 +40,14 @@ pub struct MapArgs {
     /// Disable constant-base background competition for context proposals (ablation).
     #[arg(long)]
     no_context_background: bool,
+    /// Disable full-query exact structural path competition (ablation).
+    #[arg(long)]
+    no_exact_path_competition: bool,
 }
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_background_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_exact_path_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -56,6 +59,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         !a.no_fragment_endpoints,
         !a.no_repeat_context,
         !a.no_context_background,
+        !a.no_exact_path_competition,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -104,6 +108,21 @@ mod tests {
             "--out",
             "out",
             "--no-context-background",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn exact_path_has_independent_cli_ablation() {
+        assert!(Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--no-exact-path-competition",
         ])
         .is_ok());
     }

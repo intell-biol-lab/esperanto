@@ -4,6 +4,12 @@
 
 ### Organization development
 
+- In `1.1.1-dev.19`, retain distinct complete exact mappings at a shared locus.
+  Use fewer introns as the deterministic primary representation while keeping
+  ambiguity at MAPQ0, including cache/mate confidence overrides. Preserve raw
+  common scores and short-exon candidates; add independent
+  `map --no-exact-path-competition` ablation. Qualification/adoption are separate.
+
 - In `1.1.1-dev.18`, require additional ordinary repeat-context proposals to
   beat the strict local score against constant A/C/G/T backgrounds. Retain old
   candidate families and conservative MAPQ0; declare background score/rejection

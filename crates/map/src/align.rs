@@ -65,6 +65,8 @@ pub struct AlignConfig {
     pub repeat_context: bool,
     /// Require additional context proposals to beat a constant-base background.
     pub context_background: bool,
+    /// Retain sequence-indistinguishable full-query structural alternatives.
+    pub exact_path_competition: bool,
 }
 
 impl Default for AlignConfig {
@@ -78,6 +80,7 @@ impl Default for AlignConfig {
             fragment_endpoints: false,
             repeat_context: false,
             context_background: false,
+            exact_path_competition: false,
         }
     }
 }
@@ -93,6 +96,7 @@ impl AlignConfig {
             fragment_endpoints: true,
             repeat_context: true,
             context_background: true,
+            exact_path_competition: true,
         }
     }
 }
@@ -518,7 +522,11 @@ impl<'a> Aligner<'a> {
 
         // 4. Same-locus dedup within coverage classes, then decision order.
         // Retain full nonpositive candidates for the hyperediting check below.
-        dedup_by_footprint(&mut placements, seq.len());
+        dedup_by_footprint_with_options(
+            &mut placements,
+            seq.len(),
+            self.config.exact_path_competition,
+        );
         sort_placements(&mut placements);
 
         // 5. Hyperedited read: re-arbitrate in its own reduced alphabet (see
@@ -571,7 +579,7 @@ impl<'a> Aligner<'a> {
             }
             self.rescore_with(q, p, candidate_dir);
         }
-        dedup_by_footprint(placements, seq.len());
+        dedup_by_footprint_with_options(placements, seq.len(), self.config.exact_path_competition);
         sort_placements(placements);
     }
 
@@ -637,7 +645,11 @@ impl<'a> Aligner<'a> {
                 .unwrap_or((Vec::new(), 0, false, None)),
         };
         placements.push(win);
-        dedup_by_footprint(&mut placements, seq.len());
+        dedup_by_footprint_with_options(
+            &mut placements,
+            seq.len(),
+            self.config.exact_path_competition,
+        );
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
         if let Some(slot) = diagnostic.as_mut() {
             **slot = Some(crate::diagnostics::CandidatePool::capture(
@@ -667,7 +679,12 @@ impl<'a> Aligner<'a> {
         // mate-consistent alternatives only, which is how a paired aligner
         // resolves a repeat copy by its pair (STAR, BWA-MEM).
         let reach = 2 * (MATE_WINDOW_INSERT + MATE_WINDOW_INSERT / 2 + seq.len() as u32);
-        placements.retain(|p| p.contig == mate_contig && p.pos.abs_diff(mate_pos) <= reach);
+        placements.retain(|p| {
+            (p.contig == mate_contig && p.pos.abs_diff(mate_pos) <= reach)
+                || (self.config.exact_path_competition
+                    && footprint_overlap(p, &win_probe) >= 0.5
+                    && exact_path::distinct(p, &win_probe, seq.len()))
+        });
         if let Some(slot) = diagnostic {
             *slot = Some(crate::diagnostics::CandidatePool::capture(
                 self.index,
@@ -790,6 +807,14 @@ impl<'a> Aligner<'a> {
         // A score leader that lacks read coverage cannot veto a lower-ranked
         // eligible placement. Keep it as ambiguity evidence at other loci.
         let best = placements.iter().find(|p| p.primary_eligible(seq.len()))?;
+        // Annotation priors cannot distinguish two complete exact mappings
+        // of this query. Keep their actual scores, but display a deterministic
+        // representative and preserve the unresolved path evidence.
+        let (best, exact_path_ambiguous) = if self.config.exact_path_competition {
+            exact_path::representative(&placements, best, seq.len())
+        } else {
+            (best, false)
+        };
         // Runner-up must be a different locus (footprint overlap < 0.5).
         let second = placements
             .iter()
@@ -845,6 +870,7 @@ impl<'a> Aligner<'a> {
                 .filter(|p| p.primary_eligible(seq.len()))
                 .count(),
             seed_search_limited: false,
+            exact_path_ambiguous,
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -2508,19 +2534,31 @@ fn hyper_direction(p: &Placement) -> Option<EditDir> {
 /// Keep the best-scored representative of each locus in each coverage class.
 /// A short local explanation cannot erase a full-length fallback or its edit
 /// signature; positive score is checked only after any hyper rescoring.
+#[cfg(test)]
 fn dedup_by_footprint(ps: &mut Vec<Placement>, read_len: usize) {
+    dedup_by_footprint_with_options(ps, read_len, true);
+}
+
+fn dedup_by_footprint_with_options(
+    ps: &mut Vec<Placement>,
+    read_len: usize,
+    exact_path_competition: bool,
+) {
     sort_placements(ps);
     let mut kept: Vec<Placement> = Vec::with_capacity(ps.len());
     for p in ps.drain(..) {
         if kept.iter().all(|k| {
             k.coverage_eligible(read_len) != p.coverage_eligible(read_len)
                 || footprint_overlap(k, &p) < 0.5
+                || (exact_path_competition && exact_path::distinct(k, &p, read_len))
         }) {
             kept.push(p);
         }
     }
     *ps = kept;
 }
+
+mod exact_path;
 
 impl ReadAlignment {
     #[cfg(test)]
@@ -2534,6 +2572,9 @@ pub(crate) mod prefix_tests;
 
 #[cfg(test)]
 pub(crate) mod repeat_context_tests;
+
+#[cfg(test)]
+pub(crate) mod exact_path_tests;
 
 #[cfg(test)]
 mod tests {
