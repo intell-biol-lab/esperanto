@@ -359,6 +359,349 @@ pub fn map_stage(
     ),
     FlowError,
 > {
+    map_stage_with_diagnostics(paidx, gtf_path, l1_bundle, r1, r2, out_dir, threads, false)
+}
+
+/// Map with an optional pass2 candidate sidecar, before collapsed rescue.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_diagnostics(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        true,
+    )
+}
+
+/// Mapping options shared by normal RNA flow and explicit endpoint ablations.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_context_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        true,
+    )
+}
+
+/// Independent repeat-context ablation; preserves the older options API.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_context_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_background_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        true,
+    )
+}
+
+/// Independent context-background ablation, preserving prior public wrappers.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_background_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_exact_path_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        false,
+    )
+}
+
+/// Explicit experimental exact-path policy; prior public APIs keep it disabled.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_exact_path_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_short_body_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        true,
+    )
+}
+
+/// Full mapper options, including independently disableable short-body evidence.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_short_body_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_pair_substitution_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        true,
+    )
+}
+
+/// Full mapper options, including independent paired substitution competition.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_pair_substitution_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_boundary_core_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        pair_substitution,
+        true,
+    )
+}
+
+/// Full mapper options with independent boundary-uncertainty core projection.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_boundary_core_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    boundary_core: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    map_stage_with_weak_mate_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        pair_substitution,
+        boundary_core,
+        false,
+    )
+}
+
+/// Default-off weak-mate proposal experiment. Existing entry points preserve
+/// the frozen mapper policy by passing false.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_weak_mate_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    boundary_core: bool,
+    weak_mate_proposals: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -366,7 +709,15 @@ pub fn map_stage(
     // Primary alignment uses all four bases. Hyperediting rescue uses
     // separate three-letter transforms (Porath, Carmi & Levanon,
     // Nat Commun 5:4726, 2014).
-    let config = AlignConfig::rna_default();
+    let mut config = AlignConfig::rna_default();
+    config.fragment_endpoints = fragment_endpoints;
+    config.repeat_context = repeat_context;
+    config.context_background = context_background;
+    config.exact_path_competition = exact_path_competition;
+    config.mate_short_body = mate_short_body;
+    config.pair_substitution = pair_substitution;
+    config.boundary_core = boundary_core;
+    config.weak_mate_proposals = weak_mate_proposals;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,
@@ -395,6 +746,13 @@ pub fn map_stage(
     let mut out = PipelineOut {
         bam: Some(Box::new(File::create(&raw_bam)?)),
         unmapped_fq: Box::new(File::create(dir.join("unmapped.fq.gz"))?),
+        diagnostics: if candidate_diagnostics {
+            Some(Box::new(std::io::BufWriter::new(File::create(
+                dir.join("candidate_diagnostics.jsonl"),
+            )?)))
+        } else {
+            None
+        },
         index,
         config,
         jlib,
@@ -573,6 +931,9 @@ fn rescue_collapsed(
     // Include primary placements with insufficient aligned coverage or
     // excessive unexplained mismatches. Replace a deferred placement only
     // after a rescue direction passes all evidence checks.
+    let original_seed_limits = collect_seed_limits(raw_bam)?;
+    let fragment_bound = collect_fragment_bounds(raw_bam)?;
+    fq.retain(|(name, _, _)| !fragment_bound.contains(name.as_bytes()));
     let n_unmapped = fq.len();
     fq.extend(collect_deferred(raw_bam)?);
     let dropped = dedup_pool(&mut fq);
@@ -664,6 +1025,11 @@ fn rescue_collapsed(
             ..esperanto_map::align::AlignConfig::rna_default()
         };
         cfg.chain.k = idx.params.k as i32;
+        // This is the separate transformed rescue path, not the ordinary
+        // four-letter mapper proposal. Keep its historical search unchanged.
+        cfg.repeat_context = false;
+        cfg.mate_short_body = false;
+        cfg.pair_substitution = false;
         cfg.extend.edit_dir = esperanto_map::extend::EditDir::Off;
         // Ungapped by construction rather than by refusing the gapped answer
         // afterwards -- see [`RESCUE_GAP_PENALTY`].
@@ -697,6 +1063,7 @@ fn rescue_collapsed(
         });
         for (&i, aln) in cand_idx.iter().zip(results) {
             let Some(mut a) = aln else { continue };
+            inherit_seed_limit(&mut a, &fq[i].0, &original_seed_limits);
             placed_count += 1;
             let (_, seq, qual) = &fq[i];
             let proof = match verify_rescue_placement(&a, seq, qual, true_ref, *dir) {
@@ -997,6 +1364,15 @@ fn rescue_collapsed(
                 &s2,
                 &esperanto_map::bam::phred_from_ascii(&q2),
             );
+            if a.seed_search_limited {
+                rec.push_aux(
+                    b"EK",
+                    rust_htslib::bam::record::Aux::String(&esperanto_map::evidence::evidence_tag(
+                        a,
+                    )),
+                )
+                .map_err(stage_err("map"))?;
+            }
             rec.push_aux(b"RE", rust_htslib::bam::record::Aux::String("collapsed"))
                 .map_err(stage_err("map"))?;
             w.write(&rec).map_err(stage_err("map"))?;
@@ -1010,13 +1386,20 @@ fn rescue_collapsed(
     // exists, and an interrupted pass must leave the pool complete for the
     // re-run that resume schedules.
     {
+        // Re-read the complete durable pool, not only eligible rescue entrants:
+        // XF-bound reads were excluded from fq but remain unresolved reads.
+        use esperanto_map::fastq::RecordSource as _;
+        let mut original =
+            esperanto_map::fastq::FastqReader::open(&unm_path).map_err(stage_err("map"))?;
         let mut out = Vec::new();
-        for (name, seq, qual) in &fq[..n_unmapped] {
-            if !rescued_names.contains(name.as_str()) {
-                out.extend_from_slice(format!("@{name}\n").as_bytes());
-                out.extend_from_slice(seq);
+        while let Some(rec) = original.next_record().map_err(stage_err("map"))? {
+            if !rescued_names.contains(String::from_utf8_lossy(&rec.name).as_ref()) {
+                out.extend_from_slice(b"@");
+                out.extend_from_slice(&rec.name);
+                out.push(b'\n');
+                out.extend_from_slice(&rec.seq);
                 out.extend_from_slice(b"\n+\n");
-                out.extend_from_slice(qual);
+                out.extend_from_slice(&rec.qual);
                 out.push(b'\n');
             }
         }
@@ -1045,6 +1428,9 @@ fn merge_drops_record(
     rec: &rust_htslib::bam::Record,
     rescued_slots: &std::collections::HashSet<(Vec<u8>, usize)>,
 ) -> bool {
+    if has_fragment_endpoint(rec) {
+        return false;
+    }
     let slot = usize::from(rec.is_paired() && !rec.is_first_in_template());
     if rescued_slots.contains(&(rec.qname().to_vec(), slot)) {
         return true;
@@ -1091,10 +1477,86 @@ fn collect_mate_placements(
 /// explaining its read, and is therefore offered to the rescue passes.
 const RESCUE_CLIPPED_COVERAGE: f64 = 0.7;
 
+fn inherit_seed_limit(
+    aln: &mut esperanto_map::mapq::ReadAlignment,
+    pool_name: &str,
+    limited: &std::collections::HashSet<Vec<u8>>,
+) {
+    aln.seed_search_limited |= limited.contains(pool_name.as_bytes());
+}
+
+/// Read identities whose original (or earlier rescue) search was incomplete.
+/// raw.bam contains both unplaced and deferred records, and is durable across
+/// the FASTQ eviction/restart boundary. Mate slots prevent cross-mate leakage.
+fn collect_seed_limits(raw_bam: &Path) -> Result<std::collections::HashSet<Vec<u8>>, FlowError> {
+    let mut rdr = rust_htslib::bam::Reader::from_path(raw_bam).map_err(stage_err("map"))?;
+    let mut limited = std::collections::HashSet::new();
+    for r in rdr.records() {
+        let rec = r.map_err(stage_err("map"))?;
+        if rec.is_secondary() || rec.is_supplementary() {
+            continue;
+        }
+        if let Ok(rust_htslib::bam::record::Aux::String(ek)) = rec.aux(b"EK") {
+            if ek.split(';').any(|f| f == "seed_search=limited") {
+                let mut name = rec.qname().to_vec();
+                if rec.is_paired() {
+                    name.extend_from_slice(if rec.is_first_in_template() {
+                        b"/1"
+                    } else {
+                        b"/2"
+                    });
+                }
+                limited.insert(name);
+            }
+        }
+    }
+    Ok(limited)
+}
+
 /// A read offered to the rescue: name, sequence and quality as sequenced. The
 /// two sources — `unmapped.fq.gz` and [`collect_deferred`] — produce the same
 /// shape so the passes below cannot tell them apart.
 type RescueRead = (String, Vec<u8>, Vec<u8>);
+
+/// A declared, valid effective prefix must not be realigned as a raw read.
+/// BAM integer storage can use any of the six widths even for one writer.
+fn has_fragment_endpoint(rec: &rust_htslib::bam::Record) -> bool {
+    use rust_htslib::bam::record::Aux;
+    let n = match rec.aux(b"XF") {
+        Ok(Aux::I8(n)) => i64::from(n),
+        Ok(Aux::U8(n)) => i64::from(n),
+        Ok(Aux::I16(n)) => i64::from(n),
+        Ok(Aux::U16(n)) => i64::from(n),
+        Ok(Aux::I32(n)) => i64::from(n),
+        Ok(Aux::U32(n)) => i64::from(n),
+        _ => return false,
+    };
+    n >= 31 && n < rec.seq_len() as i64
+}
+
+/// Durable primary identities, with mate slots matching unmapped FASTQ names.
+fn collect_fragment_bounds(
+    raw_bam: &Path,
+) -> Result<std::collections::HashSet<Vec<u8>>, FlowError> {
+    let mut rdr = rust_htslib::bam::Reader::from_path(raw_bam).map_err(stage_err("map"))?;
+    let mut bound = std::collections::HashSet::new();
+    for r in rdr.records() {
+        let rec = r.map_err(stage_err("map"))?;
+        if rec.is_secondary() || rec.is_supplementary() || !has_fragment_endpoint(&rec) {
+            continue;
+        }
+        let mut name = rec.qname().to_vec();
+        if rec.is_paired() {
+            name.extend_from_slice(if rec.is_first_in_template() {
+                b"/1"
+            } else {
+                b"/2"
+            });
+        }
+        bound.insert(name);
+    }
+    Ok(bound)
+}
 
 /// Return primary placements for rescue in their sequenced orientation.
 /// Eligible reads have aligned coverage below RESCUE_CLIPPED_COVERAGE or
@@ -1109,7 +1571,17 @@ fn collect_deferred(raw_bam: &Path) -> Result<Vec<RescueRead>, FlowError> {
     let mut out = Vec::new();
     for r in rdr.records() {
         let rec = r.map_err(stage_err("map"))?;
-        if rec.is_unmapped() || rec.is_secondary() || rec.is_supplementary() {
+        if rec.is_unmapped()
+            || rec.is_secondary()
+            || rec.is_supplementary()
+            || has_fragment_endpoint(&rec)
+            || matches!(
+                rec.aux(b"RE"),
+                Ok(rust_htslib::bam::record::Aux::String(
+                    "mate_short_body" | "pair_substitution"
+                ))
+            )
+        {
             continue;
         }
         // Decoy placements are explained reads: their source is absent from
@@ -1169,9 +1641,10 @@ fn collect_deferred(raw_bam: &Path) -> Result<Vec<RescueRead>, FlowError> {
     Ok(out)
 }
 
-/// Keep the first pool entry per (template name, mate slot). Unmapped reads
-/// precede deferred reads, preserving the prefix used during FASTQ eviction.
-/// This also prevents duplicate records after an interrupted BAM merge.
+/// Keep the first pool entry per (template name, mate slot). Unmapped entrants
+/// precede deferred reads. Eviction re-reads the complete original FASTQ pool,
+/// including endpoint-bound reads excluded here. This also prevents duplicate
+/// records after an interrupted BAM merge.
 fn dedup_pool(fq: &mut Vec<RescueRead>) -> usize {
     let mut seen = std::collections::HashSet::new();
     let before = fq.len();
@@ -1900,6 +2373,66 @@ mod rescue_tests {
     }
 
     #[test]
+    fn inherited_seed_limit_overrides_complete_rescue_confidence_without_mate_leakage() {
+        let mut limited = std::collections::HashSet::new();
+        limited.insert(b"template/1".to_vec());
+        limited.insert(b"literal/1".to_vec());
+        for (name, expected) in [
+            ("template/1", 0),
+            ("template/2", 60),
+            ("other/1", 60),
+            ("literal/1", 0),
+            ("literal/2", 60),
+        ] {
+            let mut aln = alignment_at(20, 150);
+            aln.mapq_override = Some(60);
+            assert!(!aln.seed_search_limited);
+            inherit_seed_limit(&mut aln, name, &limited);
+            assert_eq!(esperanto_map::mapq::mapq_of(&aln), expected);
+        }
+    }
+
+    #[test]
+    fn seed_limit_identity_uses_bam_pair_flags_for_literal_suffixes() {
+        let d = std::env::temp_dir().join(format!("esp-limit-identity-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let path = d.join("raw.bam");
+        write_pool_bam(&path, "chr1", 1000, &[]);
+        let header = rust_htslib::bam::Header::from_template(
+            rust_htslib::bam::Reader::from_path(&path).unwrap().header(),
+        );
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&path, &header, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, flags) in [
+                ("literal/1", 4),
+                ("paired/1", 1 | 4 | 64),
+                ("paired/1", 1 | 4 | 128),
+            ] {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(name.as_bytes(), None, b"ACGT", &[40; 4]);
+                rec.set_flags(flags);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                rec.push_aux(
+                    b"EK",
+                    rust_htslib::bam::record::Aux::String("seed_search=limited"),
+                )
+                .unwrap();
+                writer.write(&rec).unwrap();
+            }
+        }
+        let limited = collect_seed_limits(&path).unwrap();
+        assert_eq!(limited.len(), 3);
+        for name in ["literal/1", "paired/1/1", "paired/1/2"] {
+            assert!(limited.contains(name.as_bytes()));
+        }
+        assert!(!limited.contains(b"literal".as_slice()));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn collect_deferred_recovers_sealed_records() {
         let d = std::env::temp_dir().join(format!("esp-deferred-re-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
@@ -1935,6 +2468,116 @@ mod rescue_tests {
         assert_eq!(seq.as_slice(), b"CCGGGTTT");
         assert_eq!(qual.as_slice(), &[63u8; 8]);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn paired_fragment_bound_record_is_not_deferred_for_raw_clipping() {
+        use rust_htslib::bam::record::{Aux, Cigar, CigarString};
+        let d = std::env::temp_dir().join(format!("esp-fragment-deferred-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let bam = d.join("raw.bam");
+        let mut hdr = rust_htslib::bam::Header::new();
+        let mut sq = rust_htslib::bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chrT").push_tag(b"LN", 2000);
+        hdr.push_record(&sq);
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, supported) in [
+                (b"fragment".as_slice(), true),
+                (b"raw".as_slice(), false),
+                (b"shortbody".as_slice(), false),
+                (b"pairsubst".as_slice(), false),
+            ] {
+                let mut r = rust_htslib::bam::Record::new();
+                r.set(
+                    name,
+                    Some(&CigarString(vec![Cigar::Match(80), Cigar::SoftClip(70)])),
+                    &vec![b'A'; 150],
+                    &vec![40; 150],
+                );
+                r.set_tid(0);
+                r.set_pos(100);
+                r.set_flags(0);
+                if supported {
+                    r.push_aux(b"XF", Aux::I32(80)).unwrap();
+                }
+                if name == b"shortbody" {
+                    r.push_aux(b"RE", Aux::String("mate_short_body")).unwrap();
+                }
+                if name == b"pairsubst" {
+                    r.push_aux(b"RE", Aux::String("pair_substitution")).unwrap();
+                }
+                writer.write(&r).unwrap();
+            }
+        }
+        let pool = collect_deferred(&bam).unwrap();
+        assert_eq!(
+            pool.len(),
+            1,
+            "supported fragments must not re-enter raw rescue"
+        );
+        assert_eq!(pool[0].0, "raw");
+    }
+
+    #[test]
+    fn paired_fragment_boundary_registry_is_mate_specific_and_validates_tags() {
+        use rust_htslib::bam::record::Aux;
+        let d = std::env::temp_dir().join(format!("esp-fragment-registry-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let bam = d.join("raw.bam");
+        let hdr = rust_htslib::bam::Header::new();
+        {
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            for (name, flags, tag) in [
+                ("pair", 69, Some(Aux::U8(80))),
+                ("pair", 133, None),
+                ("standalone", 4, Some(Aux::I16(80))),
+                ("wide", 4, Some(Aux::U32(80))),
+                ("negative", 4, Some(Aux::I8(-1))),
+                ("too_short", 4, Some(Aux::U8(30))),
+                ("whole_read", 4, Some(Aux::I32(150))),
+                ("malformed", 4, Some(Aux::String("80"))),
+                ("secondary", 4 | 256, Some(Aux::I32(80))),
+                ("supplementary", 4 | 2048, Some(Aux::I32(80))),
+            ] {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(name.as_bytes(), None, &vec![b'A'; 150], &vec![40; 150]);
+                rec.set_flags(flags);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                if let Some(tag) = tag {
+                    rec.push_aux(b"XF", tag).unwrap();
+                }
+                writer.write(&rec).unwrap();
+            }
+        }
+        let bound = collect_fragment_bounds(&bam).unwrap();
+        assert_eq!(bound.len(), 3);
+        for name in ["pair/1", "standalone", "wide"] {
+            assert!(bound.contains(name.as_bytes()), "{name}");
+        }
+        assert!(!bound.contains(b"pair/2".as_slice()));
+    }
+
+    #[test]
+    fn paired_fragment_bound_record_cannot_be_dropped_as_stale_rescue() {
+        use rust_htslib::bam::record::Aux;
+        let mut rec = rust_htslib::bam::Record::new();
+        rec.set(b"bound", None, &vec![b'A'; 150], &vec![40; 150]);
+        rec.set_flags(4);
+        rec.push_aux(b"XF", Aux::I32(80)).unwrap();
+        rec.push_aux(b"RE", Aux::String("collapsed")).unwrap();
+        let mut slots = std::collections::HashSet::new();
+        assert!(!merge_drops_record(&rec, &slots));
+        slots.insert((b"bound".to_vec(), 0));
+        assert!(
+            !merge_drops_record(&rec, &slots),
+            "excluded identities cannot be replaced"
+        );
     }
 
     #[test]
@@ -1992,6 +2635,25 @@ mod rescue_tests {
     /// same read from both pool halves. Every counter must stay singular.
     #[test]
     fn rescue_rerun_after_merge_without_eviction_does_not_double() {
+        rescue_roundtrip(false, false, false);
+    }
+
+    #[test]
+    fn limited_original_search_survives_complete_collapsed_rescue_and_rerun() {
+        rescue_roundtrip(true, false, false);
+    }
+
+    #[test]
+    fn paired_fragment_unmapped_boundary_survives_raw_rescue_and_restart() {
+        rescue_roundtrip(true, true, false);
+    }
+
+    #[test]
+    fn paired_fragment_mixed_rescue_preserves_excluded_unmapped_records() {
+        rescue_roundtrip(true, false, true);
+    }
+
+    fn rescue_roundtrip(limited: bool, bounded: bool, mixed: bool) {
         // Same period-7 fixture as the verify tests.
         let bg = b"CGTATGCCTAGG";
         let mut seq = Vec::with_capacity(400);
@@ -2005,7 +2667,10 @@ mod rescue_tests {
         let read = hyper_read(true_ref, 20, 20, 110);
         let qual = vec![b'I'; 150];
 
-        let d = std::env::temp_dir().join(format!("esp-rescue-e2e-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "esp-rescue-e2e-{}-{limited}-{bounded}-{mixed}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&d);
         let map_dir = d.join("map");
         fs::create_dir_all(&map_dir).unwrap();
@@ -2028,9 +2693,44 @@ mod rescue_tests {
         // starts empty (header only).
         let raw_bam = map_dir.join("raw.bam");
         write_pool_bam(&raw_bam, "c1", 400, &[]);
+        if limited {
+            let hdr = rust_htslib::bam::Header::from_template(
+                rust_htslib::bam::Reader::from_path(&raw_bam)
+                    .unwrap()
+                    .header(),
+            );
+            let mut writer =
+                rust_htslib::bam::Writer::from_path(&raw_bam, &hdr, rust_htslib::bam::Format::Bam)
+                    .unwrap();
+            let mut rec = rust_htslib::bam::Record::new();
+            rec.set(b"hyper1", None, &read, &vec![40; read.len()]);
+            rec.set_flags(4);
+            rec.set_tid(-1);
+            rec.set_pos(-1);
+            rec.push_aux(
+                b"EK",
+                rust_htslib::bam::record::Aux::String("mapq_src=seed_budget;seed_search=limited"),
+            )
+            .unwrap();
+            if bounded {
+                rec.push_aux(b"XF", rust_htslib::bam::record::Aux::I32(80))
+                    .unwrap();
+            }
+            writer.write(&rec).unwrap();
+            if mixed {
+                let mut rec = rust_htslib::bam::Record::new();
+                rec.set(b"hyperbound", None, &read, &vec![40; read.len()]);
+                rec.set_flags(4);
+                rec.set_tid(-1);
+                rec.set_pos(-1);
+                rec.push_aux(b"XF", rust_htslib::bam::record::Aux::I32(80))
+                    .unwrap();
+                writer.write(&rec).unwrap();
+            }
+        }
         let unm = map_dir.join("unmapped.fq.gz");
         let write_unmapped = |with_read: bool| {
-            let text = if with_read {
+            let mut text = if with_read {
                 format!(
                     "@hyper1\n{}\n+\n{}\n",
                     String::from_utf8(read.clone()).unwrap(),
@@ -2039,6 +2739,13 @@ mod rescue_tests {
             } else {
                 String::new()
             };
+            if mixed {
+                text.push_str(&format!(
+                    "@hyperbound\n{}\n+\n{}\n",
+                    String::from_utf8(read.clone()).unwrap(),
+                    String::from_utf8(qual.clone()).unwrap(),
+                ));
+            }
             let f = fs::File::create(&unm).unwrap();
             let mut e = flate2::write::GzEncoder::new(f, flate2::Compression::new(1));
             use std::io::Write as _;
@@ -2077,7 +2784,68 @@ mod rescue_tests {
 
         // First pass: the read is rescued and the seal is written.
         let n1 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
+        let check_bound_unmapped = || {
+            if mixed {
+                use esperanto_map::fastq::RecordSource as _;
+                let mut fq = esperanto_map::fastq::FastqReader::open(&unm).unwrap();
+                let record = fq
+                    .next_record()
+                    .unwrap()
+                    .expect("excluded unmapped read must survive");
+                assert_eq!(record.name, b"hyperbound");
+                assert_eq!(record.seq, read);
+                assert_eq!(record.qual, qual);
+                assert!(fq.next_record().unwrap().is_none());
+                let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+                let mut found = 0;
+                for rec in rdr.records() {
+                    let rec = rec.unwrap();
+                    if rec.qname() == b"hyperbound" {
+                        assert!(rec.is_unmapped() && rec.aux(b"XF").is_ok());
+                        found += 1;
+                    }
+                }
+                assert_eq!(found, 1);
+            }
+        };
+        check_bound_unmapped();
+        if bounded {
+            assert_eq!(n1, 0, "supported endpoint must not re-enter raw rescue");
+            let before = fs::read(&raw_bam).unwrap();
+            let before_unmapped = fs::read(&unm).unwrap();
+            let n2 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
+            assert_eq!(n2, 0);
+            assert_eq!(fs::read(&raw_bam).unwrap(), before);
+            assert_eq!(fs::read(&unm).unwrap(), before_unmapped);
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr.records().next().unwrap().unwrap();
+            assert!(rec.is_unmapped());
+            assert!(rec.aux(b"XF").is_ok());
+            assert_eq!(rec.mapq(), 0);
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+            return;
+        }
         assert_eq!(n1, 1);
+        if limited {
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr
+                .records()
+                .map(Result::unwrap)
+                .find(|rec| rec.qname() == b"hyper1")
+                .unwrap();
+            assert_eq!(
+                rec.mapq(),
+                0,
+                "original incomplete search must survive rescue"
+            );
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+        }
         assert_eq!(re_count(&raw_bam), 1);
         assert_eq!(rescued_tsv_rows(&map_dir), 1);
         assert_eq!(sealed_value(&map_dir), Some(1));
@@ -2088,9 +2856,23 @@ mod rescue_tests {
         write_stats(None);
         let n2 = rescue_collapsed(&paidx, Some(true_ref), &map_dir, 1, &raw_bam).unwrap();
         assert_eq!(n2, 1);
+        if limited {
+            let mut rdr = rust_htslib::bam::Reader::from_path(&raw_bam).unwrap();
+            let rec = rdr
+                .records()
+                .map(Result::unwrap)
+                .find(|rec| rec.qname() == b"hyper1")
+                .unwrap();
+            assert_eq!(rec.mapq(), 0);
+            let rust_htslib::bam::record::Aux::String(ek) = rec.aux(b"EK").unwrap() else {
+                panic!("EK")
+            };
+            assert!(ek.contains("seed_search=limited"));
+        }
         assert_eq!(re_count(&raw_bam), 1);
         assert_eq!(rescued_tsv_rows(&map_dir), 1);
         assert_eq!(sealed_value(&map_dir), Some(1));
+        check_bound_unmapped();
         let _ = fs::remove_dir_all(&d);
     }
 }

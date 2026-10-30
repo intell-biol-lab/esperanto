@@ -18,11 +18,38 @@ use crate::extend::{
 use crate::gtf::{Junction, JunctionLib, RefinedJunction, SpliceSignal};
 use crate::index::{collect_anchors_into, Index};
 use crate::mapq::ReadAlignment;
-use crate::seed::{minimizers_into, Minimizer, SeedParams, SeedScratch, Strand};
-use crate::splice::{
-    align_spliced, intron_length_penalty, refine_junction_read, segment_chain,
-    splice_signal, SpliceParams,
+use crate::seed::{
+    append_query_edge_kmers, minimizers_into, Minimizer, SeedParams, SeedScratch, Strand,
 };
+use crate::splice::{
+    align_spliced, intron_length_penalty, segment_chain, splice_signal, SpliceParams,
+};
+
+/// Keep uncovered query ends available without increasing the maximum
+/// continuous-reference window width. Both verification paths use this geometry.
+fn continuous_extension_window(
+    chain: &Chain,
+    k: u32,
+    read_len: u32,
+    contig_len: u32,
+) -> (u32, u32) {
+    let flank = read_len / 2 + 30;
+    let (rs, re) = chain.ref_span(k);
+    let (qs, qe) = chain.read_span(k);
+    let head = flank.max(qs);
+    let tail = flank.max(read_len.saturating_sub(qe));
+    let start = rs.saturating_sub(head).min(contig_len);
+    let end = re
+        .saturating_add(tail)
+        .min(contig_len)
+        .min(rs.saturating_add(read_len).saturating_add(flank))
+        .min(
+            start
+                .saturating_add(read_len)
+                .saturating_add(flank.saturating_mul(2)),
+        );
+    (start, end.max(start))
+}
 
 /// Aligner configuration (`default` = DNA preset; `rna_default` = RNA production).
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +59,22 @@ pub struct AlignConfig {
     pub extend: ExtendParams,
     /// RNA mode: dense seeding + intron-aware chaining + splice machinery.
     pub rna: bool,
+    /// Infer conservative paired read-through endpoints before sequence caching.
+    pub fragment_endpoints: bool,
+    /// Additional bounded high-frequency ordinary context hypotheses.
+    pub repeat_context: bool,
+    /// Require additional context proposals to beat a constant-base background.
+    pub context_background: bool,
+    /// Experimental full-query exact-path arbitration (disabled by default).
+    pub exact_path_competition: bool,
+    /// Qualify otherwise unplaced exact short bodies with observable pair evidence.
+    pub mate_short_body: bool,
+    /// Re-arbitrate clipped ends in a domain corroborated by both original mates.
+    pub pair_substitution: bool,
+    /// Project only invariant complex columns at an unidentifiable run boundary.
+    pub boundary_core: bool,
+    /// Experimental extra loci from exact MAPQ0 mates; disabled by default.
+    pub weak_mate_proposals: bool,
 }
 
 impl Default for AlignConfig {
@@ -42,6 +85,14 @@ impl Default for AlignConfig {
             chain: crate::chain::ChainParams::default(),
             extend: ExtendParams::default(),
             rna: false,
+            fragment_endpoints: false,
+            repeat_context: false,
+            context_background: false,
+            exact_path_competition: false,
+            mate_short_body: false,
+            pair_substitution: false,
+            boundary_core: false,
+            weak_mate_proposals: false,
         }
     }
 }
@@ -54,6 +105,14 @@ impl AlignConfig {
             chain: crate::chain::ChainParams::rna_default(),
             extend: ExtendParams::default(),
             rna: true,
+            fragment_endpoints: true,
+            repeat_context: true,
+            context_background: true,
+            exact_path_competition: false,
+            mate_short_body: true,
+            pair_substitution: true,
+            boundary_core: true,
+            weak_mate_proposals: false,
         }
     }
 }
@@ -89,9 +148,8 @@ pub const REFUSE_MIN_ALIGNED_FRAC: f64 = 0.66;
 /// mid-occurrence seeding round runs (see `genomic_candidates`).
 pub const MID_ROUND_MIN_COVERAGE: f64 = 0.6;
 
-/// Anchor budget for the mid-occurrence round; beyond it the round is
-/// skipped rather than chained (chaining cost grows with the square of the
-/// anchors sharing a contig and strand).
+/// Anchor budget for the mid-occurrence round. On overflow, admit whole
+/// seed hit lists, rarest first, and mark the search incomplete (MAPQ 0).
 pub const MID_ROUND_MAX_ANCHORS: usize = 20_000;
 
 /// Half-width of the mate-anchored window, on top of the insert estimate
@@ -124,6 +182,8 @@ pub(crate) struct StrictScore {
     pub clipped: u32,
     /// Intron (RefSkip) count.
     pub n_splice: u32,
+    /// Junction prior contribution, separate from base/indel evidence.
+    pub splice_score: i32,
 }
 
 /// One placement candidate from either layer, pending strict arbitration.
@@ -145,6 +205,55 @@ pub(crate) struct Placement {
 }
 
 impl Placement {
+    /// Query evidence, not reference span: strict.aligned historically also
+    /// includes deleted reference columns. Preserve that score bookkeeping
+    /// for MAPQ/edit-density consumers, but never credit D/N as read coverage.
+    pub(crate) fn informative_query_coverage(&self) -> u32 {
+        let deleted: u32 = self
+            .cigar
+            .iter()
+            .filter_map(|op| match op {
+                CigarOp::Del(n) => Some(*n),
+                _ => None,
+            })
+            .sum();
+        self.strict.aligned.saturating_sub(deleted)
+    }
+
+    fn coverage_eligible(&self, read_len: usize) -> bool {
+        let covered = self.informative_query_coverage();
+        read_len > 0 && f64::from(covered) >= REFUSE_MIN_ALIGNED_FRAC * read_len as f64
+    }
+
+    pub(crate) fn primary_eligible(&self, read_len: usize) -> bool {
+        self.strict.score > 0 && self.coverage_eligible(read_len)
+    }
+
+    /// A fast proposal's skipped intervals must be the junctions it reports.
+    /// Changing N length alone cannot move its donor or read breakpoint.
+    fn has_consistent_junctions(&self) -> bool {
+        let mut observed = Vec::new();
+        let mut rf = self.pos;
+        for op in &self.cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::Del(n) => rf += *n,
+                CigarOp::RefSkip(n) => {
+                    observed.push((self.contig, rf, rf + *n));
+                    rf += *n;
+                }
+                _ => {}
+            }
+        }
+        let mut declared: Vec<_> = self
+            .junctions
+            .iter()
+            .map(|j| (j.junction.contig, j.junction.start, j.junction.end))
+            .collect();
+        observed.sort_unstable();
+        declared.sort_unstable();
+        observed == declared
+    }
+
     fn from_genomic(
         contig: u32,
         pos: u32,
@@ -174,6 +283,7 @@ impl Placement {
 pub(crate) struct GenomicBatch {
     pub placements: Vec<Placement>,
     pub n_seeds: usize,
+    pub seed_budget: Option<crate::index::AnchorBudget>,
 }
 
 /** Per-thread aligner state (reuses DP buffers).
@@ -220,6 +330,25 @@ pub struct CachedPlacements {
     placements: Vec<Placement>,
     n_seeds: usize,
     genomic_any: bool,
+    seed_budget: Option<crate::index::AnchorBudget>,
+}
+
+impl CachedPlacements {
+    pub(crate) fn seed_search_limited(&self) -> bool {
+        self.seed_budget.is_some_and(|b| b.limited())
+    }
+
+    pub(crate) fn diagnostic_pool(
+        &self,
+        index: &Index,
+        read_len: usize,
+        stage: &'static str,
+    ) -> crate::diagnostics::CandidatePool {
+        let mut pool =
+            crate::diagnostics::CandidatePool::capture(index, read_len, &self.placements, stage);
+        pool.seed_budget = self.seed_budget;
+        pool
+    }
 }
 
 impl<'a> Aligner<'a> {
@@ -320,12 +449,13 @@ impl<'a> Aligner<'a> {
     /// the L1 engine contributes every defensible transcriptome projection,
     /// the genomic layer one extension per chained locus — and every
     /// candidate is rescored by one strict four-letter function with the
-    /// editing exemption off. The best strict score decides the placement
+    /// editing exemption off. The best eligible strict score decides the placement
     /// (ties prefer the genomic layer, whose CIGAR was computed against the
     /// genome directly), the margin to the best non-overlapping runner-up
-    /// decides MAPQ, and a placement explaining less than
-    /// [`REFUSE_MIN_ALIGNED_FRAC`] of the read is refused outright so the
-    /// read reaches the Tier-2 pool.
+    /// decides MAPQ. Primary eligibility requires positive score and at least
+    /// [`REFUSE_MIN_ALIGNED_FRAC`] informative query coverage; if no candidate
+    /// qualifies the read reaches the Tier-2 pool. Ineligible different-locus
+    /// evidence still contributes to the ambiguity margin.
     pub fn align_read(&mut self, seq: &[u8]) -> Option<ReadAlignment> {
         let (aln, _) = self.align_read_full(seq);
         aln
@@ -337,7 +467,7 @@ impl<'a> Aligner<'a> {
         &mut self,
         seq: &[u8],
     ) -> (Option<ReadAlignment>, Option<CachedPlacements>) {
-        let Some((placements, n_seeds, genomic_any)) = self.scored_placements(seq)
+        let Some((placements, n_seeds, genomic_any, seed_budget)) = self.scored_placements(seq)
         else {
             return (None, None);
         };
@@ -345,16 +475,26 @@ impl<'a> Aligner<'a> {
             placements: placements.clone(),
             n_seeds,
             genomic_any,
+            seed_budget,
         };
-        (self.arbitrate(seq, placements, n_seeds, genomic_any), Some(cache))
+        (
+            self.arbitrate_with_budget(seq, placements, n_seeds, genomic_any, seed_budget),
+            Some(cache),
+        )
     }
 
-    /// Collect, strictly rescore, dedup and order the candidate placements of
-    /// a read from both layers. Returns None when no layer produced any candidate.
+    /// Collect, strictly rescore, coverage-class dedup and order the placements of
+    /// a read from both layers. Retains an empty pool when an incomplete seed
+    /// search must be propagated to later mate-window arbitration.
     fn scored_placements(
         &mut self,
         seq: &[u8],
-    ) -> Option<(Vec<Placement>, usize, bool)> {
+    ) -> Option<(
+        Vec<Placement>,
+        usize,
+        bool,
+        Option<crate::index::AnchorBudget>,
+    )> {
         let mut placements: Vec<Placement> = Vec::new();
 
         // 1. Candidate generation — transcriptome layer.
@@ -378,8 +518,9 @@ impl<'a> Aligner<'a> {
         let batch = self.genomic_candidates(seq);
         let n_seeds = batch.n_seeds;
         let genomic_any = !batch.placements.is_empty();
+        let seed_budget = batch.seed_budget;
         placements.extend(batch.placements);
-        if placements.is_empty() {
+        if placements.is_empty() && seed_budget.is_none() {
             return None;
         }
 
@@ -395,15 +536,20 @@ impl<'a> Aligner<'a> {
             self.rescore_strict(q, p);
         }
 
-        // 4. Same-locus dedup, then the decision order.
-        dedup_by_footprint(&mut placements);
+        // 4. Same-locus dedup within coverage classes, then decision order.
+        // Retain full nonpositive candidates for the hyperediting check below.
+        dedup_by_footprint_with_options(
+            &mut placements,
+            seq.len(),
+            self.config.exact_path_competition,
+        );
         sort_placements(&mut placements);
 
         // 5. Hyperedited read: re-arbitrate in its own reduced alphabet (see
         // `rescore_with`).
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
         self.scratch.rc = rc_storage;
-        Some((placements, n_seeds, genomic_any))
+        Some((placements, n_seeds, genomic_any, seed_budget))
     }
 
     /// Hyperedited-read re-arbitration (see `rescore_with`). The signature is
@@ -413,24 +559,43 @@ impl<'a> Aligner<'a> {
     /// qualifies, while a full-length candidate of the same locus (L1
     /// projection, or the clipped one re-extended) shows the signature
     /// plainly. When found, every unspliced genomic candidate is re-extended
-    /// and every candidate rescored under that direction, then dedup and
-    /// order are recomputed. No-op otherwise.
-    fn hyper_rearbitrate(&mut self, seq: &[u8], rc_storage: &[u8], placements: &mut Vec<Placement>) {
-        let Some(dir) = placements.iter().find_map(hyper_direction) else {
+    /// and every candidate rescored in that one read-oriented conversion
+    /// domain. A candidate on the opposite alignment strand must complement
+    /// the reference-oriented direction (A>G <-> T>C). Then dedup and order
+    /// are recomputed. No-op otherwise.
+    fn hyper_rearbitrate(
+        &mut self,
+        seq: &[u8],
+        rc_storage: &[u8],
+        placements: &mut Vec<Placement>,
+    ) {
+        let Some((dir, evidence_strand)) = placements
+            .iter()
+            .find_map(|p| hyper_direction(p).map(|dir| (dir, p.strand)))
+        else {
             return;
         };
         for p in placements.iter_mut() {
+            let candidate_dir = if p.strand == evidence_strand {
+                dir
+            } else {
+                match dir {
+                    EditDir::Ag => EditDir::Tc,
+                    EditDir::Tc => EditDir::Ag,
+                    EditDir::Off => EditDir::Off,
+                }
+            };
             let q: &[u8] = if p.strand == Strand::Minus {
                 rc_storage
             } else {
                 seq
             };
             if p.origin == crate::mapq::Origin::Genomic {
-                self.reextend_with(q, p, dir);
+                self.reextend_with(q, p, candidate_dir);
             }
-            self.rescore_with(q, p, dir);
+            self.rescore_with(q, p, candidate_dir);
         }
-        dedup_by_footprint(placements);
+        dedup_by_footprint_with_options(placements, seq.len(), self.config.exact_path_competition);
         sort_placements(placements);
     }
 
@@ -451,6 +616,28 @@ impl<'a> Aligner<'a> {
         mate_pos: u32,
         cached: Option<&CachedPlacements>,
     ) -> Option<ReadAlignment> {
+        self.align_read_with_mate_observed(seq, mate_contig, mate_pos, cached, None)
+    }
+
+    pub(crate) fn align_read_with_mate_observed(
+        &mut self,
+        seq: &[u8],
+        mate_contig: u32,
+        mate_pos: u32,
+        cached: Option<&CachedPlacements>,
+        mut diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
+    ) -> Option<ReadAlignment> {
+        if let Some(slot) = diagnostic.as_mut() {
+            **slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &[],
+                "mate_window_no_proposal",
+            ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = cached.and_then(|c| c.seed_budget);
+            }
+        }
         let mut win = self.mate_window_placement(seq, mate_contig, mate_pos)?;
         let rc_storage = self.take_rc(seq);
         let q: &[u8] = if win.strand == Strand::Minus {
@@ -460,21 +647,44 @@ impl<'a> Aligner<'a> {
         };
         self.rescore_strict(q, &mut win);
         let win_probe = win.clone();
-        let (mut placements, n_seeds, _) = match cached {
+        let (mut placements, n_seeds, _, seed_budget) = match cached {
             // Reuse the caller's own scored candidates: the read was just
             // aligned once already.
-            Some(c) => (c.placements.clone(), c.n_seeds, c.genomic_any),
-            None => {
-                self.scored_placements(seq)
-                    .unwrap_or((Vec::new(), 0, false))
-            }
+            Some(c) => (
+                c.placements.clone(),
+                c.n_seeds,
+                c.genomic_any,
+                c.seed_budget,
+            ),
+            None => self
+                .scored_placements(seq)
+                .unwrap_or((Vec::new(), 0, false, None)),
         };
         placements.push(win);
-        dedup_by_footprint(&mut placements);
+        dedup_by_footprint_with_options(
+            &mut placements,
+            seq.len(),
+            self.config.exact_path_competition,
+        );
         self.hyper_rearbitrate(seq, &rc_storage, &mut placements);
-        // The mate-window candidate must have won the locus (dedup keeps the
+        if let Some(slot) = diagnostic.as_mut() {
+            **slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &placements,
+                "mate_window_rejected",
+            ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = seed_budget;
+            }
+        }
+        // The mate-window candidate must have won an eligible locus (dedup keeps the
         // better-scored of two same-locus candidates, so compare footprints).
-        if footprint_overlap(&placements[0], &win_probe) < 0.5 {
+        if !placements
+            .iter()
+            .find(|p| p.primary_eligible(seq.len()))
+            .is_some_and(|p| footprint_overlap(p, &win_probe) >= 0.5)
+        {
             self.scratch.rc = rc_storage;
             return None;
         }
@@ -485,10 +695,26 @@ impl<'a> Aligner<'a> {
         // mate-consistent alternatives only, which is how a paired aligner
         // resolves a repeat copy by its pair (STAR, BWA-MEM).
         let reach = 2 * (MATE_WINDOW_INSERT + MATE_WINDOW_INSERT / 2 + seq.len() as u32);
-        placements.retain(|p| p.contig == mate_contig && p.pos.abs_diff(mate_pos) <= reach);
+        placements.retain(|p| {
+            (p.contig == mate_contig && p.pos.abs_diff(mate_pos) <= reach)
+                || (self.config.exact_path_competition
+                    && footprint_overlap(p, &win_probe) >= 0.5
+                    && exact_path::distinct(p, &win_probe, seq.len()))
+        });
+        if let Some(slot) = diagnostic {
+            *slot = Some(crate::diagnostics::CandidatePool::capture(
+                self.index,
+                seq.len(),
+                &placements,
+                "mate_window_arbitration",
+            ));
+            if let Some(pool) = slot.as_mut() {
+                pool.seed_budget = seed_budget;
+            }
+        }
         // The genomic layer was consulted (the window search is genomic), so
         // the L1-only last-resort policy does not apply here.
-        let mut aln = self.arbitrate(seq, placements, n_seeds, true)?;
+        let mut aln = self.arbitrate_with_budget(seq, placements, n_seeds, true, seed_budget)?;
         aln.rescued = true;
         Some(aln)
     }
@@ -571,6 +797,22 @@ impl<'a> Aligner<'a> {
     }
 
     /// The Tier-1 decision over an ordered, deduplicated candidate list.
+    fn arbitrate_with_budget(
+        &mut self,
+        seq: &[u8],
+        placements: Vec<Placement>,
+        n_seeds: usize,
+        genomic_any: bool,
+        seed_budget: Option<crate::index::AnchorBudget>,
+    ) -> Option<ReadAlignment> {
+        let mut aln = self.arbitrate(seq, placements, n_seeds, genomic_any)?;
+        if seed_budget.is_some_and(|b| b.limited()) {
+            aln.seed_search_limited = true;
+            crate::mapq::force_mapq0(&mut aln);
+        }
+        Some(aln)
+    }
+
     fn arbitrate(
         &mut self,
         seq: &[u8],
@@ -578,25 +820,25 @@ impl<'a> Aligner<'a> {
         n_seeds: usize,
         genomic_any: bool,
     ) -> Option<ReadAlignment> {
-        if placements.is_empty() {
-            return None;
-        }
-        let best = &placements[0];
+        // A score leader that lacks read coverage cannot veto a lower-ranked
+        // eligible placement. Keep it as ambiguity evidence at other loci.
+        let best = placements.iter().find(|p| p.primary_eligible(seq.len()))?;
+        // Annotation priors cannot distinguish two complete exact mappings
+        // of this query. Keep their actual scores, but display a deterministic
+        // representative and preserve the unresolved path evidence.
+        let (best, exact_path_ambiguous) = if self.config.exact_path_competition {
+            exact_path::representative(&placements, best, seq.len())
+        } else {
+            (best, false)
+        };
         // Runner-up must be a different locus (footprint overlap < 0.5).
-        let second = placements[1..]
+        let second = placements
             .iter()
             .filter(|p| footprint_overlap(best, p) < 0.5)
             .map(|p| p.strict.score)
             .filter(|s| *s > 0)
             .max()
             .unwrap_or(0);
-
-        // 5. Refusal: a placement that cannot explain two thirds of the read
-        // is not a placement — the read belongs in the unmapped pool, where
-        // the Tier-2 collapsed-alphabet rescue looks for it.
-        if f64::from(best.strict.aligned) < REFUSE_MIN_ALIGNED_FRAC * seq.len() as f64 {
-            return None;
-        }
 
         // A best hit on a decoy contig is the decoy contract doing its job:
         // the read's source is absent from the primary reference (rDNA,
@@ -623,10 +865,10 @@ impl<'a> Aligner<'a> {
             strand: best.strand,
             score: best.strict.score,
             second_score: second,
-            chain_score: if best.origin == crate::mapq::Origin::Genomic {
-                best.chain_score
-            } else {
+            chain_score: if best.origin == crate::mapq::Origin::L1 {
                 best.strict.score
+            } else {
+                best.chain_score
             },
             second_chain_score: 0,
             cigar: best.cigar.clone(),
@@ -639,7 +881,15 @@ impl<'a> Aligner<'a> {
             rescued: false,
             mapq_override: None,
             origin: best_origin,
-            n_cands: placements.len(),
+            n_cands: placements
+                .iter()
+                .filter(|p| p.primary_eligible(seq.len()))
+                .count(),
+            seed_search_limited: false,
+            exact_path_ambiguous,
+            short_body_qualified: false,
+            pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
         };
 
         // Only the transcriptome layer could place the read. Its apparent
@@ -713,11 +963,7 @@ impl<'a> Aligner<'a> {
                     }
                     for k in 0..*n as usize {
                         let qb = query.get(ro as usize + k).copied().unwrap_or(b'N');
-                        let rb = if k < scratch.len() {
-                            scratch[k]
-                        } else {
-                            b'N'
-                        };
+                        let rb = if k < scratch.len() { scratch[k] } else { b'N' };
                         if qb == b'N' || rb == b'N' {
                             continue; // 0 score, uncounted
                         }
@@ -756,6 +1002,7 @@ impl<'a> Aligner<'a> {
                     ro += *n;
                 }
                 CigarOp::RefSkip(n) => {
+                    let before = score;
                     // Annotated introns receive the known-junction bonus on
                     // either read orientation. Signal and length penalties
                     // apply to novel junctions only.
@@ -780,6 +1027,7 @@ impl<'a> Aligner<'a> {
                         score += signal - intron_length_penalty(*n);
                     }
                     s.n_splice += 1;
+                    s.splice_score += score - before;
                     rf += *n;
                 }
             }
@@ -915,7 +1163,6 @@ impl<'a> Aligner<'a> {
         count
     }
 
-
     /// Genomic layer driver, in candidate form: seed → anchor → chain →
     /// build a locus-deduplicated chain list → extend each chain
     /// (intron-chain / spliced / EA-Myers / fast lane / banded DP) into
@@ -933,6 +1180,7 @@ impl<'a> Aligner<'a> {
             return GenomicBatch {
                 placements: Vec::new(),
                 n_seeds: 0,
+                seed_budget: None,
             };
         }
 
@@ -950,27 +1198,37 @@ impl<'a> Aligner<'a> {
                 f64::from(qe.saturating_sub(qs)) / f64::from(read_len.max(1))
             })
             .unwrap_or(0.0);
-        let r2 = if r1_cov < MID_ROUND_MIN_COVERAGE {
-            let mut anchors = std::mem::take(&mut self.scratch.anchors);
-            collect_anchors_into(self.index, &mins, read_len, k, MID_OCC_CAP, &mut anchors);
-            if anchors.is_empty() || anchors.len() > MID_ROUND_MAX_ANCHORS {
-                self.scratch.anchors = anchors;
-                None
-            } else {
-                let mut chains = std::mem::take(&mut self.scratch.chains_out);
-                chain_anchors_into(
-                    &mut anchors,
-                    &cfg.chain,
-                    &mut chains,
-                    &mut self.scratch.chain,
-                );
-                self.scratch.anchors = anchors;
-                let second = second_score_with(&chains, &mut self.scratch.second_keys);
-                Some(RoundOutcome { chains, second })
+        let mut seed_budget = None;
+        let mut r2 = if r1_cov < MID_ROUND_MIN_COVERAGE {
+            let (round, budget) = self.bounded_chain_round(&mins, read_len, k);
+            if budget.limited() {
+                seed_budget = Some(budget);
             }
+            round
         } else {
             None
         };
+
+        // Truncating technical tails can change terminal minimizer selection
+        // even when the necessary k-mer lies wholly inside the retained query.
+        // Only a complete chaining failure permits query-edge completion;
+        // successful rounds, DNA and edit-variant search are left untouched.
+        let ordinary_failed = cfg.rna
+            && !cfg.extend.edit_dir.is_on()
+            && r1.as_ref().is_none_or(|r| r.best().is_none())
+            && r2.as_ref().is_none_or(|r| r.best().is_none());
+        if ordinary_failed
+            && append_query_edge_kmers(seq.len(), cfg.seed, &self.scratch.seed, &mut mins) > 0
+        {
+            if let Some(failed) = r2.take() {
+                self.scratch.chains_out = failed.chains;
+            }
+            let (round, budget) = self.bounded_chain_round(&mins, read_len, k);
+            if budget.limited() {
+                seed_budget = Some(budget);
+            }
+            r2 = round;
+        }
 
         // Editing-aware variant round: only when chaining fully failed (weak).
         let weak = r1
@@ -1022,87 +1280,14 @@ impl<'a> Aligner<'a> {
             None
         };
 
-        // Merge rounds: winner = round with the highest best-chain score.
-        let rounds: Vec<&RoundOutcome> = r1.iter().chain(r2.iter()).chain(r3.iter()).collect();
-        let mut win_idx: Option<usize> = None;
-        for (i, r) in rounds.iter().enumerate() {
-            let better = match (win_idx, r.best()) {
-                (None, Some(_)) => true,
-                (Some(w), Some(b)) => b.score > rounds[w].best().map(|x| x.score).unwrap_or(0),
-                _ => false,
-            };
-            if better {
-                win_idx = Some(i);
-            }
-        }
-        let Some(w) = win_idx else {
-            let n_seeds = mins.len();
-            self.scratch.mins_out = mins;
-            return GenomicBatch {
-                placements: Vec::new(),
-                n_seeds,
-            };
-        };
-        let cr = rounds[w];
-        let second = cr.second;
-        let extra_top: Vec<Chain> = rounds
-            .iter()
-            .flat_map(|r| r.chains.iter().take(TOP_CANDIDATES).cloned())
-            .collect();
-        let best = match cr.best() {
-            Some(b) => b.clone(),
-            None => {
-                let n_seeds = mins.len();
-                self.scratch.mins_out = mins;
-                return GenomicBatch {
-                    placements: Vec::new(),
-                    n_seeds,
-                }
-            }
-        };
-
-        // Candidate chains: deduplicated by locus (same contig+strand,
-        // ref-span start within 50bp), in chain-score order.
-        let mut cand_chains: Vec<Chain> = Vec::new();
-        let push_dedup = |c: Chain, out: &mut Vec<Chain>| {
-            let dup = out.iter().any(|x| {
-                x.contig == c.contig
-                    && x.strand == c.strand
-                    && x.ref_span(k).0.abs_diff(c.ref_span(k).0) < 50
-            });
-            if !dup {
-                out.push(c);
-            }
-        };
-        for c in cr.chains.iter().take(TOP_CANDIDATES) {
-            push_dedup(c.clone(), &mut cand_chains);
-        }
-        for c in extra_top {
-            if cand_chains.len() >= MAX_TIED_CANDIDATES {
-                break;
-            }
-            push_dedup(c, &mut cand_chains);
-        }
-
-        let tied = tied_best(&cr.chains);
-        let decisive = tied.len() <= 1 && second * 5 < best.score * 4;
-        let rc_storage = self.take_rc(seq);
-        let mut placements: Vec<Placement> = Vec::new();
-        let mut dp_budget = EXTEND_BUDGET;
-        for (i, chain) in cand_chains.iter().take(MAX_TIED_CANDIDATES).enumerate() {
-            let is_best = i == 0;
-            self.extend_chain(
-                seq,
-                &mins,
-                chain,
-                is_best,
-                decisive && is_best,
-                &rc_storage,
-                &mut dp_budget,
-                &mut placements,
-            );
-        }
-        self.scratch.rc = rc_storage;
+        let mut placements = self.extend_genomic_rounds(
+            seq,
+            &mins,
+            r1.as_ref(),
+            r2.as_ref(),
+            r3.as_ref(),
+            seed_budget.is_some(),
+        );
         if let Some(r1) = r1 {
             self.scratch.chains_out = r1.chains;
         }
@@ -1144,18 +1329,145 @@ impl<'a> Aligner<'a> {
             q.junctions = tmp.junctions;
         }
 
+        // Additional context candidates must not replace or consume the old
+        // chain/splice/indel extension work above. A perfect whole-query edge
+        // hit attains the ordinary score ceiling and bypasses this search.
+        if cfg.repeat_context
+            && ordinary_failed
+            && !placements.iter().any(|p| {
+                p.ext_score == cfg.extend.match_score * read_len as i32
+                    && p.cigar == [CigarOp::Match(read_len)]
+            })
+        {
+            let context = if cfg.context_background {
+                crate::repeat_context::generate(self.index, seq, cfg.extend)
+            } else {
+                crate::repeat_context::generate_with_background(self.index, seq, cfg.extend, false)
+            };
+            if let Some((proposals, context)) = context {
+                seed_budget
+                    .get_or_insert_with(Default::default)
+                    .repeat_context = Some(context);
+                placements.extend(proposals.into_iter().map(|p| {
+                    let mut candidate = Placement::from_genomic(
+                        p.contig,
+                        p.pos,
+                        p.strand,
+                        p.cigar,
+                        Vec::new(),
+                        0,
+                        p.score,
+                    );
+                    candidate.origin = crate::mapq::Origin::RepeatContext;
+                    candidate
+                }));
+            }
+        }
         let n_seeds = mins.len();
         self.scratch.mins_out = mins;
 
         GenomicBatch {
             placements,
             n_seeds,
+            seed_budget,
         }
     }
 
-    /// Extend one chain into 0..2 placement candidates: the spliced
-    /// interpretation first (RNA), then the unspliced one (EA-Myers window
-    /// extend, with the banded DP as indel fallback while budget lasts).
+    /// Schedule and extend genomic chains with one shared DP budget.
+    fn extend_genomic_rounds(
+        &mut self,
+        seq: &[u8],
+        mins: &[Minimizer],
+        r1: Option<&RoundOutcome>,
+        r2: Option<&RoundOutcome>,
+        r3: Option<&RoundOutcome>,
+        seed_search_limited: bool,
+    ) -> Vec<Placement> {
+        let k = self.config.seed.k;
+        // A limited repeat search may introduce higher-chain-score competitors
+        // that exhaust extension before a complete first-round path is tried.
+        // Preserve that round's existing budget priority; additional proposals
+        // still compete by common sequence score. Complete search is unchanged.
+        let rounds: Vec<&RoundOutcome> = r1.into_iter().chain(r2).chain(r3).collect();
+        let mut win_idx: Option<usize> = None;
+        for (i, r) in rounds.iter().enumerate() {
+            let better = match (win_idx, r.best()) {
+                (None, Some(_)) => true,
+                (Some(w), Some(b)) => b.score > rounds[w].best().map(|x| x.score).unwrap_or(0),
+                _ => false,
+            };
+            if better {
+                win_idx = Some(i);
+            }
+        }
+        if seed_search_limited && r1.is_some_and(|r| r.best().is_some()) {
+            win_idx = Some(0);
+        }
+        let Some(w) = win_idx else {
+            return Vec::new();
+        };
+        let cr = rounds[w];
+        let second = cr.second;
+        let extra_top: Vec<Chain> = rounds
+            .iter()
+            .flat_map(|r| r.chains.iter().take(TOP_CANDIDATES).cloned())
+            .collect();
+        let best = match cr.best() {
+            Some(b) => b.clone(),
+            None => {
+                return Vec::new();
+            }
+        };
+
+        // Candidate chains: deduplicated by locus (same contig+strand,
+        // ref-span start within 50bp), in chain-score order.
+        let mut cand_chains: Vec<Chain> = Vec::new();
+        let push_dedup = |c: Chain, out: &mut Vec<Chain>| {
+            let dup = out.iter().any(|x| {
+                x.contig == c.contig
+                    && x.strand == c.strand
+                    && x.ref_span(k).0.abs_diff(c.ref_span(k).0) < 50
+            });
+            if !dup {
+                out.push(c);
+            }
+        };
+        for c in cr.chains.iter().take(TOP_CANDIDATES) {
+            push_dedup(c.clone(), &mut cand_chains);
+        }
+        for c in extra_top {
+            if cand_chains.len() >= MAX_TIED_CANDIDATES {
+                break;
+            }
+            push_dedup(c, &mut cand_chains);
+        }
+
+        let tied = tied_best(&cr.chains);
+        let decisive = tied.len() <= 1 && second * 5 < best.score * 4;
+        let rc_storage = self.take_rc(seq);
+        let mut placements: Vec<Placement> = Vec::new();
+        let mut dp_budget = EXTEND_BUDGET;
+        for (i, chain) in cand_chains.iter().take(MAX_TIED_CANDIDATES).enumerate() {
+            let is_best = i == 0;
+            self.extend_chain(
+                seq,
+                mins,
+                chain,
+                is_best,
+                decisive && is_best,
+                &rc_storage,
+                &mut dp_budget,
+                seed_search_limited,
+                &mut placements,
+            );
+        }
+        self.scratch.rc = rc_storage;
+        placements
+    }
+
+    /// Extend one chain into spliced and continuous placement candidates.
+    /// RNA chains also retain segment-wise continuous explanations. The
+    /// unspliced extension uses EA-Myers with banded DP while budget lasts.
     /// `fast_lane_ok` gates the Kadane fast lane (decisive best chain only).
     #[allow(clippy::too_many_arguments)]
     fn extend_chain(
@@ -1167,6 +1479,7 @@ impl<'a> Aligner<'a> {
         fast_lane_ok: bool,
         rc_storage: &[u8],
         dp_budget: &mut usize,
+        seed_search_limited: bool,
         out: &mut Vec<Placement>,
     ) {
         let cfg = self.config;
@@ -1178,9 +1491,42 @@ impl<'a> Aligner<'a> {
         if cfg.rna {
             let min_intron = SpliceParams::default().min_intron;
             let segs = segment_chain(chain, k, min_intron);
-            if segs.len() == 2 && is_best {
-                // Intron-chain fast path: verified intra-chain intron
-                // algorithm, with read-aware boundary refinement.
+            if segs.len() >= 2 {
+                // A repeat-derived anchor can attach to a genuine continuous
+                // placement and manufacture a plausible intron. A successful
+                // splice must not suppress the continuous explanation at any
+                // of its collinear segments. Longer segments get the shared
+                // extension budget first.
+                let mut ordered = segs.clone();
+                ordered.sort_by_key(|s| std::cmp::Reverse(s.q_end - s.q_start));
+                for seg in ordered {
+                    let segment = Chain {
+                        contig: chain.contig,
+                        strand: chain.strand,
+                        score: chain.score,
+                        anchors: chain
+                            .anchors
+                            .iter()
+                            .copied()
+                            .filter(|a| {
+                                a.qpos >= seg.q_start
+                                    && a.qpos + k <= seg.q_end
+                                    && a.rpos >= seg.r_start
+                                    && a.rpos + k <= seg.r_end
+                            })
+                            .collect(),
+                    };
+                    if !segment.anchors.is_empty() {
+                        self.extend_unspliced_chain(
+                            seq, &segment, false, rc_storage, dp_budget, out,
+                        );
+                    }
+                }
+            }
+            if segs.len() >= 2 && is_best {
+                // The intron fast path may choose any exon pair supported by
+                // the complete anchor pool; extra segments in this chain do
+                // not invalidate that pair. Keep its own boundary geometry.
                 let empty_lib = JunctionLib::default();
                 let lib = self.jlib.as_deref().unwrap_or(&empty_lib);
                 let query: &[u8] = match chain.strand {
@@ -1190,14 +1536,26 @@ impl<'a> Aligner<'a> {
                     Strand::Minus => rc_storage,
                 };
                 let mut ic_anchors = std::mem::take(&mut self.scratch.anchors);
-                collect_anchors_into(
-                    self.index,
-                    mins,
-                    read_len,
-                    k,
-                    MID_OCC_CAP,
-                    &mut ic_anchors,
-                );
+                if seed_search_limited {
+                    crate::index::collect_anchors_budgeted_into(
+                        self.index,
+                        mins,
+                        read_len,
+                        k,
+                        MID_OCC_CAP,
+                        MID_ROUND_MAX_ANCHORS,
+                        &mut ic_anchors,
+                    );
+                } else {
+                    collect_anchors_into(
+                        self.index,
+                        mins,
+                        read_len,
+                        k,
+                        MID_OCC_CAP,
+                        &mut ic_anchors,
+                    );
+                }
                 ic_anchors.retain(|a| a.contig == chain.contig && a.strand == chain.strand);
                 let ic_hit = crate::intron_chain::try_intron_chain_placement(
                     self.index.reference,
@@ -1211,7 +1569,7 @@ impl<'a> Aligner<'a> {
                 );
                 self.scratch.anchors = ic_anchors;
                 if let Some(hit) = ic_hit {
-                    let mut placement = Placement::from_genomic(
+                    let placement = Placement::from_genomic(
                         chain.contig,
                         hit.genomic_start(),
                         chain.strand,
@@ -1220,34 +1578,15 @@ impl<'a> Aligner<'a> {
                         chain.score,
                         hit.extension.score,
                     );
-                    // Read-aware boundary refinement (±3bp snap).
-                    if !placement.junctions.is_empty() {
-                        let minus = matches!(chain.strand, Strand::Minus);
-                        let sp = SpliceParams::default();
-                        if let Some(refined) = refine_junction_read(
-                            self.index.reference,
-                            query,
-                            placement.contig,
-                            segs[0].r_end,
-                            segs[1].r_start,
-                            segs[0].q_end,
-                            segs[1].q_start,
-                            minus,
-                            lib,
-                            &sp,
-                        ) {
-                            let new_intron =
-                                refined.junction.end.saturating_sub(refined.junction.start);
-                            for op in &mut placement.cigar {
-                                if let CigarOp::RefSkip(n) = op {
-                                    *n = new_intron;
-                                }
-                            }
-                            placement.junctions[0] = refined;
-                        }
+                    // The fast path searches the whole anchor set and may
+                    // choose a different exon pair from this chain. Its CIGAR
+                    // cannot be refined by rewriting N with this chain's
+                    // junction. Keep only internally consistent proposals.
+                    if placement.has_consistent_junctions() {
+                        out.push(placement);
                     }
-                    out.push(placement);
-                    return;
+                    // A fast proposal never suppresses the generic spliced
+                    // explanation; common rescoring decides between them.
                 }
             }
             if segs.len() >= 2 {
@@ -1266,6 +1605,22 @@ impl<'a> Aligner<'a> {
             }
         }
 
+        self.extend_unspliced_chain(seq, chain, fast_lane_ok, rc_storage, dp_budget, out);
+    }
+
+    /// Continuous explanation of one collinear chain, without splice search.
+    fn extend_unspliced_chain(
+        &mut self,
+        seq: &[u8],
+        chain: &Chain,
+        fast_lane_ok: bool,
+        rc_storage: &[u8],
+        dp_budget: &mut usize,
+        out: &mut Vec<Placement>,
+    ) {
+        let cfg = self.config;
+        let k = cfg.seed.k;
+        let read_len = seq.len() as u32;
         // Unspliced interpretation — fast lane (decisive best chain only:
         // zero-mismatch Kadane, point-equivalent to the affine DP).
         if fast_lane_ok {
@@ -1295,11 +1650,7 @@ impl<'a> Aligner<'a> {
             let mm_s = cfg.extend.mismatch;
             let threshold = ((read_len as i32) / 3).max(10);
             let contig = &self.index.reference.contigs[chain.contig as usize];
-            let flank = read_len / 2 + 30;
-            let (rs, re) = chain.ref_span(k);
-            let wstart = rs.saturating_sub(flank);
-            let wcap = rs + read_len + flank;
-            let wend = (re + flank).min(contig.len).min(wcap);
+            let (wstart, wend) = continuous_extension_window(chain, k, read_len, contig.len);
             let window = self.take_win(wstart, wend, contig);
             let q: &[u8] = match chain.strand {
                 Strand::Plus => seq,
@@ -1413,11 +1764,8 @@ impl<'a> Aligner<'a> {
         }
         *dp_budget -= 1;
         let contig = &self.index.reference.contigs[chain.contig as usize];
-        let flank = read_len / 2 + 30;
-        let (rs, re) = chain.ref_span(k);
-        let wstart = rs.saturating_sub(flank);
-        let wcap = rs + read_len + flank;
-        let wend = (re + flank).min(contig.len).min(wcap);
+        let (rs, _) = chain.ref_span(k);
+        let (wstart, wend) = continuous_extension_window(chain, k, read_len, contig.len);
         let window = self.take_win(wstart, wend, contig);
         let q: &[u8] = match chain.strand {
             Strand::Plus => seq,
@@ -1447,7 +1795,12 @@ impl<'a> Aligner<'a> {
     /// Splice path: segment → junction refine → pseudo-reference extend →
     /// N CIGAR. splice gate: <2 segments ⇒ None (align_spliced would
     /// return None anyway — skip the revcomp + entry cost).
-    fn try_spliced(&mut self, seq: &[u8], rc_storage: &[u8], best: &Chain) -> Option<ReadAlignment> {
+    fn try_spliced(
+        &mut self,
+        seq: &[u8],
+        rc_storage: &[u8],
+        best: &Chain,
+    ) -> Option<ReadAlignment> {
         let min_intron = SpliceParams::default().min_intron;
         let segs = segment_chain(best, self.config.seed.k, min_intron);
         if segs.len() < 2 {
@@ -1489,8 +1842,63 @@ impl<'a> Aligner<'a> {
         Some(aln)
     }
 
-    /// Split rescue (both tails; success rewrites CIGAR/junctions/pos).
+    /// Compare rescue proposals with the primary in the same strict domain.
+    /// Extension totals and genomic-scan ranks are not read-placement scores.
+    /// The existing split cost is an acceptance margin; a library bonus alone
+    /// must not rewrite an equally good continuous sequence explanation.
+    fn select_rescue(
+        &mut self,
+        seq: &[u8],
+        original: ReadAlignment,
+        mut proposal: ReadAlignment,
+    ) -> ReadAlignment {
+        if original.pos == proposal.pos && original.cigar == proposal.cigar {
+            return original;
+        }
+        let mut before = Placement::from_genomic(
+            original.contig,
+            original.pos,
+            original.strand,
+            original.cigar.clone(),
+            original.junctions.clone(),
+            original.chain_score,
+            original.score,
+        );
+        let mut after = Placement::from_genomic(
+            proposal.contig,
+            proposal.pos,
+            proposal.strand,
+            proposal.cigar.clone(),
+            proposal.junctions.clone(),
+            proposal.chain_score,
+            proposal.score,
+        );
+        let rc_storage = self.take_rc(seq);
+        let query = if original.strand == Strand::Minus {
+            &rc_storage
+        } else {
+            seq
+        };
+        self.rescore_strict(query, &mut before);
+        self.rescore_strict(query, &mut after);
+        self.scratch.rc = rc_storage;
+        let sequence_gain = after.strict.score - after.strict.splice_score
+            > before.strict.score - before.strict.splice_score;
+        if sequence_gain && after.strict.score > before.strict.score + crate::splice::SPLIT_COST {
+            proposal.score = after.strict.score;
+            proposal
+        } else {
+            original
+        }
+    }
+
+    /// Split rescue (both tails), accepted against the original primary.
     fn apply_split_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
+        let proposal = self.propose_split_rescue(seq, aln.clone());
+        self.select_rescue(seq, aln, proposal)
+    }
+
+    fn propose_split_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
         let empty_lib = JunctionLib::default();
         // Query in extension orientation: (RC'd if minus) read; tails operate
         // in extension coordinates; result CIGAR is plus-reference isomorphic.
@@ -1557,7 +1965,8 @@ impl<'a> Aligner<'a> {
                     // junction match is accepted.
                     let t3_reject = r_tail < 12 && {
                         let contig = &self.index.reference.contigs[out.contig as usize];
-                        let mm = count_tail_mismatches(&rescue.cigar, out.pos, contig, query, true);
+                        let mm =
+                            count_tail_mismatches(&rescue.cigar, rescue.pos, contig, query, true);
                         if rescue.junction.known_support < 2 {
                             mm > 0 || rescue.junction.signal == SpliceSignal::NonCanonical
                         } else {
@@ -1565,6 +1974,7 @@ impl<'a> Aligner<'a> {
                         }
                     };
                     if !t3_reject {
+                        out.pos = rescue.pos;
                         out.cigar = rescue.cigar;
                         out.junctions.push(rescue.junction);
                         out.score += rescue.score;
@@ -1598,13 +2008,8 @@ impl<'a> Aligner<'a> {
                     // zero tail-vs-ref mismatch.
                     let t3_reject = read_start < 12 && {
                         let contig = &self.index.reference.contigs[out.contig as usize];
-                        let mm = count_tail_mismatches(
-                            &rescue.cigar,
-                            rescue.pos,
-                            contig,
-                            query,
-                            false,
-                        );
+                        let mm =
+                            count_tail_mismatches(&rescue.cigar, rescue.pos, contig, query, false);
                         if rescue.junction.known_support < 2 {
                             mm > 0 || rescue.junction.signal == SpliceSignal::NonCanonical
                         } else {
@@ -1626,7 +2031,12 @@ impl<'a> Aligner<'a> {
 
     /// Library-driven run-through reinterpretation (span.rs; skipped without
     /// a library or when the alignment is already spliced).
-    fn apply_span_rescue(&mut self, seq: &[u8], mut aln: ReadAlignment) -> ReadAlignment {
+    fn apply_span_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
+        let proposal = self.propose_span_rescue(seq, aln.clone());
+        self.select_rescue(seq, aln, proposal)
+    }
+
+    fn propose_span_rescue(&mut self, seq: &[u8], mut aln: ReadAlignment) -> ReadAlignment {
         let rc_storage = self.take_rc(seq);
         let Some(lib) = self.jlib.as_deref() else {
             self.scratch.rc = rc_storage;
@@ -1850,6 +2260,38 @@ impl<'a> Aligner<'a> {
         recount_mm_ea_in(self.index.reference, query, aln);
     }
 
+    fn bounded_chain_round(
+        &mut self,
+        mins: &[Minimizer],
+        read_len: u32,
+        k: u32,
+    ) -> (Option<RoundOutcome>, crate::index::AnchorBudget) {
+        let mut anchors = std::mem::take(&mut self.scratch.anchors);
+        let budget = crate::index::collect_anchors_budgeted_into(
+            self.index,
+            mins,
+            read_len,
+            k,
+            MID_OCC_CAP,
+            MID_ROUND_MAX_ANCHORS,
+            &mut anchors,
+        );
+        if anchors.is_empty() {
+            self.scratch.anchors = anchors;
+            return (None, budget);
+        }
+        let mut chains = std::mem::take(&mut self.scratch.chains_out);
+        chain_anchors_into(
+            &mut anchors,
+            &self.config.chain,
+            &mut chains,
+            &mut self.scratch.chain,
+        );
+        self.scratch.anchors = anchors;
+        let second = second_score_with(&chains, &mut self.scratch.second_keys);
+        (Some(RoundOutcome { chains, second }), budget)
+    }
+
     pub(crate) fn chain_round(
         &mut self,
         mins: &[Minimizer],
@@ -1875,7 +2317,6 @@ impl<'a> Aligner<'a> {
         Some(RoundOutcome { chains, second })
     }
 }
-
 
 /// Set `aln.mm_count` / `aln.ea_count` by walking the CIGAR base-by-base
 /// against `reference`. `query` must already be in the alignment's frame
@@ -2074,14 +2515,18 @@ fn footprint_overlap(a: &Placement, b: &Placement) -> f64 {
     f64::from(inter) / f64::from(la.min(lb))
 }
 
-/// Decision order: score desc, then fewer ordinary mismatches, then the
-/// genomic layer, then coordinates (deterministic).
+/// Decision order: score desc, then fewer ordinary mismatches, more
+/// informative query coverage, origin and coordinates (deterministic).
 fn sort_placements(ps: &mut [Placement]) {
     ps.sort_by(|a, b| {
         b.strict
             .score
             .cmp(&a.strict.score)
             .then(a.strict.mm.cmp(&b.strict.mm))
+            .then(
+                b.informative_query_coverage()
+                    .cmp(&a.informative_query_coverage()),
+            )
             .then(a.origin.rank().cmp(&b.origin.rank()))
             .then(a.contig.cmp(&b.contig))
             .then(a.pos.cmp(&b.pos))
@@ -2105,16 +2550,37 @@ fn hyper_direction(p: &Placement) -> Option<EditDir> {
     Some(EditDir::from_plus(s.ea_ag > 0))
 }
 
-fn dedup_by_footprint(ps: &mut Vec<Placement>) {
+/// Keep the best-scored representative of each locus in each coverage class.
+/// A short local explanation cannot erase a full-length fallback or its edit
+/// signature; positive score is checked only after any hyper rescoring.
+#[cfg(test)]
+fn dedup_by_footprint(ps: &mut Vec<Placement>, read_len: usize) {
+    dedup_by_footprint_with_options(ps, read_len, false);
+}
+
+fn dedup_by_footprint_with_options(
+    ps: &mut Vec<Placement>,
+    read_len: usize,
+    exact_path_competition: bool,
+) {
     sort_placements(ps);
     let mut kept: Vec<Placement> = Vec::with_capacity(ps.len());
     for p in ps.drain(..) {
-        if kept.iter().all(|k| footprint_overlap(k, &p) < 0.5) {
+        if kept.iter().all(|k| {
+            k.coverage_eligible(read_len) != p.coverage_eligible(read_len)
+                || footprint_overlap(k, &p) < 0.5
+                || (exact_path_competition && exact_path::distinct(k, &p, read_len))
+        }) {
             kept.push(p);
         }
     }
     *ps = kept;
 }
+
+mod exact_path;
+pub(crate) mod pair_substitution;
+mod short_body;
+mod weak_mate;
 
 impl ReadAlignment {
     #[cfg(test)]
@@ -2122,6 +2588,15 @@ impl ReadAlignment {
         crate::mapq::mapq_of(self)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod prefix_tests;
+
+#[cfg(test)]
+pub(crate) mod repeat_context_tests;
+
+#[cfg(test)]
+pub(crate) mod exact_path_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2150,6 +2625,1414 @@ mod tests {
             0,
             100,
         )
+    }
+
+    fn sparse_window_body(n: usize) -> Vec<u8> {
+        let mut state = 0x75bcd15u64;
+        (0..n)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn affine_gap_extension_and_common_rescore_agree() {
+        let reference = sparse_window_body(160);
+        let mut aligner = aligner_on(std::str::from_utf8(&reference).unwrap());
+        for insertion in [false, true] {
+            for n in [1, 2, 3, 7] {
+                let mut query = reference.clone();
+                if insertion {
+                    let b = *b"ACGT"
+                        .iter()
+                        .find(|&&b| b != reference[79] && b != reference[80])
+                        .unwrap();
+                    query.splice(80..80, std::iter::repeat_n(b, n));
+                } else {
+                    query.drain(80..80 + n);
+                }
+                for dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    let mut edited = query.clone();
+                    if dir.is_on() {
+                        let (from, to) = if dir == EditDir::Ag {
+                            (b'A', b'G')
+                        } else {
+                            (b'T', b'C')
+                        };
+                        let q = (15..40).find(|&q| edited[q] == from).unwrap();
+                        edited[q] = to;
+                    }
+                    let params = ExtendParams {
+                        edit_dir: dir,
+                        ..Default::default()
+                    };
+                    let ext = crate::extend::extend(
+                        &edited,
+                        &reference,
+                        &params,
+                        &mut ExtendBuffer::default(),
+                    );
+                    let mut p = placement(0, ext.ref_start, &ext.cigar);
+                    aligner.rescore_with(&edited, &mut p, dir);
+                    assert_eq!(ext.score, p.strict.score,
+                        "extension/common disagreement: insertion={insertion}, n={n}, dir={dir:?}, cigar={:?}", ext.cigar);
+                }
+                for strand in [Strand::Plus, Strand::Minus] {
+                    let raw = if strand == Strand::Plus {
+                        query.clone()
+                    } else {
+                        revcomp(&query)
+                    };
+                    let mapped = aligner
+                        .align_read(&raw)
+                        .expect("true internal indel must remain mappable");
+                    assert_eq!(mapped.pos, 0);
+                    assert_eq!(mapped.strand, strand);
+                    assert_eq!(
+                        mapped.score,
+                        (160 - if insertion { 0 } else { n }) as i32 * 2 - 4 - 2 * n as i32
+                    );
+                    assert!(mapped.cigar.contains(&if insertion {
+                        CigarOp::Ins(n as u32)
+                    } else {
+                        CigarOp::Del(n as u32)
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_gap_native_terminal_competition_prefers_the_local_body() {
+        let body = crate::fragment::tests::body(120);
+        let reference = [body.clone(), b"TAGC".to_vec()].concat();
+        let query = [body, b"AGC".to_vec(), vec![b'N'; 27]].concat();
+        let mut aligner = aligner_on(std::str::from_utf8(&reference).unwrap());
+        for strand in [Strand::Plus, Strand::Minus] {
+            let raw = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let a = aligner
+                .align_read(&raw)
+                .expect("complex body meets coverage");
+            assert_eq!(a.pos, 0);
+            assert_eq!(a.strand, strand);
+            assert_eq!(a.score, 240);
+            assert_eq!(a.cigar, vec![CigarOp::Match(120), CigarOp::SoftClip(30)]);
+        }
+    }
+
+    fn sparse_window_chain(n: u32, near_head: bool, strand: Strand, pos: u32) -> Chain {
+        let qs = if near_head {
+            [2, 12, 27]
+        } else {
+            [n - 42, n - 32, n - 17]
+        };
+        Chain {
+            contig: 0,
+            strand,
+            score: 40,
+            anchors: qs
+                .into_iter()
+                .map(|qpos| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos,
+                    rpos: pos + qpos,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sparse_window_retains_full_ordinary_body() {
+        for n in [150, 300] {
+            for near_head in [true, false] {
+                for strand in [Strand::Plus, Strand::Minus] {
+                    let oriented = sparse_window_body(n);
+                    let mut genome = vec![b'N'; 2000 + n];
+                    genome[1000..1000 + n].copy_from_slice(&oriented);
+                    let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                    let seq = if strand == Strand::Plus {
+                        oriented.clone()
+                    } else {
+                        revcomp(&oriented)
+                    };
+                    let chain = sparse_window_chain(n as u32, near_head, strand, 1000);
+                    let mut out = Vec::new();
+                    let mut budget = EXTEND_BUDGET;
+                    aligner.extend_unspliced_chain(
+                        &seq,
+                        &chain,
+                        false,
+                        &revcomp(&seq),
+                        &mut budget,
+                        &mut out,
+                    );
+                    assert_eq!(out.len(), 1, "{n} {near_head} {strand:?}");
+                    aligner.rescore_strict(&oriented, &mut out[0]);
+                    assert_eq!(
+                        out[0].cigar,
+                        vec![CigarOp::Match(n as u32)],
+                        "{n} {near_head} {strand:?}"
+                    );
+                    assert_eq!(out[0].pos, 1000);
+                    assert_eq!(out[0].strict.score, 2 * n as i32);
+                    assert_eq!(out[0].strict.aligned, n as u32);
+                    assert!(budget <= EXTEND_BUDGET);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_respects_contig_edges() {
+        for n in [150, 300] {
+            for (left, right) in [(0, 1000), (1000, 0)] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let oriented = sparse_window_body(n);
+                        let mut genome = vec![b'N'; left + n + right];
+                        genome[left..left + n].copy_from_slice(&oriented);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let chain = sparse_window_chain(n as u32, near_head, strand, left as u32);
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, left as u32);
+                        assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_negative_technical_tails_remain_clipped() {
+        for n in [150, 300] {
+            for tail_base in [b'N', b'C'] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let body = sparse_window_body(n);
+                        let oriented =
+                            [vec![tail_base; 8], body.clone(), vec![tail_base; 8]].concat();
+                        let m = oriented.len() as u32;
+                        // Concrete A reference flanks make C tails ordinary
+                        // negative-score mismatches, not ambiguous columns.
+                        let mut genome = vec![b'A'; 2000 + n + 16];
+                        genome[1008..1008 + n].copy_from_slice(&body);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let mut chain = sparse_window_chain(m, near_head, strand, 1000);
+                        let qs = if near_head {
+                            [10, 20, 35]
+                        } else {
+                            [m - 50, m - 40, m - 25]
+                        };
+                        for (anchor, q) in chain.anchors.iter_mut().zip(qs) {
+                            anchor.qpos = q;
+                            anchor.rpos = 1000 + q;
+                        }
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, 1008);
+                        assert_eq!(
+                            out[0].cigar,
+                            vec![
+                                CigarOp::SoftClip(8),
+                                CigarOp::Match(n as u32),
+                                CigarOp::SoftClip(8),
+                            ]
+                        );
+                        aligner.rescore_strict(&oriented, &mut out[0]);
+                        assert_eq!(out[0].strict.score, 2 * n as i32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_preserves_neutral_terminal_edits_on_dp_path() {
+        for n in [150, 300] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                for near_head in [true, false] {
+                    for strand in [Strand::Plus, Strand::Minus] {
+                        let mut reference_body = sparse_window_body(n);
+                        let (rb, qb) = if dir == EditDir::Ag {
+                            (b'A', b'G')
+                        } else {
+                            (b'T', b'C')
+                        };
+                        reference_body[0] = rb;
+                        reference_body[n - 1] = rb;
+                        let mut oriented = reference_body.clone();
+                        oriented[0] = qb;
+                        oriented[n - 1] = qb;
+                        // An internal ambiguous query base makes the short
+                        // verification path use DP. Myers endpoint tie policy
+                        // is a separate, pre-existing limitation.
+                        if n <= 256 {
+                            oriented[n / 2] = b'N';
+                        }
+                        let mut genome = vec![b'N'; 2000 + n];
+                        genome[1000..1000 + n].copy_from_slice(&reference_body);
+                        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                        aligner.config.extend.edit_dir = dir;
+                        let seq = if strand == Strand::Plus {
+                            oriented.clone()
+                        } else {
+                            revcomp(&oriented)
+                        };
+                        let chain = sparse_window_chain(n as u32, near_head, strand, 1000);
+                        let mut out = Vec::new();
+                        let mut budget = EXTEND_BUDGET;
+                        aligner.extend_unspliced_chain(
+                            &seq,
+                            &chain,
+                            false,
+                            &revcomp(&seq),
+                            &mut budget,
+                            &mut out,
+                        );
+                        assert_eq!(out.len(), 1);
+                        assert_eq!(out[0].pos, 1000);
+                        assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+                        aligner.rescore_with(&oriented, &mut out[0], dir);
+                        let uncounted = usize::from(n <= 256);
+                        assert_eq!(out[0].strict.score, 2 * (n - 2 - uncounted) as i32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_does_not_bypass_shared_dp_budget() {
+        for n in [150, 300] {
+            let seq = sparse_window_body(n);
+            let mut genome = vec![b'N'; 2000 + n];
+            genome[1000..1000 + n].copy_from_slice(&seq);
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+            let chain = sparse_window_chain(n as u32, true, Strand::Plus, 1000);
+            let mut out = Vec::new();
+            let mut budget = 0;
+            aligner.extend_unspliced_chain(
+                &seq,
+                &chain,
+                false,
+                &revcomp(&seq),
+                &mut budget,
+                &mut out,
+            );
+            assert_eq!(budget, 0);
+            if n <= 256 {
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].cigar, vec![CigarOp::Match(n as u32)]);
+            } else {
+                assert!(out.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_window_geometry_preserves_old_windows_and_bounds() {
+        for n in [60u32, 150, 300, 1024] {
+            let flank = n / 2 + 30;
+            for qs in (0..=n - 15).step_by(7) {
+                for qe in (qs + 15..=n).step_by(11) {
+                    for pos in [0, 1, 1000] {
+                        for extra in [0, 1000] {
+                            let chain = Chain {
+                                contig: 0,
+                                strand: Strand::Plus,
+                                score: 40,
+                                anchors: [qs, qe - 15]
+                                    .into_iter()
+                                    .map(|qpos| crate::seed::Anchor {
+                                        contig: 0,
+                                        strand: Strand::Plus,
+                                        qpos,
+                                        rpos: pos + qpos,
+                                    })
+                                    .collect(),
+                            };
+                            let len = pos + n + extra;
+                            let (start, end) = continuous_extension_window(&chain, 15, n, len);
+                            assert!(start <= pos && end >= pos + n);
+                            assert!(start <= end && end <= len);
+                            assert!(end - start <= n + 2 * flank);
+                            let (rs, re) = chain.ref_span(15);
+                            if qs <= flank && n - qe <= flank {
+                                assert_eq!(
+                                    (start, end),
+                                    (
+                                        rs.saturating_sub(flank),
+                                        (re + flank).min(len).min(rs + n + flank),
+                                    )
+                                );
+                            }
+                            // Displaced reference anchors cannot expand the
+                            // continuous window to the entire reference gap.
+                            let mut displaced = chain.clone();
+                            displaced.anchors[1].rpos += 50000;
+                            let (a, b) =
+                                continuous_extension_window(&displaced, 15, n, len + 50000);
+                            assert!(a <= b && b <= len + 50000);
+                            assert!(b - a <= n + 2 * flank);
+                        }
+                    }
+                }
+            }
+        }
+        let mut chain = sparse_window_chain(150, true, Strand::Plus, 0);
+        for anchor in &mut chain.anchors {
+            anchor.rpos += u32::MAX - 100;
+        }
+        let (a, b) = continuous_extension_window(&chain, 15, 150, u32::MAX);
+        assert!(a <= b && b - a <= 360);
+    }
+
+    // Synthetic rounds isolate scheduling from seed discovery. The complete
+    // round has sparse anchors at the exact ordinary locus; a repeat round has
+    // higher chain scores but poorer base evidence and includes the exact locus
+    // after two competitors. Every short query contains N in its outer tail,
+    // forcing verification to use the shared DP fallback. Long non-N queries
+    // exercise the same budget without the <=256-base Myers path.
+    fn round_competition(
+        strand: Strand,
+        leading: bool,
+        long_non_n: bool,
+    ) -> (Aligner<'static>, Vec<u8>, RoundOutcome, RoundOutcome, u32) {
+        let mut state = 0x9e3779b9u64;
+        let body_len = if long_non_n { 270 } else { 135 };
+        let tail_len = if long_non_n { 30 } else { 15 };
+        let body: Vec<u8> = (0..body_len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let tail = vec![if long_non_n { b'C' } else { b'N' }; tail_len];
+        let oriented = if leading {
+            [tail, body.clone()].concat()
+        } else {
+            [body.clone(), tail].concat()
+        };
+        let read = if strand == Strand::Plus {
+            oriented
+        } else {
+            revcomp(&oriented)
+        };
+        let offset = if leading { tail_len as u32 } else { 0 };
+        let strong_pos = 20000u32;
+        let mut genome = vec![b'A'; 22000];
+        genome[strong_pos as usize..strong_pos as usize + body_len].copy_from_slice(&body);
+        let chain = |pos: u32, score: i32, qs: &[u32]| Chain {
+            contig: 0,
+            strand,
+            score,
+            anchors: qs
+                .iter()
+                .map(|&q| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos: offset + q,
+                    rpos: pos + q,
+                })
+                .collect(),
+        };
+        let complete = RoundOutcome {
+            chains: vec![chain(strong_pos, 60, &[45, 100])],
+            second: 0,
+        };
+        let mut repeats = Vec::new();
+        for i in 0..10 {
+            let pos = 1000 + i * 1000;
+            let target = &mut genome[pos as usize..pos as usize + body_len];
+            target.copy_from_slice(&body);
+            for q in [5, 55, 65, 115, 125] {
+                let rb = target[q];
+                target[q] = b"ACGT"
+                    .iter()
+                    .copied()
+                    .find(|&b| b != rb && crate::extend::exempt_dir(b, rb).is_none())
+                    .unwrap();
+            }
+            repeats.push(chain(pos, 120 - i as i32, &[20, 90]));
+        }
+        repeats.insert(4, chain(strong_pos, 116, &[20, 90]));
+        let repeat = RoundOutcome {
+            second: 119,
+            chains: repeats,
+        };
+        (
+            aligner_on(std::str::from_utf8(&genome).unwrap()),
+            read,
+            complete,
+            repeat,
+            strong_pos,
+        )
+    }
+
+    #[test]
+    fn limited_repeat_round_preserves_complete_path_before_shared_dp() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                for long_non_n in [false, true] {
+                    let (mut aligner, read, complete, repeat, strong_pos) =
+                        round_competition(strand, leading, long_non_n);
+                    let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                    let mut candidates = aligner.extend_genomic_rounds(
+                        &read,
+                        &mins,
+                        Some(&complete),
+                        Some(&repeat),
+                        None,
+                        true,
+                    );
+                    let query = if strand == Strand::Plus {
+                        read.clone()
+                    } else {
+                        revcomp(&read)
+                    };
+                    for p in &mut candidates {
+                        aligner.rescore_strict(&query, p);
+                    }
+                    assert!(
+                        candidates.iter().any(|p| p.pos == strong_pos),
+                        "complete path displaced before arbitration: {strand:?}, \
+                         leading={leading}, long_non_n={long_non_n}"
+                    );
+                    assert_eq!(
+                        candidates.len(),
+                        EXTEND_BUDGET,
+                        "all fixture paths require DP; the budget must remain two"
+                    );
+                    dedup_by_footprint(&mut candidates, read.len());
+                    let budget = crate::index::AnchorBudget {
+                        eligible_anchors: 25000,
+                        retained_anchors: 19000,
+                        omitted_seeds: 1,
+                        repeat_context: None,
+                    };
+                    let result = aligner
+                        .arbitrate_with_budget(&read, candidates, mins.len(), true, Some(budget))
+                        .unwrap();
+                    let (body, tail) = if long_non_n { (270, 30) } else { (135, 15) };
+                    assert_eq!(result.pos, strong_pos);
+                    assert_eq!(result.strand, strand);
+                    assert_eq!(
+                        result.score,
+                        2 * body as i32,
+                        "{strand:?} leading={leading} long_non_n={long_non_n} cigar={:?}",
+                        result.cigar
+                    );
+                    let expected = if leading {
+                        vec![CigarOp::SoftClip(tail), CigarOp::Match(body)]
+                    } else {
+                        vec![CigarOp::Match(body), CigarOp::SoftClip(tail)]
+                    };
+                    assert_eq!(
+                        result.cigar, expected,
+                        "outer technical tail must stay clipped"
+                    );
+                    assert_eq!(result.mapq_of_checked(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_repeat_round_preserves_previous_extension_priority() {
+        let (mut aligner, read, complete, repeat, strong_pos) =
+            round_competition(Strand::Plus, false, false);
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let candidates = aligner.extend_genomic_rounds(
+            &read,
+            &mins,
+            Some(&complete),
+            Some(&repeat),
+            None,
+            false,
+        );
+        assert_eq!(candidates.len(), EXTEND_BUDGET);
+        assert!(
+            candidates.iter().all(|p| p.pos != strong_pos),
+            "scope control: complete search retains its existing scheduling"
+        );
+    }
+
+    #[test]
+    fn limited_repeat_round_can_beat_a_weaker_complete_path() {
+        let (mut aligner, read, complete, repeat, strong_pos) =
+            round_competition(Strand::Plus, true, false);
+        let weak_complete = RoundOutcome {
+            chains: vec![repeat.chains[0].clone()],
+            second: 0,
+        };
+        let strong_repeat = RoundOutcome {
+            chains: vec![complete.chains[0].clone()],
+            second: 0,
+        };
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let mut candidates = aligner.extend_genomic_rounds(
+            &read,
+            &mins,
+            Some(&weak_complete),
+            Some(&strong_repeat),
+            None,
+            true,
+        );
+        assert!(candidates
+            .iter()
+            .any(|p| p.pos == weak_complete.chains[0].ref_span(15).0 - 20));
+        assert!(candidates.iter().any(|p| p.pos == strong_pos));
+        for p in &mut candidates {
+            aligner.rescore_strict(&read, p);
+        }
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, mins.len(), true)
+            .unwrap();
+        assert_eq!(
+            result.pos, strong_pos,
+            "strict evidence, not round origin, decides"
+        );
+        assert_eq!(result.score, 270);
+    }
+
+    #[test]
+    fn limited_repeat_without_complete_chain_keeps_existing_search() {
+        let (mut aligner, read, _, repeat, _) = round_competition(Strand::Minus, false, false);
+        let mins = crate::seed::minimizers(&read, aligner.config.seed);
+        let absent = aligner.extend_genomic_rounds(&read, &mins, None, Some(&repeat), None, true);
+        let empty = RoundOutcome {
+            chains: Vec::new(),
+            second: 0,
+        };
+        let present_empty =
+            aligner.extend_genomic_rounds(&read, &mins, Some(&empty), Some(&repeat), None, true);
+        assert_eq!(absent.len(), EXTEND_BUDGET);
+        assert_eq!(
+            absent.iter().map(|p| (p.pos, &p.cigar)).collect::<Vec<_>>(),
+            present_empty
+                .iter()
+                .map(|p| (p.pos, &p.cigar))
+                .collect::<Vec<_>>()
+        );
+        assert!(aligner
+            .extend_genomic_rounds(&read, &mins, None, None, None, true)
+            .is_empty());
+    }
+
+    #[test]
+    fn round_extension_keeps_eight_loci_and_exact_repeat_ambiguity() {
+        let (fixture, _, _, _, _) = round_competition(Strand::Plus, false, false);
+        let mut body = Vec::new();
+        fixture.index.reference.contigs[0].decode_into(20000, 20135, &mut body);
+        let mut genome = vec![b'N'; 14000];
+        let chains: Vec<Chain> = (0..12)
+            .map(|i| {
+                let pos = 500 + i * 1000;
+                genome[pos as usize..pos as usize + body.len()].copy_from_slice(&body);
+                Chain {
+                    contig: 0,
+                    strand: Strand::Plus,
+                    score: 135,
+                    anchors: [20, 90]
+                        .iter()
+                        .map(|&q| crate::seed::Anchor {
+                            contig: 0,
+                            strand: Strand::Plus,
+                            qpos: q,
+                            rpos: pos + q,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let complete = RoundOutcome {
+            chains,
+            second: 135,
+        };
+        let mins = crate::seed::minimizers(&body, aligner.config.seed);
+        let mut candidates =
+            aligner.extend_genomic_rounds(&body, &mins, Some(&complete), None, None, true);
+        assert_eq!(candidates.len(), MAX_TIED_CANDIDATES);
+        for p in &mut candidates {
+            aligner.rescore_strict(&body, p);
+        }
+        dedup_by_footprint(&mut candidates, body.len());
+        let result = aligner
+            .arbitrate(&body, candidates, mins.len(), true)
+            .unwrap();
+        assert_eq!(result.n_cands, MAX_TIED_CANDIDATES);
+        assert_eq!(
+            result.second_score, result.score,
+            "exact alternatives remain visible"
+        );
+        assert_eq!(result.mapq_of_checked(), 0);
+    }
+
+    #[test]
+    fn limited_repeat_splice_can_beat_continuous_priority_round() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                let mut state = 0x719ac57bu64;
+                let mut genome: Vec<u8> = (0..6000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        b"ACGT"[(state & 3) as usize]
+                    })
+                    .collect();
+                genome[2064..2066].copy_from_slice(b"GT");
+                genome[3998..4000].copy_from_slice(b"AG");
+                genome[2063] = b'T';
+                genome[4000] = b'A';
+                let body = [&genome[2000..2064], &genome[4000..4071]].concat();
+                genome[1000..1135].copy_from_slice(&body);
+                for q in [40, 46, 52, 58, 64, 70, 76, 82] {
+                    let qb = body[q];
+                    genome[1000 + q] = b"ACGT"
+                        .iter()
+                        .copied()
+                        .find(|&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+                        .unwrap();
+                }
+                let offset = if leading { 15 } else { 0 };
+                let query = if leading {
+                    [b"N".repeat(15), body].concat()
+                } else {
+                    [body, b"N".repeat(15)].concat()
+                };
+                let read = if strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let make = |q, r| crate::seed::Anchor {
+                    contig: 0,
+                    strand,
+                    qpos: offset + q,
+                    rpos: r,
+                };
+                let complete = RoundOutcome {
+                    chains: vec![Chain {
+                        contig: 0,
+                        strand,
+                        score: 60,
+                        anchors: vec![make(20, 1020), make(90, 1090)],
+                    }],
+                    second: 0,
+                };
+                let repeat = RoundOutcome {
+                    chains: vec![Chain {
+                        contig: 0,
+                        strand,
+                        score: 120,
+                        anchors: [5, 25, 45, 70, 90, 110]
+                            .iter()
+                            .map(|&q| make(q, if q < 64 { 2000 + q } else { 4000 + q - 64 }))
+                            .collect(),
+                    }],
+                    second: 0,
+                };
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let mut candidates = aligner.extend_genomic_rounds(
+                    &read,
+                    &mins,
+                    Some(&complete),
+                    Some(&repeat),
+                    None,
+                    true,
+                );
+                assert!(
+                    candidates.iter().any(|p| p.pos == 1000),
+                    "priority proposal must remain"
+                );
+                for p in &mut candidates {
+                    aligner.rescore_strict(&query, p);
+                }
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner
+                    .arbitrate(&read, candidates, mins.len(), true)
+                    .unwrap();
+                let mut expected = vec![
+                    CigarOp::Match(64),
+                    CigarOp::RefSkip(1936),
+                    CigarOp::Match(71),
+                ];
+                if leading {
+                    expected.insert(0, CigarOp::SoftClip(15));
+                } else {
+                    expected.push(CigarOp::SoftClip(15));
+                }
+                assert_eq!(
+                    result.pos, 2000,
+                    "stronger spliced second-round path must compete"
+                );
+                assert_eq!(result.cigar, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn repeat_budget_retains_repeat_paths_without_confidence_or_technical_tail() {
+        let mut state = 0x71f3ab92u64;
+        let body: Vec<u8> = (0..135)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let unit = [b"N".repeat(50), body.clone(), b"N".repeat(50)].concat();
+        let genome = unit.repeat(700);
+        let mut index = Index::build(
+            ref_from(std::str::from_utf8(&genome).unwrap()),
+            SeedParams { k: 15, w: 5 },
+        );
+        index.freq_cutoff = 1; // exact repeat seeds require the existing mid-occ round
+        let mut aligner = Aligner::new(&index, AlignConfig::rna_default());
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading in [false, true] {
+                let query = if leading {
+                    [b"C".repeat(15), body.clone()].concat()
+                } else {
+                    [body.clone(), b"C".repeat(15)].concat()
+                };
+                let read = if strand == Strand::Plus {
+                    query
+                } else {
+                    revcomp(&query)
+                };
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let (all, _) = crate::index::collect_anchors(&index, &mins, 150, 15, MID_OCC_CAP);
+                assert!(all.len() > MID_ROUND_MAX_ANCHORS);
+                let (result, cache) = aligner.align_read_full(&read);
+                let result = result.expect("budgeted whole-seed search must retain repeat paths");
+                let budget = cache.unwrap().seed_budget.unwrap();
+                assert_eq!(budget.eligible_anchors, all.len());
+                assert!(budget.retained_anchors <= MID_ROUND_MAX_ANCHORS);
+                assert!(budget.limited());
+                assert_eq!(result.strand, strand);
+                assert_eq!(result.mapq_of_checked(), 0);
+                let expected = if leading {
+                    vec![CigarOp::SoftClip(15), CigarOp::Match(135)]
+                } else {
+                    vec![CigarOp::Match(135), CigarOp::SoftClip(15)]
+                };
+                assert_eq!(
+                    result.cigar, expected,
+                    "technical sequence must stay clipped"
+                );
+                assert_eq!(result.pos % unit.len() as u32, 50);
+            }
+        }
+    }
+
+    #[test]
+    fn limited_seed_search_cannot_gain_confidence_from_a_single_path_or_mate() {
+        let genome = "ACGT".repeat(500);
+        let mut aligner = aligner_on(&genome);
+        let read = genome.as_bytes()[100..250].to_vec();
+        let mut p = placement(0, 100, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut p);
+        let budget = crate::index::AnchorBudget {
+            eligible_anchors: 25000,
+            retained_anchors: 19000,
+            omitted_seeds: 3,
+            repeat_context: None,
+        };
+        let result = aligner
+            .arbitrate_with_budget(&read, vec![p.clone()], 30, true, Some(budget))
+            .unwrap();
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert!(crate::evidence::evidence_tag(&result).contains("seed_search=limited"));
+        let mut overridden = result;
+        overridden.mapq_override = Some(60);
+        assert_eq!(
+            overridden.mapq_of_checked(),
+            0,
+            "later override cannot erase truncation"
+        );
+
+        // An empty independent pool must still carry search incompleteness
+        // into the seed-free mate-window fallback and its evidence.
+        let cache = CachedPlacements {
+            placements: Vec::new(),
+            n_seeds: 30,
+            genomic_any: false,
+            seed_budget: Some(budget),
+        };
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert!(pool.seed_budget.unwrap().limited());
+        let mut observed = None;
+        let mate = aligner
+            .align_read_with_mate_observed(&read, 0, 100, Some(&cache), Some(&mut observed))
+            .unwrap();
+        assert_eq!(mate.mapq_of_checked(), 0);
+        assert!(mate.rescued);
+        assert!(observed.unwrap().seed_budget.unwrap().limited());
+    }
+
+    #[test]
+    fn diagnostic_96_98_99_preserves_evidence_without_promoting_either_mate() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [96, 98, 99] {
+                let mut p = placement(
+                    0,
+                    100,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(150 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(150), &mut p);
+                let cache = CachedPlacements {
+                    placements: vec![p],
+                    n_seeds: 5,
+                    genomic_any: true,
+                    seed_budget: None,
+                };
+                let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+                assert_eq!(pool.candidates.len(), 1);
+                assert_eq!(pool.candidates[0].informative_query_bases, covered);
+                assert_eq!(
+                    pool.candidates[0].eligibility,
+                    if covered == 99 {
+                        "eligible"
+                    } else {
+                        "below_coverage"
+                    }
+                );
+                let query = vec![if strand == Strand::Plus { b'A' } else { b'T' }; 150];
+                let result = aligner.arbitrate(&query, cache.placements.clone(), 5, true);
+                assert_eq!(result.is_some(), covered == 99);
+            }
+        }
+    }
+
+    #[test]
+    fn paired_fragment_diagnostic_52_53_uses_effective_coverage_in_both_pools() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [52, 53] {
+                let mut p = placement(
+                    0,
+                    100,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(80 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(80), &mut p);
+                let cache = CachedPlacements {
+                    placements: vec![p],
+                    n_seeds: 5,
+                    genomic_any: true,
+                    seed_budget: None,
+                };
+                let query = vec![if strand == Strand::Plus { b'A' } else { b'T' }; 80];
+                let result = aligner.arbitrate(&query, cache.placements.clone(), 5, true);
+                assert_eq!(result.is_some(), covered == 53);
+                let pool = cache.diagnostic_pool(aligner.index, 80, "independent");
+                let raw = crate::fastq::FastqRecord {
+                    name: b"boundary".to_vec(),
+                    seq: vec![b'A'; 150],
+                    qual: vec![b'I'; 150],
+                };
+                let fragment = crate::fragment::FragmentEvidence {
+                    fragment_length: 80,
+                    overlap_bases: 80,
+                    viable_offsets: 1,
+                    adapter_family: "truseq",
+                    adapter_bases_r1: 33,
+                    adapter_bases_r2: 33,
+                };
+                let mut bytes = Vec::new();
+                crate::diagnostics::write_row_with_fragment(
+                    &mut bytes,
+                    &raw,
+                    Some(1),
+                    result.is_some(),
+                    pool.clone(),
+                    Some(pool),
+                    Some(fragment),
+                )
+                .unwrap();
+                let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(row["schema_version"], 2);
+                assert_eq!(row["read_length"], 150);
+                assert_eq!(row["minimum_primary_query_bases"], 99);
+                assert_eq!(row["effective_read_length"], 80);
+                assert_eq!(row["effective_minimum_primary_query_bases"], 53);
+                for name in ["independent", "mate_attempt"] {
+                    assert_eq!(row[name]["scored_candidates"], 1);
+                    assert_eq!(row[name]["excluded_nonpositive"], 0);
+                    assert_eq!(row[name]["excluded_invalid_geometry"], 0);
+                    let c = &row[name]["candidates"][0];
+                    assert_eq!(c["informative_query_bases"], covered);
+                    assert_eq!(c["common_score"], 2 * covered);
+                    assert_eq!(
+                        c["eligibility"],
+                        if covered == 53 {
+                            "eligible"
+                        } else {
+                            "below_coverage"
+                        }
+                    );
+                    let expected = match (strand, covered) {
+                        (Strand::Plus, 52) => "52M98S",
+                        (Strand::Plus, _) => "53M97S",
+                        (Strand::Minus, 52) => "70S52M28S",
+                        (Strand::Minus, _) => "70S53M27S",
+                    };
+                    assert_eq!(c["cigar"], expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_geometry_scores_and_informative_coverage_are_not_primary_overrides() {
+        let mut aligner = aligner_on(&"A".repeat(2000));
+        let mut read = b"A".repeat(98);
+        read.extend_from_slice(&b"N".repeat(52));
+        let mut ambiguous = placement(0, 100, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut ambiguous);
+        let mut deleted = placement(
+            0,
+            100,
+            &[CigarOp::Match(98), CigarOp::Del(20), CigarOp::SoftClip(52)],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut deleted);
+        let mut skipped = placement(
+            0,
+            100,
+            &[
+                CigarOp::Match(49),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(49),
+                CigarOp::SoftClip(52),
+            ],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut skipped);
+        let mut nonpositive = ambiguous.clone();
+        nonpositive.strict.score = 0;
+        let mut internal_clip = ambiguous.clone();
+        internal_clip.cigar = vec![
+            CigarOp::Match(70),
+            CigarOp::SoftClip(10),
+            CigarOp::Match(70),
+        ];
+        let mut out_of_bounds = ambiguous.clone();
+        out_of_bounds.pos = 1950;
+        let mut wrong_length = ambiguous.clone();
+        wrong_length.cigar = vec![CigarOp::Match(149)];
+        let mut insertion_only = ambiguous.clone();
+        insertion_only.cigar = vec![CigarOp::Ins(150)];
+        let cache = CachedPlacements {
+            placements: vec![
+                ambiguous,
+                deleted,
+                skipped,
+                nonpositive,
+                internal_clip,
+                out_of_bounds,
+                wrong_length,
+                insertion_only,
+            ],
+            n_seeds: 5,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert_eq!(pool.candidates.len(), 3);
+        assert_eq!(pool.excluded_nonpositive, 1);
+        assert_eq!(pool.excluded_invalid_geometry, 4);
+        assert!(pool
+            .candidates
+            .iter()
+            .all(|c| c.informative_query_bases == 98 && c.eligibility == "below_coverage"));
+    }
+
+    #[test]
+    fn diagnostic_different_locus_short_leader_preserves_eligible_fallback_and_ambiguity() {
+        let mut genome = b"A".repeat(2000);
+        genome[1000..1020].fill(b'C');
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let query = b"A".repeat(150);
+        let mut short = placement(0, 100, &[CigarOp::Match(98), CigarOp::SoftClip(52)]);
+        let mut eligible = placement(0, 1000, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&query, &mut short);
+        aligner.rescore_strict(&query, &mut eligible);
+        let mut placements = vec![eligible, short];
+        sort_placements(&mut placements);
+        let cache = CachedPlacements {
+            placements: placements.clone(),
+            n_seeds: 10,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let before = aligner
+            .arbitrate(&query, placements.clone(), 10, true)
+            .unwrap();
+        let pool = cache.diagnostic_pool(aligner.index, 150, "independent");
+        assert_eq!(pool.candidates[0].eligibility, "below_coverage");
+        assert_eq!(pool.candidates[1].eligibility, "eligible");
+        let after = aligner.arbitrate(&query, placements, 10, true).unwrap();
+        assert_eq!(
+            (
+                before.pos,
+                before.score,
+                before.second_score,
+                before.mapq_of_checked()
+            ),
+            (
+                after.pos,
+                after.score,
+                after.second_score,
+                after.mapq_of_checked()
+            )
+        );
+        assert_eq!(after.pos, 1000);
+        assert_eq!(after.second_score, 196);
+        assert_eq!(after.mapq_of_checked(), 0);
+    }
+
+    #[test]
+    fn right_split_rescue_updates_position_and_short_tail_gate() {
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        for tail_len in [10, 40] {
+            let seq = format!(
+                "{}{}GT{}AG{}{}",
+                "A".repeat(20),
+                "C".repeat(40),
+                "T".repeat(96),
+                "G".repeat(tail_len),
+                "T".repeat(60 - tail_len)
+            );
+            let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+            let read = format!("{}{}", "C".repeat(40), "G".repeat(tail_len));
+            // Reextension shifts the body start from 23 to 20. The short-tail
+            // mismatch gate must also use that new start.
+            let aln = ReadAlignment {
+                pos: 23,
+                cigar: vec![CigarOp::Match(40), CigarOp::SoftClip(tail_len as u32)],
+                ..Default::default()
+            };
+            let rescued = aligner.apply_split_rescue(read.as_bytes(), aln);
+            assert_eq!(rescued.pos, 20, "tail length {tail_len}: {rescued:?}");
+            assert_eq!(
+                rescued.cigar,
+                vec![
+                    CigarOp::Match(40),
+                    CigarOp::RefSkip(100),
+                    CigarOp::Match(tail_len as u32)
+                ]
+            );
+            assert_eq!(rescued.junctions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_split_keeps_original_primary() {
+        let seq = format!(
+            "{}{}GT{}AG{}",
+            "A".repeat(20),
+            "C".repeat(40),
+            "T".repeat(96),
+            "G".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}AAAA{}", "C".repeat(40), "G".repeat(40));
+        let original = vec![CigarOp::Match(40), CigarOp::SoftClip(44)];
+        let aln = ReadAlignment {
+            pos: 20,
+            cigar: original.clone(),
+            score: 80,
+            ..Default::default()
+        };
+        let result = aligner.apply_split_rescue(read.as_bytes(), aln);
+        assert_eq!(result.pos, 20);
+        assert_eq!(result.cigar, original);
+        assert_eq!(result.score, 80);
+        assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn marginal_short_tail_rescue_does_not_replace_the_primary() {
+        // AT..AC intron of 22kb. Moving two already matched body bases
+        // permits six clipped bases to match, but the existing signal/length
+        // score improves by only three: below the split rewrite cost.
+        let seq = format!(
+            "{}{}AT{}ACATGGGGGG{}",
+            "A".repeat(20),
+            "C".repeat(38),
+            "T".repeat(21996),
+            "A".repeat(60)
+        );
+        let read = format!("{}ATGGGGGGCC", "C".repeat(38));
+        let mut aligner = aligner_on(&seq);
+        let original = vec![CigarOp::Match(40), CigarOp::SoftClip(8)];
+        let aln = ReadAlignment {
+            pos: 20,
+            score: 80,
+            cigar: original.clone(),
+            ..Default::default()
+        };
+        let result = aligner.apply_split_rescue(read.as_bytes(), aln);
+        assert_eq!(
+            result.cigar, original,
+            "weak tail must not create a discovery: {result:?}"
+        );
+        assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn span_rescue_requires_sequence_gain_beyond_the_junction_prior() {
+        // Both the contiguous GT and the acceptor GT exactly explain the
+        // same two bases. Library support is a prior, not extra read evidence.
+        let seq = format!(
+            "{}GT{}AGGT{}",
+            "C".repeat(60),
+            "T".repeat(96),
+            "A".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}GT", "C".repeat(40));
+        let original = vec![CigarOp::Match(42)];
+        let aln = ReadAlignment {
+            pos: 20,
+            score: 84,
+            cigar: original.clone(),
+            ..Default::default()
+        };
+        let result = aligner.apply_span_rescue(read.as_bytes(), aln);
+        assert_eq!(result.cigar, original);
+        assert!(result.junctions.is_empty());
+    }
+
+    #[test]
+    fn supported_span_rescue_keeps_a_genuine_sequence_improvement() {
+        let seq = format!(
+            "{}GT{}AGGG{}",
+            "C".repeat(60),
+            "T".repeat(96),
+            "A".repeat(60)
+        );
+        let j = Junction {
+            contig: 0,
+            start: 60,
+            end: 160,
+            minus_strand: false,
+        };
+        let mut aligner = aligner_on(&seq).with_lib(Arc::new(JunctionLib::build([j, j])));
+        let read = format!("{}GG", "C".repeat(40));
+        let aln = ReadAlignment {
+            pos: 20,
+            cigar: vec![CigarOp::Match(42)],
+            ..Default::default()
+        };
+        let result = aligner.apply_span_rescue(read.as_bytes(), aln);
+        assert_eq!(
+            result.cigar,
+            vec![CigarOp::Match(40), CigarOp::RefSkip(100), CigarOp::Match(2)]
+        );
+        assert_eq!(result.junctions.len(), 1);
+    }
+
+    #[test]
+    fn rescue_margin_uses_strict_scores_in_both_read_orientations() {
+        let seq = format!("{}GC{}AG{}", "C".repeat(60), "T".repeat(96), "G".repeat(60));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for tail in [5, 6] {
+                let query = format!("{}{}", "C".repeat(40), "G".repeat(tail)).into_bytes();
+                let read = if strand == Strand::Minus {
+                    revcomp(&query)
+                } else {
+                    query
+                };
+                let mut aligner = aligner_on(&seq);
+                let primary = ReadAlignment {
+                    pos: 20,
+                    strand,
+                    score: 80,
+                    cigar: vec![CigarOp::Match(40), CigarOp::SoftClip(tail as u32)],
+                    ..Default::default()
+                };
+                let candidate = ReadAlignment {
+                    pos: 20,
+                    strand,
+                    score: 10000, // arbitrary producer domain
+                    cigar: vec![
+                        CigarOp::Match(40),
+                        CigarOp::RefSkip(100),
+                        CigarOp::Match(tail as u32),
+                    ],
+                    junctions: vec![RefinedJunction {
+                        junction: Junction {
+                            contig: 0,
+                            start: 60,
+                            end: 160,
+                            minus_strand: strand == Strand::Minus,
+                        },
+                        signal: SpliceSignal::GcAg,
+                        known_support: 0,
+                    }],
+                    ..Default::default()
+                };
+                let result = aligner.select_rescue(&read, primary, candidate);
+                if tail == 5 {
+                    // 90 base score + 2 motif - 8 length = 84. The four-point
+                    // improvement only ties the existing rewrite cost.
+                    assert!(result.junctions.is_empty());
+                    assert_eq!(result.score, 80);
+                } else {
+                    assert_eq!(result.junctions.len(), 1);
+                    assert_eq!(result.score, 86);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_chain_keeps_the_contiguous_interpretation_of_each_exon() {
+        // A repeat-derived first anchor joins a much stronger downstream
+        // segment. Splice construction must not hide a full-length contiguous
+        // placement at that segment; strict arbitration, not generation
+        // order or mate fallback, decides which explanation wins.
+        let mut state = 0x6a09e667u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut genome = random(16000);
+        let mut read = random(150);
+        read[47..51].copy_from_slice(b"AGGC");
+        genome[12000..12150].copy_from_slice(&read);
+        genome[2000..2049].copy_from_slice(&read[..49]);
+        genome[2000..2008].fill(b'N');
+        genome[2012] = b"ACGT".iter().copied().find(|&b| b != read[12]).unwrap();
+        genome[2023] = b"ACGT".iter().copied().find(|&b| b != read[23]).unwrap();
+        genome[2049..2051].copy_from_slice(b"GC");
+        // One A>G substitution at the correct locus.
+        genome[12030] = b'A';
+        read[30] = b'G';
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut anchors = vec![crate::seed::Anchor {
+            qpos: 35,
+            rpos: 2035,
+            contig: 0,
+            strand: Strand::Plus,
+        }];
+        for q in [53, 60, 83, 95, 106, 118] {
+            anchors.push(crate::seed::Anchor {
+                qpos: q,
+                rpos: 12000 + q,
+                contig: 0,
+                strand: Strand::Plus,
+            });
+        }
+        let chain = Chain {
+            contig: 0,
+            strand: Strand::Plus,
+            anchors,
+            score: 90,
+        };
+        let mut candidates = Vec::new();
+        aligner.extend_chain(
+            &read,
+            &crate::seed::minimizers(&read, aligner.config.seed),
+            &chain,
+            true,
+            false,
+            &revcomp(&read),
+            &mut 8,
+            false,
+            &mut candidates,
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|p| p.cigar.iter().any(|op| matches!(op, CigarOp::RefSkip(_)))),
+            "fixture must also produce a spliced interpretation"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|p| p.pos == 12000 && p.cigar == vec![CigarOp::Match(150)]),
+            "successful splicing must not suppress the contiguous candidate"
+        );
+        for p in &mut candidates {
+            aligner.rescore_strict(&read, p);
+        }
+        dedup_by_footprint(&mut candidates, read.len());
+        sort_placements(&mut candidates);
+        assert_eq!(candidates[0].pos, 12000);
+        assert_eq!(candidates[0].cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(candidates[0].strict.score, 294);
     }
 
     #[test]
@@ -2222,7 +4105,11 @@ mod tests {
         let mut ins_read: Vec<u8> = read[..24].to_vec();
         ins_read.extend_from_slice(b"TT");
         ins_read.extend_from_slice(&read[24..48]);
-        let mut p = placement(0, 0, &[CigarOp::Match(24), CigarOp::Ins(2), CigarOp::Match(24)]);
+        let mut p = placement(
+            0,
+            0,
+            &[CigarOp::Match(24), CigarOp::Ins(2), CigarOp::Match(24)],
+        );
         aln.rescore_strict(&ins_read, &mut p);
         assert_eq!(p.strict.score, 48 * 2 - (4 + 2 * 2));
         assert_eq!(p.strict.ins, 1);
@@ -2245,10 +4132,13 @@ mod tests {
             r
         };
         let n = intron.len() as u32;
-        let mut p = placement(0, start, &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)]);
+        let mut p = placement(
+            0,
+            start,
+            &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)],
+        );
         aln.rescore_strict(&read, &mut p);
-        let expected = 40 * 2 + SpliceParams::default().gt_ag_bonus
-            - intron_length_penalty(n);
+        let expected = 40 * 2 + SpliceParams::default().gt_ag_bonus - intron_length_penalty(n);
         assert_eq!(p.strict.score, expected);
         assert_eq!(p.strict.n_splice, 1);
         assert_eq!(p.strict.aligned, 40);
@@ -2256,7 +4146,11 @@ mod tests {
         // (seen as CT..AC from its side); the strict score must not depend
         // on which strand the read was sequenced from.
         let read_rc = revcomp(&read);
-        let mut pm = placement(0, start, &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)]);
+        let mut pm = placement(
+            0,
+            start,
+            &[CigarOp::Match(20), CigarOp::RefSkip(n), CigarOp::Match(20)],
+        );
         pm.strand = Strand::Minus;
         aln.rescore_strict(&revcomp(&read_rc), &mut pm);
         assert_eq!(pm.strict.score, expected);
@@ -2268,7 +4162,7 @@ mod tests {
         let read: Vec<u8> = b"ACGT".repeat(13)[..50].to_vec();
         let p = placement(0, 0, &[CigarOp::Match(50)]);
         assert_eq!(aln.exact_kmer_support(&read, &p), 3); // 0,15,30
-        // One mismatch in the second 15-mer window pushes the scan past it.
+                                                          // One mismatch in the second 15-mer window pushes the scan past it.
         let mut r2 = read.clone();
         r2[20] = if r2[20] == b'A' { b'C' } else { b'A' };
         let n = aln.exact_kmer_support(&r2, &p);
@@ -2289,7 +4183,15 @@ mod tests {
         other_strand.strand = Strand::Minus;
         assert_eq!(footprint_overlap(&a, &other_strand), 0.0);
         // Spliced placements overlap on M blocks only.
-        let spliced = placement(0, 0, &[CigarOp::Match(50), CigarOp::RefSkip(1000), CigarOp::Match(50)]);
+        let spliced = placement(
+            0,
+            0,
+            &[
+                CigarOp::Match(50),
+                CigarOp::RefSkip(1000),
+                CigarOp::Match(50),
+            ],
+        );
         let head = placement(0, 0, &[CigarOp::Match(50)]);
         assert!(footprint_overlap(&spliced, &head) > 0.9);
     }
@@ -2303,11 +4205,1009 @@ mod tests {
         let mut c = placement(0, 5000, &[CigarOp::Match(100)]);
         c.strict.score = 100; // different locus
         let mut ps = vec![a, b.clone(), c];
-        dedup_by_footprint(&mut ps);
+        dedup_by_footprint(&mut ps, 100);
         assert_eq!(ps.len(), 2);
         assert_eq!(ps[0].strict.score, 200);
         assert_eq!(ps[0].pos, b.pos);
         assert_eq!(ps[1].strict.score, 100);
+    }
+
+    #[test]
+    fn coverage_short_same_locus_cannot_erase_full_fallback() {
+        let mut genome = b"A".repeat(1000);
+        genome[..30].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 70, &[CigarOp::SoftClip(70), CigarOp::Match(80)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        assert_eq!((full.strict.score, short.strict.score), (120, 160));
+        assert_eq!(footprint_overlap(&full, &short), 1.0);
+        let mut candidates = vec![short, full];
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("an ineligible short hit must not delete the full placement");
+        assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(result.score, 120);
+        assert_eq!(result.n_cands, 1);
+        assert!(result.mapq_of_checked() < crate::mapq::PILEUP_GATE);
+    }
+
+    #[test]
+    fn coverage_disjoint_short_hit_allows_fallback_but_retains_ambiguity() {
+        let mut genome = b"A".repeat(1000);
+        genome[500..530].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 500, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 0, &[CigarOp::Match(80), CigarOp::SoftClip(70)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        let mut candidates = vec![full, short];
+        dedup_by_footprint(&mut candidates, read.len());
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("continue past a disjoint coverage-ineligible score leader");
+        assert_eq!(result.pos, 500);
+        assert_eq!(result.score, 120);
+        assert_eq!(result.second_score, 160);
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert_eq!(result.n_cands, 1);
+    }
+
+    #[test]
+    fn coverage_full_nonpositive_candidate_is_not_a_fallback() {
+        let mut aligner = aligner_on(&"C".repeat(1000));
+        let read = b"A".repeat(150);
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut full);
+        assert_eq!(full.strict.score, -600);
+        assert!(aligner
+            .arbitrate(&read, vec![full.clone()], 10, true)
+            .is_none());
+        full.strict.score = 0;
+        assert!(aligner.arbitrate(&read, vec![full], 10, true).is_none());
+    }
+
+    #[test]
+    fn coverage_boundary_counts_query_evidence_in_both_orientations() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        for strand in [Strand::Plus, Strand::Minus] {
+            for covered in [98, 99] {
+                let mut p = placement(
+                    0,
+                    0,
+                    &[CigarOp::Match(covered), CigarOp::SoftClip(150 - covered)],
+                );
+                p.strand = strand;
+                aligner.rescore_strict(&b"A".repeat(150), &mut p);
+                let read = if strand == Strand::Plus { b'A' } else { b'T' };
+                let result = aligner.arbitrate(&vec![read; 150], vec![p], 10, true);
+                assert_eq!(result.is_some(), covered == 99);
+            }
+        }
+        let mut with_insertion = placement(
+            0,
+            0,
+            &[CigarOp::Match(90), CigarOp::Ins(9), CigarOp::SoftClip(51)],
+        );
+        aligner.rescore_strict(&b"A".repeat(150), &mut with_insertion);
+        assert!(aligner
+            .arbitrate(&b"A".repeat(150), vec![with_insertion], 10, true)
+            .is_some());
+    }
+
+    #[test]
+    fn coverage_deletions_skips_and_ambiguous_columns_do_not_fill_the_read() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let read = b"A".repeat(150);
+        for gap in [CigarOp::Del(50), CigarOp::RefSkip(50)] {
+            let mut p = placement(0, 0, &[CigarOp::Match(98), gap, CigarOp::SoftClip(52)]);
+            aligner.rescore_strict(&read, &mut p);
+            assert!(p.strict.score > 0);
+            assert!(
+                aligner.arbitrate(&read, vec![p], 10, true).is_none(),
+                "reference gaps cannot satisfy query coverage"
+            );
+        }
+        let mut ambiguous_read = b"A".repeat(98);
+        ambiguous_read.extend_from_slice(&b"N".repeat(52));
+        let mut p = placement(0, 0, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&ambiguous_read, &mut p);
+        assert!(p.strict.score > 0);
+        assert!(aligner
+            .arbitrate(&ambiguous_read, vec![p], 10, true)
+            .is_none());
+    }
+
+    #[test]
+    fn coverage_hyper_rescoring_can_promote_a_retained_full_candidate() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let mut read = b"A".repeat(80);
+        read.extend_from_slice(&b"G".repeat(70));
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 0, &[CigarOp::Match(80), CigarOp::SoftClip(70)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        assert!(full.strict.score < 0 && hyper_direction(&full).is_some());
+        let mut candidates = vec![full, short];
+        dedup_by_footprint(&mut candidates, read.len());
+        aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+        let result = aligner
+            .arbitrate(&read, candidates, 10, true)
+            .expect("retain a full candidate as hyperediting evidence before dedup");
+        assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
+        assert_eq!(result.ea_ag, 70);
+    }
+
+    #[test]
+    fn coverage_mate_window_without_eligible_candidate_returns_none() {
+        let mut aligner = aligner_on(&"A".repeat(1000));
+        let mut read = b"A".repeat(98);
+        read.extend_from_slice(&b"G".repeat(52));
+        let mut win = aligner
+            .mate_window_placement(&read, 0, 100)
+            .expect("reduced-alphabet window search supplies a partial candidate");
+        aligner.rescore_strict(&read, &mut win);
+        assert!(!win.primary_eligible(read.len()));
+        let cache = CachedPlacements {
+            placements: Vec::new(),
+            n_seeds: 0,
+            genomic_any: false,
+            seed_budget: None,
+        };
+        assert!(aligner
+            .align_read_with_mate(&read, 0, 100, Some(&cache))
+            .is_none());
+        let mut evidence = None;
+        assert!(aligner
+            .align_read_with_mate_observed(&read, 0, 100, Some(&cache), Some(&mut evidence))
+            .is_none());
+        let pool = evidence.unwrap();
+        assert_eq!(pool.stage, "mate_window_rejected");
+        assert!(!pool.candidates.is_empty());
+        assert!(pool
+            .candidates
+            .iter()
+            .all(|p| p.eligibility == "below_coverage"));
+        let good = aligner
+            .align_read_with_mate(&b"A".repeat(150), 0, 100, Some(&cache))
+            .expect("eligible mate-window placements still work");
+        assert!(good.rescued);
+        assert_eq!(good.cigar, vec![CigarOp::Match(150)]);
+        assert!(good.mapq_of_checked() <= crate::mapq::PILEUP_GATE);
+        let mut evidence = None;
+        let observed = aligner
+            .align_read_with_mate_observed(
+                &b"A".repeat(150),
+                0,
+                100,
+                Some(&cache),
+                Some(&mut evidence),
+            )
+            .unwrap();
+        assert_eq!(observed.cigar, good.cigar);
+        assert_eq!(observed.pos, good.pos);
+        assert_eq!(observed.mapq_of_checked(), good.mapq_of_checked());
+        assert_eq!(evidence.unwrap().stage, "mate_window_arbitration");
+        let mut evidence = None;
+        assert!(aligner
+            .align_read_with_mate_observed(&[], 0, 100, Some(&cache), Some(&mut evidence))
+            .is_none());
+        let pool = evidence.unwrap();
+        assert_eq!(pool.stage, "mate_window_no_proposal");
+        assert!(pool.candidates.is_empty());
+    }
+
+    #[test]
+    fn coverage_dedup_fallback_is_independent_of_generator_order() {
+        let mut genome = b"A".repeat(1000);
+        genome[..30].fill(b'C');
+        let read = b"A".repeat(150);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut full = placement(0, 0, &[CigarOp::Match(150)]);
+        let mut short = placement(0, 70, &[CigarOp::SoftClip(70), CigarOp::Match(80)]);
+        let mut alternative = placement(0, 500, &[CigarOp::Match(99), CigarOp::SoftClip(51)]);
+        aligner.rescore_strict(&read, &mut full);
+        aligner.rescore_strict(&read, &mut short);
+        aligner.rescore_strict(&read, &mut alternative);
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let pool = [full.clone(), short.clone(), alternative.clone()];
+            let mut candidates = order.map(|i| pool[i].clone()).to_vec();
+            dedup_by_footprint(&mut candidates, read.len());
+            let result = aligner
+                .arbitrate(&read, candidates, 10, true)
+                .expect("eligible");
+            assert_eq!(result.pos, 500);
+            assert_eq!(result.second_score, 160);
+            assert_eq!(result.n_cands, 2);
+        }
+    }
+
+    #[test]
+    fn neutral_same_locus_ties_keep_more_query_evidence_in_any_order() {
+        let mut genome = b"A".repeat(1000);
+        genome[649] = b'T';
+        let mut query = b"A".repeat(150);
+        query[149] = b'C';
+        for strand in [Strand::Plus, Strand::Minus] {
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let mut full = placement(0, 500, &[CigarOp::Match(150)]);
+            let mut clipped = placement(0, 500, &[CigarOp::Match(147), CigarOp::SoftClip(3)]);
+            full.strand = strand;
+            clipped.strand = strand;
+            aligner.rescore_strict(&query, &mut full);
+            aligner.rescore_strict(&query, &mut clipped);
+            assert_eq!(full.strict.score, clipped.strict.score);
+            assert_eq!(full.strict.mm, clipped.strict.mm);
+            for mut candidates in [
+                vec![clipped.clone(), full.clone()],
+                vec![full.clone(), clipped.clone()],
+            ] {
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+                assert_eq!(
+                    result.cigar, full.cigar,
+                    "a same-score clipped tie must not erase terminal edit evidence"
+                );
+                assert_eq!(result.ea_tc, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn splice_competition_retains_neutral_terminal_edit_on_both_mates() {
+        let mut state = 0x517cc1b7u64;
+        let mut genome: Vec<u8> = (0..4000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        genome[1078..1080].copy_from_slice(b"CT");
+        genome[2998..3000].copy_from_slice(b"AC");
+        genome[1002] = b'T';
+        let mut query = b"N".repeat(8);
+        query.extend_from_slice(&genome[1000..1078]);
+        query.extend_from_slice(&genome[3000..3064]);
+        query[10] = b'C';
+        for strand in [Strand::Plus, Strand::Minus] {
+            let junction = Junction {
+                contig: 0,
+                start: 1078,
+                end: 3000,
+                minus_strand: true,
+            };
+            let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap())
+                .with_lib(Arc::new(JunctionLib::build([junction])));
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let anchors = [(11, 1003, 72), (86, 3000, 64)]
+                .into_iter()
+                .flat_map(|(q, r, span)| {
+                    (0..span - 15)
+                        .step_by(4)
+                        .map(move |offset| crate::seed::Anchor {
+                            contig: 0,
+                            strand,
+                            qpos: q + offset,
+                            rpos: r + offset,
+                        })
+                })
+                .collect();
+            let chain = Chain {
+                contig: 0,
+                strand,
+                anchors,
+                score: 90,
+            };
+            let hit = aligner.try_spliced(&read, &revcomp(&read), &chain).unwrap();
+            assert_eq!(hit.pos, 1000);
+            assert_eq!(
+                hit.cigar,
+                vec![
+                    CigarOp::SoftClip(8),
+                    CigarOp::Match(78),
+                    CigarOp::RefSkip(1922),
+                    CigarOp::Match(64),
+                ]
+            );
+            let mut full = Placement::from_genomic(
+                0,
+                hit.pos,
+                strand,
+                hit.cigar,
+                hit.junctions,
+                90,
+                hit.score,
+            );
+            let mut clipped = Placement::from_genomic(
+                0,
+                1003,
+                strand,
+                vec![
+                    CigarOp::SoftClip(11),
+                    CigarOp::Match(75),
+                    CigarOp::RefSkip(1922),
+                    CigarOp::Match(64),
+                ],
+                full.junctions.clone(),
+                90,
+                0,
+            );
+            aligner.rescore_strict(&query, &mut full);
+            aligner.rescore_strict(&query, &mut clipped);
+            assert_eq!(full.strict.score, clipped.strict.score);
+            assert_eq!(full.strict.ea_tc, 1);
+            assert_eq!(clipped.strict.ea_tc, 0);
+            for mut candidates in [
+                vec![full.clone(), clipped.clone()],
+                vec![clipped.clone(), full.clone()],
+            ] {
+                dedup_by_footprint(&mut candidates, read.len());
+                let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+                assert_eq!(result.pos, full.pos);
+                assert_eq!(result.cigar, full.cigar);
+                assert_eq!(result.ea_tc, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn intron_pool_proposal_survives_three_segment_best_chain() {
+        // The intron constructor searches the complete anchor pool. Repeat
+        // anchors in the best chain must not disable an independent exon pair.
+        for strand in [Strand::Plus, Strand::Minus] {
+            for leading_clip in [false, true] {
+                let mut state = 0x719ac57bu64;
+                let mut genome: Vec<u8> = (0..6000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        b"ACGT"[(state & 3) as usize]
+                    })
+                    .collect();
+                genome[2064..2066].copy_from_slice(b"GT");
+                genome[3998..4000].copy_from_slice(b"AG");
+                genome[2063] = b'T';
+                genome[4000] = b'A';
+                let mut query = Vec::new();
+                if leading_clip {
+                    query.extend_from_slice(&b"N".repeat(15));
+                }
+                query.extend_from_slice(&genome[2000..2064]);
+                query.extend_from_slice(&genome[4000..4071]);
+                if !leading_clip {
+                    query.extend_from_slice(&b"N".repeat(15));
+                }
+                let offset = if leading_clip { 15 } else { 0 };
+                genome[100..115].copy_from_slice(&query[offset + 5..offset + 20]);
+                genome[1000..1030].copy_from_slice(&query[offset + 30..offset + 60]);
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let read = if strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let chain = Chain {
+                    contig: 0,
+                    strand,
+                    anchors: [
+                        (offset + 5, 100),
+                        (offset + 30, 1000),
+                        (offset + 45, 1015),
+                        (offset + 70, 4006),
+                    ]
+                    .map(|(q, r)| crate::seed::Anchor {
+                        contig: 0,
+                        strand,
+                        qpos: q as u32,
+                        rpos: r,
+                    })
+                    .to_vec(),
+                    score: 62,
+                };
+                assert_eq!(segment_chain(&chain, 15, 20).len(), 3);
+                let mins = crate::seed::minimizers(&read, aligner.config.seed);
+                let mut all = Vec::new();
+                collect_anchors_into(aligner.index, &mins, 150, 15, MID_OCC_CAP, &mut all);
+                all.retain(|a| a.strand == strand);
+                let hit = crate::intron_chain::try_intron_chain_placement(
+                    aligner.index.reference,
+                    &JunctionLib::default(),
+                    &query,
+                    &all,
+                    15,
+                    &crate::intron_chain::IntronParams::default(),
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                )
+                .expect("complete pool independently supports the exon pair");
+                assert_eq!(hit.genomic_start(), 2000);
+                let expected = if leading_clip {
+                    vec![
+                        CigarOp::SoftClip(15),
+                        CigarOp::Match(64),
+                        CigarOp::RefSkip(1936),
+                        CigarOp::Match(71),
+                    ]
+                } else {
+                    vec![
+                        CigarOp::Match(64),
+                        CigarOp::RefSkip(1936),
+                        CigarOp::Match(71),
+                        CigarOp::SoftClip(15),
+                    ]
+                };
+                assert_eq!(hit.cigar, expected);
+                let mut candidates = Vec::new();
+                let mut budget = EXTEND_BUDGET;
+                aligner.extend_chain(
+                    &read,
+                    &mins,
+                    &chain,
+                    true,
+                    false,
+                    &revcomp(&read),
+                    &mut budget,
+                    false,
+                    &mut candidates,
+                );
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|p| p.pos == 2000 && p.cigar == expected),
+                    "three-segment best chain suppressed the independent pool proposal"
+                );
+                assert!(
+                    candidates.iter().any(|p| p.junctions.is_empty()),
+                    "pool proposal must preserve continuous competing explanations"
+                );
+                for p in &mut candidates {
+                    aligner.rescore_strict(&query, p);
+                }
+                dedup_by_footprint(&mut candidates, read.len());
+                sort_placements(&mut candidates);
+                let selected = aligner
+                    .arbitrate(&read, candidates, mins.len(), true)
+                    .expect("supported 135bp body clears the unchanged 99bp gate");
+                assert_eq!(selected.pos, 2000);
+                assert_eq!(selected.cigar, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn intron_fast_path_reconstructs_asymmetric_exons_with_technical_clips() {
+        let mut state = 0x517cc1b7u64;
+        let mut genome: Vec<u8> = (0..5000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        for (donor, acceptor) in [(b"GT", b"AG"), (b"CT", b"AC")] {
+            genome[1060..1062].copy_from_slice(donor);
+            genome[2998..3000].copy_from_slice(acceptor);
+            // Unique seam in either motif orientation (no one-base slide).
+            genome[1059] = b'T';
+            genome[3000] = b'A';
+            let mut query = b"N".repeat(11);
+            query.extend_from_slice(&genome[1000..1060]);
+            query.extend_from_slice(&genome[3000..3079]);
+            let reference = ref_from(std::str::from_utf8(&genome).unwrap());
+            for strand in [Strand::Plus, Strand::Minus] {
+                let anchors: Vec<_> = [(11, 1000, 60), (71, 3000, 79)]
+                    .into_iter()
+                    .flat_map(|(q, r, span)| {
+                        (3..span - 14)
+                            .step_by(4)
+                            .map(move |offset| crate::seed::Anchor {
+                                contig: 0,
+                                strand,
+                                qpos: q + offset,
+                                rpos: r + offset,
+                            })
+                    })
+                    .collect();
+                let hit = crate::intron_chain::try_intron_chain_placement(
+                    &reference,
+                    &JunctionLib::default(),
+                    &query,
+                    &anchors,
+                    15,
+                    &crate::intron_chain::IntronParams::default(),
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                )
+                .expect("supported fragment pair must retain an independent fast proposal");
+                let p = Placement::from_genomic(
+                    0,
+                    hit.genomic_start(),
+                    strand,
+                    hit.cigar,
+                    hit.junctions,
+                    90,
+                    hit.extension.score,
+                );
+                assert!(
+                    p.has_consistent_junctions(),
+                    "fast proposal CIGAR and junction disagree"
+                );
+                assert_eq!(p.pos, 1000);
+                assert_eq!(
+                    p.cigar,
+                    vec![
+                        CigarOp::SoftClip(11),
+                        CigarOp::Match(60),
+                        CigarOp::RefSkip(1940),
+                        CigarOp::Match(79),
+                    ]
+                );
+                assert_eq!(hit.extension.score, 278);
+            }
+        }
+    }
+
+    #[test]
+    fn intron_proposal_junctions_must_match_cigar_reference_intervals() {
+        let mut p = placement(
+            0,
+            100,
+            &[
+                CigarOp::SoftClip(5),
+                CigarOp::Match(20),
+                CigarOp::Ins(3),
+                CigarOp::Del(2),
+                CigarOp::RefSkip(50),
+                CigarOp::Match(25),
+            ],
+        );
+        p.junctions.push(RefinedJunction {
+            junction: Junction {
+                contig: 0,
+                start: 122,
+                end: 172,
+                minus_strand: false,
+            },
+            known_support: 1,
+            signal: SpliceSignal::GtAg,
+        });
+        assert!(p.has_consistent_junctions());
+        p.junctions[0].junction.start += 1;
+        assert!(!p.has_consistent_junctions());
+        p.junctions[0].junction.start -= 1;
+        p.junctions[0].junction.contig = 1;
+        assert!(!p.has_consistent_junctions());
+        p.junctions.clear();
+        assert!(!p.has_consistent_junctions());
+        assert!(placement(0, 100, &[CigarOp::Match(25)]).has_consistent_junctions());
+    }
+
+    #[test]
+    fn intron_fast_path_keeps_generic_splicing_and_consistent_seams() {
+        let mut state = 0x243f6a88u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut genome = random(8000);
+        let exons = [(1000, 1032), (4257, 4333), (6144, 6175)];
+        genome[1032..1034].copy_from_slice(b"GT");
+        genome[4255..4257].copy_from_slice(b"AG");
+        genome[4333..4335].copy_from_slice(b"GT");
+        genome[6142..6144].copy_from_slice(b"AG");
+        let mut query = b"N".repeat(11);
+        for (start, end) in exons {
+            query.extend_from_slice(&genome[start..end]);
+        }
+        assert_eq!(query.len(), 150);
+        for strand in [Strand::Plus, Strand::Minus] {
+            let library = JunctionLib::build([
+                Junction {
+                    contig: 0,
+                    start: 1032,
+                    end: 4257,
+                    minus_strand: strand == Strand::Minus,
+                },
+                Junction {
+                    contig: 0,
+                    start: 4333,
+                    end: 6144,
+                    minus_strand: strand == Strand::Minus,
+                },
+            ]);
+            let mut aligner =
+                aligner_on(std::str::from_utf8(&genome).unwrap()).with_lib(Arc::new(library));
+            let read = if strand == Strand::Plus {
+                query.clone()
+            } else {
+                revcomp(&query)
+            };
+            let mut anchors = Vec::new();
+            for (q, r, span) in [(43, 4257, 76), (119, 6144, 31)] {
+                for offset in (3..span - 14).step_by(4) {
+                    anchors.push(crate::seed::Anchor {
+                        contig: 0,
+                        strand,
+                        qpos: q + offset,
+                        rpos: r + offset,
+                    });
+                }
+            }
+            let chain = Chain {
+                contig: 0,
+                strand,
+                anchors,
+                score: 93,
+            };
+            let expected = aligner
+                .try_spliced(&read, &revcomp(&read), &chain)
+                .expect("generic path must have an independent supported explanation");
+            assert_eq!(expected.pos, 4257);
+            assert_eq!(
+                expected.cigar,
+                vec![
+                    CigarOp::SoftClip(43),
+                    CigarOp::Match(76),
+                    CigarOp::RefSkip(1811),
+                    CigarOp::Match(31),
+                ]
+            );
+            let mut candidates = Vec::new();
+            aligner.extend_chain(
+                &read,
+                &crate::seed::minimizers(&read, aligner.config.seed),
+                &chain,
+                true,
+                false,
+                &revcomp(&read),
+                &mut 8,
+                false,
+                &mut candidates,
+            );
+            assert!(
+                candidates
+                    .iter()
+                    .any(|p| p.pos == expected.pos && p.cigar == expected.cigar),
+                "an intron fast-path proposal must not suppress the generic splice candidate"
+            );
+            for p in &candidates {
+                let mut rf = p.pos;
+                for op in &p.cigar {
+                    match op {
+                        CigarOp::Match(n) | CigarOp::Del(n) => rf += *n,
+                        CigarOp::RefSkip(n) => {
+                            assert!(
+                                p.junctions
+                                    .iter()
+                                    .any(|j| j.junction.start == rf && j.junction.end == rf + n),
+                                "published CIGAR seam must agree with its refined junction"
+                            );
+                            rf += *n;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_short_trigger_rescores_every_competing_locus_in_one_domain() {
+        let mut genome = b"C".repeat(3000);
+        let mut query = b"A".repeat(150);
+        for q in [5, 15, 25, 35, 45, 55] {
+            query[q] = b'C';
+        }
+        for (q, base) in query.iter().enumerate() {
+            genome[100 + q] = *base;
+            genome[1100 + q] = *base;
+        }
+        // Each full candidate has six T>C edits (4%, below trigger density).
+        for q in [5, 15, 25, 35, 45, 55] {
+            genome[100 + q] = b'T';
+            genome[1100 + q] = b'T';
+        }
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut candidates = Vec::new();
+        for pos in [100, 1100] {
+            let mut p = placement(0, pos, &[CigarOp::Match(150)]);
+            p.origin = crate::mapq::Origin::L1; // no reextension, isolates common-domain scoring
+            aligner.rescore_strict(&query, &mut p);
+            assert!(hyper_direction(&p).is_none());
+            candidates.push(p);
+        }
+        let mut short = placement(0, 100, &[CigarOp::Match(84), CigarOp::SoftClip(66)]);
+        short.origin = crate::mapq::Origin::L1;
+        aligner.rescore_strict(&query, &mut short);
+        assert_eq!(hyper_direction(&short), Some(EditDir::Tc));
+        candidates.push(short);
+        dedup_by_footprint(&mut candidates, query.len());
+        aligner.hyper_rearbitrate(&query, &revcomp(&query), &mut candidates);
+        assert!(candidates.iter().all(|p| p.ea_dir == EditDir::Tc));
+        let result = aligner.arbitrate(&query, candidates, 10, true).unwrap();
+        assert_eq!(result.score, 288);
+        assert_eq!(result.second_score, 288);
+        assert_eq!(result.mapq_of_checked(), 0);
+        assert_eq!(result.n_cands, 2);
+    }
+
+    fn hyper_opposite_strand_case(trigger_strand: Strand, trigger_dir: EditDir, genomic: bool) {
+        // Purely synthetic two-locus competition. The strict leader has seven
+        // edits (below the 5% trigger), while its opposite-strand competitor
+        // has nine edits plus an ordinary mismatch and triggers re-arbitration.
+        // A read-oriented conversion must complement when the candidate flips.
+        let mut state = 0x91cb_ab67u64;
+        let mut random = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect()
+        };
+        let mut read = random(150);
+        let edited_positions = [15, 27, 39, 51, 63, 75, 87, 99, 111];
+        let trigger_base = if trigger_dir == EditDir::Ag {
+            b'G'
+        } else {
+            b'C'
+        };
+        let raw_base = if trigger_strand == Strand::Plus {
+            trigger_base
+        } else if trigger_base == b'G' {
+            b'C'
+        } else {
+            b'G'
+        };
+        for &i in &edited_positions {
+            read[i] = raw_base;
+        }
+        let other_strand = if trigger_strand == Strand::Plus {
+            Strand::Minus
+        } else {
+            Strand::Plus
+        };
+        let other_dir = if trigger_dir == EditDir::Ag {
+            EditDir::Tc
+        } else {
+            EditDir::Ag
+        };
+        let rc = revcomp(&read);
+        let oriented = |strand| {
+            if strand == Strand::Plus {
+                read.clone()
+            } else {
+                rc.clone()
+            }
+        };
+        let mut trigger_reference = oriented(trigger_strand);
+        let mut other_reference = oriented(other_strand);
+        for (number, &i) in edited_positions.iter().enumerate() {
+            let t = if trigger_strand == Strand::Plus {
+                i
+            } else {
+                149 - i
+            };
+            let o = if other_strand == Strand::Plus {
+                i
+            } else {
+                149 - i
+            };
+            trigger_reference[t] = if trigger_dir == EditDir::Ag {
+                b'A'
+            } else {
+                b'T'
+            };
+            if number < 7 {
+                other_reference[o] = if other_dir == EditDir::Ag { b'A' } else { b'T' };
+            }
+        }
+        let ordinary = if trigger_strand == Strand::Plus {
+            130
+        } else {
+            19
+        };
+        let qb = trigger_reference[ordinary];
+        trigger_reference[ordinary] = *b"ACGT"
+            .iter()
+            .find(|&&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+            .unwrap();
+        let mut genome = random(1200);
+        genome[100..250].copy_from_slice(&trigger_reference);
+        genome[800..950].copy_from_slice(&other_reference);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+        trigger.strand = trigger_strand;
+        let mut other = placement(0, 800, &[CigarOp::Match(150)]);
+        other.strand = other_strand;
+        for p in [&mut trigger, &mut other] {
+            if !genomic {
+                p.origin = crate::mapq::Origin::L1;
+            }
+            let query = if p.strand == Strand::Plus { &read } else { &rc };
+            aligner.rescore_strict(query, p);
+        }
+        assert_eq!(trigger.strict.score, 240);
+        assert_eq!(other.strict.score, 258);
+        assert_eq!(hyper_direction(&trigger), Some(trigger_dir));
+        assert_eq!(hyper_direction(&other), None);
+        let mut candidates = vec![other, trigger];
+        sort_placements(&mut candidates);
+        aligner.hyper_rearbitrate(&read, &rc, &mut candidates);
+        let other = candidates.iter().find(|p| p.pos == 800).unwrap();
+        assert_eq!(
+            other.ea_dir, other_dir,
+            "opposite strand must complement the read's domain"
+        );
+        assert_eq!(other.strict.score, 286);
+        let trigger = candidates.iter().find(|p| p.pos == 100).unwrap();
+        assert_eq!(trigger.ea_dir, trigger_dir);
+        assert_eq!(trigger.strict.score, 276);
+        let result = aligner.arbitrate(&read, candidates, 10, true).unwrap();
+        assert_eq!(result.pos, 800);
+        assert_eq!(result.strand, other_strand);
+        assert_eq!(result.second_score, 276);
+    }
+
+    #[test]
+    fn hyper_opposite_strand_candidates_share_one_read_oriented_domain() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                hyper_opposite_strand_case(strand, dir, false);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_opposite_strand_genomic_reextension_uses_complemented_domain() {
+        for strand in [Strand::Plus, Strand::Minus] {
+            for dir in [EditDir::Ag, EditDir::Tc] {
+                hyper_opposite_strand_case(strand, dir, true);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_complemented_reextension_recovers_an_edited_clipped_flank() {
+        // The opposite-strand trigger fixes the read's conversion alphabet.
+        // Its genomic competitor starts with an unedited 129 bp prefix;
+        // recovering the last 21 bp requires exempting nine edits there.
+        // Common rescoring alone cannot restore those missing CIGAR columns.
+        for other_strand in [Strand::Plus, Strand::Minus] {
+            for other_dir in [EditDir::Ag, EditDir::Tc] {
+                let mut state = 0x98b3_5f2du64;
+                let mut random = |len: usize| -> Vec<u8> {
+                    (0..len)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            b"ACGT"[(state & 3) as usize]
+                        })
+                        .collect()
+                };
+                let mut query = random(150);
+                let edited_base = if other_dir == EditDir::Ag { b'G' } else { b'C' };
+                let reference_base = if other_dir == EditDir::Ag { b'A' } else { b'T' };
+                for i in 0..9 {
+                    query[129 + 2 * i] = edited_base;
+                }
+                let mut other_reference = query.clone();
+                for i in 0..9 {
+                    other_reference[129 + 2 * i] = reference_base;
+                }
+                let trigger_query = revcomp(&query);
+                let mut trigger_reference = trigger_query.clone();
+                for i in 0..9 {
+                    trigger_reference[149 - (129 + 2 * i)] =
+                        if other_dir == EditDir::Ag { b'T' } else { b'A' };
+                }
+                let qb = trigger_reference[100];
+                trigger_reference[100] = *b"ACGT"
+                    .iter()
+                    .find(|&&rb| rb != qb && crate::extend::exempt_dir(rb, qb).is_none())
+                    .unwrap();
+                let mut genome = random(1200);
+                genome[100..250].copy_from_slice(&trigger_reference);
+                genome[800..950].copy_from_slice(&other_reference);
+                let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+                let read = if other_strand == Strand::Plus {
+                    query.clone()
+                } else {
+                    revcomp(&query)
+                };
+                let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+                trigger.strand = if other_strand == Strand::Plus {
+                    Strand::Minus
+                } else {
+                    Strand::Plus
+                };
+                trigger.origin = crate::mapq::Origin::L1;
+                aligner.rescore_strict(&trigger_query, &mut trigger);
+                let mut other = placement(0, 800, &[CigarOp::Match(129), CigarOp::SoftClip(21)]);
+                other.strand = other_strand;
+                aligner.rescore_strict(&query, &mut other);
+                assert_eq!(other.strict.score, 258);
+                assert_eq!(hyper_direction(&other), None);
+                let mut candidates = vec![other, trigger];
+                aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+                let recovered = candidates.iter().find(|p| p.pos == 800).unwrap();
+                assert_eq!(recovered.cigar, vec![CigarOp::Match(150)]);
+                assert_eq!(recovered.ea_dir, other_dir);
+                assert_eq!(recovered.strict.score, 282);
+                assert_eq!(candidates[0].pos, 800);
+            }
+        }
+    }
+
+    #[test]
+    fn hyper_same_strand_competitor_cannot_choose_its_own_editing_direction() {
+        let read = b"CG".repeat(75);
+        let mut trigger_ref = read.clone();
+        let mut other_ref = read.clone();
+        for i in 0..9 {
+            trigger_ref[21 + 10 * i] = b'A';
+        }
+        trigger_ref[130] = b'G'; // ordinary ref G/read C
+        for i in 0..7 {
+            other_ref[20 + 10 * i] = b'T';
+        }
+        let mut genome = b"N".repeat(1200);
+        genome[100..250].copy_from_slice(&trigger_ref);
+        genome[800..950].copy_from_slice(&other_ref);
+        let mut aligner = aligner_on(std::str::from_utf8(&genome).unwrap());
+        let mut trigger = placement(0, 100, &[CigarOp::Match(150)]);
+        let mut other = placement(0, 800, &[CigarOp::Match(150)]);
+        for p in [&mut trigger, &mut other] {
+            p.origin = crate::mapq::Origin::L1;
+            aligner.rescore_strict(&read, p);
+        }
+        let mut candidates = vec![other, trigger];
+        sort_placements(&mut candidates);
+        aligner.hyper_rearbitrate(&read, &revcomp(&read), &mut candidates);
+        assert!(candidates.iter().all(|p| p.ea_dir == EditDir::Ag));
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|p| p.pos == 800)
+                .unwrap()
+                .strict
+                .score,
+            258
+        );
+        assert_eq!(candidates[0].pos, 100);
     }
 
     #[test]
@@ -2388,6 +5288,7 @@ mod tests {
         assert_eq!(hit.junctions[0].junction.start, 57);
         assert_eq!(hit.junctions[0].junction.end, 117);
     }
-
 }
 
+#[cfg(test)]
+pub(crate) mod background_tests;
