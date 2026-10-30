@@ -1,9 +1,11 @@
 # map — splice-aware read alignment
 
-Dev.19 retains full-query exact structural alternatives at one locus, displays
-a deterministic representative and preserves MAPQ0 ambiguity regardless of
-annotation rewards. See [the exact-path contract](../../exact-path-competition.md).
-`map --no-exact-path-competition` independently restores dev18 policy.
+Dev.20 restores dev18 default arbitration after full development replay rejected
+the dev.19 fewest-intron primary policy. Exact structural competition and durable
+MAPQ0 remain available through `map --experimental-exact-path-competition`;
+`--no-exact-path-competition` is a compatible explicit off. The flags conflict.
+RNA/DNA config and older flow APIs keep the experiment disabled. See
+[the exact-path contract](../../exact-path-competition.md).
 
 Dev.18 tests additional context proposals against a constant-base background
 in the same strict score domain. `map --no-context-background` independently

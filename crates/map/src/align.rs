@@ -65,7 +65,7 @@ pub struct AlignConfig {
     pub repeat_context: bool,
     /// Require additional context proposals to beat a constant-base background.
     pub context_background: bool,
-    /// Retain sequence-indistinguishable full-query structural alternatives.
+    /// Experimental full-query exact-path arbitration (disabled by default).
     pub exact_path_competition: bool,
 }
 
@@ -96,7 +96,7 @@ impl AlignConfig {
             fragment_endpoints: true,
             repeat_context: true,
             context_background: true,
-            exact_path_competition: true,
+            exact_path_competition: false,
         }
     }
 }
@@ -2536,7 +2536,7 @@ fn hyper_direction(p: &Placement) -> Option<EditDir> {
 /// signature; positive score is checked only after any hyper rescoring.
 #[cfg(test)]
 fn dedup_by_footprint(ps: &mut Vec<Placement>, read_len: usize) {
-    dedup_by_footprint_with_options(ps, read_len, true);
+    dedup_by_footprint_with_options(ps, read_len, false);
 }
 
 fn dedup_by_footprint_with_options(

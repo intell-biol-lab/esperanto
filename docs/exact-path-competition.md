@@ -31,10 +31,19 @@ discriminating reference base can retain its supported spliced placement.
 Sequence-identical true short-exon and continuous sources cannot be resolved
 from this read alone; both receive the same ambiguity treatment.
 
-`map --no-exact-path-competition` disables retention, representative selection
-and ambiguity policy, restoring dev18 at the same head. RNA defaults enable
-the policy; DNA defaults disable it. Prior flow APIs remain wrappers around
-`map_stage_with_exact_path_options`.
+The complete used human development replay rejected the dev.19 default:
+111 reads gained 187 correct ancestral body bases, while 181 lost 475
+(net -288); ordinary controls lost 99 net bases. Sequence-identical alternatives
+do not make fewest-intron selection an empirically validated source policy.
+The MAPQ20 body admission cost was also material. These observations are
+development evidence, not independent generalization.
+
+Starting with dev.20 this policy requires
+`map --experimental-exact-path-competition`. RNA/DNA defaults and all older
+flow APIs disable it, restoring dev18 policy. The existing
+`--no-exact-path-competition` remains a compatible explicit off; using both
+flags is an error. `map_stage_with_exact_path_options` retains its explicit
+boolean option. Existing experimental controls opt in deliberately.
 
 No new candidate-generation, DP or posting budget is added. Additional retained
 alternatives were already generated and strictly scored. There is no complete

@@ -1,10 +1,12 @@
 # Known scientific qualification issues
 
-Dev.19 proposes exact full-query structural-path competition. Sequence-identical
-paths at one locus cannot establish a source isoform; the deterministic primary
-is not truth and MAPQ remains 0. This does not repair partial/indel path omission,
-general lowcoverage qualification, inherited human regressions or calibration.
-See [the contract](exact-path-competition.md). Human replay/adoption are separate.
+Full development replay rejected dev.19 exact-path default arbitration: 187
+correct body bases gained versus 475 lost; ordinary controls net -99 bases.
+Dev.20 disables it by default in config, CLI and old flow APIs, retaining
+`--experimental-exact-path-competition` for reproducible experiments. This
+default remediation does not resolve inherited human regressions, general
+lowcoverage qualification, confidence calibration or independent generalization.
+See [the contract](exact-path-competition.md). Scientific adoption is separate.
 
 ## Ordinary high-frequency candidate coverage (dev.17 proposal)
 

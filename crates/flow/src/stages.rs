@@ -498,11 +498,11 @@ pub fn map_stage_with_background_options(
         fragment_endpoints,
         repeat_context,
         context_background,
-        true,
+        false,
     )
 }
 
-/// Independent exact-path competition ablation, preserving prior public APIs.
+/// Explicit experimental exact-path policy; prior public APIs keep it disabled.
 #[allow(clippy::too_many_arguments)]
 pub fn map_stage_with_exact_path_options(
     paidx: &Path,

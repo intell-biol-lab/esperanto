@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.20`, restore dev18 default arbitration in RNA config, CLI
+  and prior flow APIs after complete human development replay rejected dev19.
+  Retain the latter through `--experimental-exact-path-competition`; the
+  prior `--no-exact-path-competition` stays supported and conflicts with opt-in.
+  Native L1/cache, CLI and all old flow wrappers have behavioral regression
+  coverage. This does not establish general mapper superiority or adoption.
+
 ### Organization development
 
 - In `1.1.1-dev.19`, retain distinct complete exact mappings at a shared locus.

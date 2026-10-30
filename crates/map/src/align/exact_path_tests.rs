@@ -2,6 +2,16 @@
 use super::*;
 use crate::{fasta::parse_fasta_bytes, gtf::Junction, index::Index};
 
+fn experimental_config() -> AlignConfig {
+    let mut config = AlignConfig::rna_default();
+    config.exact_path_competition = true;
+    config
+}
+
+fn dedup_experimental(ps: &mut Vec<Placement>, read_len: usize) {
+    dedup_by_footprint_with_options(ps, read_len, true);
+}
+
 fn random(n: usize) -> Vec<u8> {
     let mut state = 0x19eace11u64;
     (0..n)
@@ -74,8 +84,7 @@ fn exact_paths_terminal_structures_survive_and_use_simple_ambiguous_primary() {
         for left in [false, true] {
             for strand in [Strand::Plus, Strand::Minus] {
                 let (index, query, library, pos, cigar) = terminal_fixture(n, left, false);
-                let mut aligner =
-                    Aligner::new(&index, AlignConfig::rna_default()).with_lib(library);
+                let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library);
                 let mut continuous = placement(200, vec![CigarOp::Match(150)], strand);
                 let mut spliced = placement(pos, cigar, strand);
                 aligner.rescore_strict(&query, &mut continuous);
@@ -91,7 +100,7 @@ fn exact_paths_terminal_structures_survive_and_use_simple_ambiguous_primary() {
                     vec![spliced.clone(), continuous.clone(), continuous.clone()],
                     vec![continuous.clone(), spliced.clone()],
                 ] {
-                    dedup_by_footprint(&mut paths, raw.len());
+                    dedup_experimental(&mut paths, raw.len());
                     assert_eq!(
                         paths.len(),
                         2,
@@ -138,8 +147,7 @@ fn exact_paths_extra_junction_does_not_create_sequence_evidence() {
         },
     ]));
     for strand in [Strand::Plus, Strand::Minus] {
-        let mut aligner =
-            Aligner::new(&index, AlignConfig::rna_default()).with_lib(library.clone());
+        let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library.clone());
         let mut simple = placement(
             200,
             vec![
@@ -164,7 +172,7 @@ fn exact_paths_extra_junction_does_not_create_sequence_evidence() {
         aligner.rescore_strict(&query, &mut complex);
         assert_eq!((simple.strict.score, complex.strict.score), (306, 312));
         let mut paths = vec![complex, simple.clone()];
-        dedup_by_footprint(&mut paths, 150);
+        dedup_experimental(&mut paths, 150);
         assert_eq!(paths.len(), 2);
         let raw = if strand == Strand::Plus {
             query.clone()
@@ -183,8 +191,7 @@ fn exact_paths_sequence_supported_short_exon_still_wins() {
         for left in [false, true] {
             for strand in [Strand::Plus, Strand::Minus] {
                 let (index, query, library, pos, cigar) = terminal_fixture(n, left, true);
-                let mut aligner =
-                    Aligner::new(&index, AlignConfig::rna_default()).with_lib(library);
+                let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library);
                 let mut continuous = placement(200, vec![CigarOp::Match(150)], strand);
                 let mut spliced = placement(pos, cigar.clone(), strand);
                 aligner.rescore_strict(&query, &mut continuous);
@@ -192,7 +199,7 @@ fn exact_paths_sequence_supported_short_exon_still_wins() {
                 assert_eq!(continuous.strict.matches, 149);
                 assert_eq!(spliced.strict.matches, 150);
                 let mut paths = vec![continuous, spliced];
-                dedup_by_footprint(&mut paths, 150);
+                dedup_experimental(&mut paths, 150);
                 let raw = if strand == Strand::Plus {
                     query.clone()
                 } else {
@@ -210,7 +217,7 @@ fn exact_paths_sequence_supported_short_exon_still_wins() {
 #[test]
 fn exact_paths_equivalent_cigar_splitting_is_not_ambiguity() {
     let (index, query, library, _, _) = terminal_fixture(1, false, false);
-    let mut aligner = Aligner::new(&index, AlignConfig::rna_default()).with_lib(library);
+    let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library);
     let mut a = placement(200, vec![CigarOp::Match(150)], Strand::Plus);
     let mut b = placement(
         200,
@@ -220,7 +227,7 @@ fn exact_paths_equivalent_cigar_splitting_is_not_ambiguity() {
     aligner.rescore_strict(&query, &mut a);
     aligner.rescore_strict(&query, &mut b);
     let mut paths = vec![a, b];
-    dedup_by_footprint(&mut paths, 150);
+    dedup_experimental(&mut paths, 150);
     assert_eq!(paths.len(), 1);
     let result = aligner.arbitrate(&query, paths, 30, true).unwrap();
     assert_eq!(crate::mapq::mapq_of(&result), 60);
@@ -303,7 +310,7 @@ fn exact_paths_native_l1_cache_and_mate_preserve_alternatives() {
         } else {
             revcomp(&query)
         };
-        let mut aligner = Aligner::new(&index, AlignConfig::rna_default())
+        let mut aligner = Aligner::new(&index, experimental_config())
             .with_lib(library.clone())
             .with_l1(l1.clone());
         let (result, cache) = aligner.align_read_full(&raw);
@@ -328,13 +335,13 @@ fn exact_paths_native_l1_cache_and_mate_preserve_alternatives() {
 fn exact_paths_unknown_bases_and_partial_paths_do_not_claim_full_exactness() {
     let (index, mut query, library, pos, cigar) = terminal_fixture(2, false, false);
     query[50] = b'N';
-    let mut aligner = Aligner::new(&index, AlignConfig::rna_default()).with_lib(library);
+    let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library);
     let mut a = placement(200, vec![CigarOp::Match(150)], Strand::Plus);
     let mut b = placement(pos, cigar, Strand::Plus);
     aligner.rescore_strict(&query, &mut a);
     aligner.rescore_strict(&query, &mut b);
     let mut paths = vec![a, b];
-    dedup_by_footprint(&mut paths, 150);
+    dedup_experimental(&mut paths, 150);
     assert_eq!(paths.len(), 1);
     let result = aligner.arbitrate(&query, paths, 30, true).unwrap();
     assert!(!result.exact_path_ambiguous);
@@ -350,7 +357,7 @@ fn exact_paths_unknown_bases_and_partial_paths_do_not_claim_full_exactness() {
     aligner.rescore_strict(&query, &mut a);
     aligner.rescore_strict(&query, &mut b);
     let mut paths = vec![a, b];
-    dedup_by_footprint(&mut paths, 150);
+    dedup_experimental(&mut paths, 150);
     assert_eq!(paths.len(), 1);
     let result = aligner.arbitrate(&query, paths, 30, true).unwrap();
     assert!(!result.exact_path_ambiguous);
@@ -372,7 +379,7 @@ fn exact_paths_mate_coordinate_window_cannot_erase_overlapping_splice_alternativ
         end: 3002,
         minus_strand: false,
     }]));
-    let mut aligner = Aligner::new(&index, AlignConfig::rna_default()).with_lib(library);
+    let mut aligner = Aligner::new(&index, experimental_config()).with_lib(library);
     let mut a = placement(3000, vec![CigarOp::Match(150)], Strand::Plus);
     let mut b = placement(
         100,
@@ -386,7 +393,7 @@ fn exact_paths_mate_coordinate_window_cannot_erase_overlapping_splice_alternativ
     aligner.rescore_strict(&query, &mut a);
     aligner.rescore_strict(&query, &mut b);
     let mut paths = vec![a, b];
-    dedup_by_footprint(&mut paths, 150);
+    dedup_experimental(&mut paths, 150);
     let cache = CachedPlacements {
         placements: paths,
         n_seeds: 30,
@@ -401,4 +408,44 @@ fn exact_paths_mate_coordinate_window_cannot_erase_overlapping_splice_alternativ
         "overlapping exact path is not an off-locus competitor"
     );
     assert_eq!(crate::mapq::mapq_of(&result), 0);
+}
+
+#[test]
+fn default_policy_preserves_annotation_arbitration_in_native_l1_and_cache() {
+    let (index, query, library, l1) = native_l1_fixture();
+    for strand in [Strand::Plus, Strand::Minus] {
+        let raw = if strand == Strand::Plus {
+            query.clone()
+        } else {
+            revcomp(&query)
+        };
+        let mut aligner = Aligner::new(&index, AlignConfig::rna_default())
+            .with_lib(library.clone())
+            .with_l1(l1.clone());
+        let (result, cache) = aligner.align_read_full(&raw);
+        let result = result.unwrap();
+        assert_eq!(
+            result.cigar,
+            vec![
+                CigarOp::Match(148),
+                CigarOp::RefSkip(752),
+                CigarOp::Match(2)
+            ],
+            "default must restore pre-experiment annotation arbitration"
+        );
+        assert!(!result.exact_path_ambiguous);
+        assert_eq!(crate::mapq::mapq_of(&result), 60);
+        let result = aligner
+            .align_read_with_mate(&raw, 0, 550, cache.as_ref())
+            .unwrap();
+        assert!(!result.exact_path_ambiguous);
+        assert_eq!(
+            result.cigar,
+            vec![
+                CigarOp::Match(148),
+                CigarOp::RefSkip(752),
+                CigarOp::Match(2)
+            ]
+        );
+    }
 }

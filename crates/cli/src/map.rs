@@ -40,8 +40,11 @@ pub struct MapArgs {
     /// Disable constant-base background competition for context proposals (ablation).
     #[arg(long)]
     no_context_background: bool,
-    /// Disable full-query exact structural path competition (ablation).
-    #[arg(long)]
+    /// Enable experimental exact-path arbitration (rejected for general adoption).
+    #[arg(long, conflicts_with = "no_exact_path_competition")]
+    experimental_exact_path_competition: bool,
+    /// Explicitly keep experimental exact-path arbitration disabled (compatibility).
+    #[arg(long, conflicts_with = "experimental_exact_path_competition")]
     no_exact_path_competition: bool,
 }
 
@@ -59,7 +62,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         !a.no_fragment_endpoints,
         !a.no_repeat_context,
         !a.no_context_background,
-        !a.no_exact_path_competition,
+        a.experimental_exact_path_competition,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -125,5 +128,187 @@ mod tests {
             "--no-exact-path-competition",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn default_policy_rejects_conflicting_experiment_flags() {
+        assert!(Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--experimental-exact-path-competition",
+        ])
+        .is_ok());
+        let conflicting = Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--experimental-exact-path-competition",
+            "--no-exact-path-competition",
+        ])
+        .err()
+        .expect("conflicting policy requests must fail");
+        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn default_policy_cli_and_old_flow_apis_restore_native_mapping() {
+        use rust_htslib::bam::Read as _;
+        let dir = std::env::temp_dir().join(format!("esp-default-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = 0x19eace11u64;
+        let mut genome: Vec<u8> = (0..2000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect();
+        let query = genome[200..350].to_vec();
+        genome[1100..1102].copy_from_slice(&query[148..]);
+        let fasta = dir.join("reference.fa");
+        std::fs::write(
+            &fasta,
+            [b">chrT\n".to_vec(), genome, b"\n".to_vec()].concat(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("reference.fa.fai"), b"chrT\t2000\t6\t2000\t2001\n").unwrap();
+        let gtf = dir.join("annotation.gtf");
+        std::fs::write(
+            &gtf,
+            concat!(
+                "chrT\tx\ttranscript\t151\t450\t.\t+\t.\ttranscript_id \"a\";\n",
+                "chrT\tx\texon\t151\t450\t.\t+\t.\ttranscript_id \"a\";\n",
+                "chrT\tx\ttranscript\t151\t1200\t.\t+\t.\ttranscript_id \"b\";\n",
+                "chrT\tx\texon\t151\t348\t.\t+\t.\ttranscript_id \"b\";\n",
+                "chrT\tx\texon\t1101\t1200\t.\t+\t.\ttranscript_id \"b\";\n",
+            ),
+        )
+        .unwrap();
+        let index = dir.join("reference.paidx");
+        crate::index::build_all(&fasta, Some(&gtf), &[], &index, 15, 5).unwrap();
+        let fq = dir.join("reads.fq");
+        let reverse: Vec<u8> = query
+            .iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => unreachable!(),
+            })
+            .collect();
+        let mut reads = Vec::new();
+        for (name, seq) in [("forward", &query), ("reverse", &reverse)] {
+            reads.extend_from_slice(format!("@{name}\n").as_bytes());
+            reads.extend_from_slice(seq);
+            reads.extend_from_slice(b"\n+\n");
+            reads.extend(std::iter::repeat_n(b'I', 150));
+            reads.push(b'\n');
+        }
+        std::fs::write(&fq, reads).unwrap();
+        let bundle = dir.join("reference.bndl");
+        for mode in 0..8 {
+            let out = dir.join(format!("mode-{mode}"));
+            if mode <= 2 {
+                let mut argv = vec![
+                    "probe".to_owned(),
+                    "--r1".into(),
+                    fq.display().to_string(),
+                    "--index".into(),
+                    index.display().to_string(),
+                    "--gtf".into(),
+                    gtf.display().to_string(),
+                    "--out".into(),
+                    out.display().to_string(),
+                    "--threads".into(),
+                    "1".into(),
+                ];
+                match mode {
+                    1 => argv.push("--no-exact-path-competition".into()),
+                    2 => argv.push("--experimental-exact-path-competition".into()),
+                    _ => {}
+                }
+                run(Probe::try_parse_from(argv).unwrap().map).unwrap();
+            } else {
+                use esperanto_flow::*;
+                match mode {
+                    3 => map_stage(&index, Some(&gtf), Some(&bundle), &fq, None, &out, 1),
+                    4 => map_stage_with_diagnostics(
+                        &index,
+                        Some(&gtf),
+                        Some(&bundle),
+                        &fq,
+                        None,
+                        &out,
+                        1,
+                        true,
+                    ),
+                    5 => map_stage_with_options(
+                        &index,
+                        Some(&gtf),
+                        Some(&bundle),
+                        &fq,
+                        None,
+                        &out,
+                        1,
+                        false,
+                        true,
+                    ),
+                    6 => map_stage_with_context_options(
+                        &index,
+                        Some(&gtf),
+                        Some(&bundle),
+                        &fq,
+                        None,
+                        &out,
+                        1,
+                        false,
+                        true,
+                        true,
+                    ),
+                    7 => map_stage_with_background_options(
+                        &index,
+                        Some(&gtf),
+                        Some(&bundle),
+                        &fq,
+                        None,
+                        &out,
+                        1,
+                        false,
+                        true,
+                        true,
+                        true,
+                    ),
+                    _ => unreachable!(),
+                }
+                .unwrap();
+            }
+            let mut reader = rust_htslib::bam::Reader::from_path(out.join("raw.bam")).unwrap();
+            let records: Vec<_> = reader.records().map(Result::unwrap).collect();
+            assert_eq!(records.len(), 2);
+            for record in records {
+                assert!(!record.is_unmapped());
+                assert_eq!(
+                    record.cigar().to_string(),
+                    if mode == 2 { "150M" } else { "148M752N2M" },
+                    "mode={mode}"
+                );
+                assert_eq!(record.mapq(), if mode == 2 { 0 } else { 60 }, "mode={mode}");
+                assert_eq!(record.seq().as_bytes(), query);
+                assert_eq!(record.qual(), &[40; 150]);
+                assert_eq!(record.is_reverse(), record.qname() == b"reverse");
+            }
+        }
     }
 }
