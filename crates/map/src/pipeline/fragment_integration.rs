@@ -196,6 +196,67 @@ fn pair_substitution_native_quality_endpoint_and_cache_controls() {
 }
 
 #[test]
+fn short_body_conditional_native_remote_repeat_mate_orders_and_passes() {
+    let mut genome = crate::fragment::tests::body(8000);
+    let body = genome[2000..2080].to_vec();
+    genome[5000..5080].copy_from_slice(&body);
+    let tail = *b"ACGT"
+        .iter()
+        .find(|&&b| b != body[79] && b != genome[2080])
+        .unwrap();
+    let query = [body.as_slice(), &vec![tail; 70]].concat();
+    let reference =
+        crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat()).unwrap();
+    let index = Index::build(reference, crate::seed::SeedParams { k: 15, w: 5 });
+    for minus in [false, true] {
+        let raw = if minus {
+            crate::align::revcomp(&query)
+        } else {
+            query.clone()
+        };
+        let mate = if minus {
+            genome[2300..2450].to_vec()
+        } else {
+            crate::align::revcomp(&genome[2300..2450])
+        };
+        for swapped in [false, true] {
+            let pair = if swapped {
+                [mate.clone(), raw.clone()]
+            } else {
+                [raw.clone(), mate.clone()]
+            };
+            let target = usize::from(swapped);
+            for two_pass in [false, true] {
+                let observed = run_with_short_body(
+                    &format!("conditional-native-{minus}-{swapped}-{two_pass}"),
+                    &index,
+                    &[pair.clone()],
+                    false,
+                    None,
+                    two_pass,
+                    true,
+                    true,
+                    false,
+                    None,
+                    true,
+                );
+                let record = &observed.records[target];
+                assert!(!record.flags().is_unmapped());
+                assert_eq!(record.alignment_start().unwrap().unwrap().get(), 2001);
+                assert_eq!(record.mapping_quality().unwrap().get(), 0);
+                assert_eq!(record.flags().is_reverse_complemented(), minus);
+                assert_eq!(record.sequence().iter().collect::<Vec<_>>(), query);
+                assert_eq!(
+                    observed.rows[target]["mate_attempt"]["short_body"]["supported_candidates"][0]
+                        ["support_scope"],
+                    "mate_conditioned_index",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn short_body_native_pair_recovers_visible_boundary_without_changing_raw_reads() {
     let genome = crate::fragment::tests::body(8000);
     let reference =

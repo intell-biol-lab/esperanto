@@ -33,8 +33,21 @@ pub struct CandidateEvidence {
 #[derive(Clone, Debug, Serialize)]
 pub struct ShortBodyCandidate {
     pub rank_in_pool: usize,
-    /// Query start and canonical key; relative to the actual supplied index.
+    pub support_scope: &'static str,
+    /// Global-index unique seeds only; never populated with conditional seeds.
     pub disjoint_unique_indexed_seeds: Vec<(u32, u64)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disjoint_mate_conditioned_indexed_seeds: Vec<(u32, u64)>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ShortBodySketchAttempt {
+    pub rank_in_pool: usize,
+    pub scanned_seed_lists: usize,
+    pub scanned_postings: usize,
+    pub omitted_seed_lists: usize,
+    pub over_cap_seed_lists: usize,
+    pub retained_disjoint_seeds: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -43,6 +56,7 @@ pub struct ShortBodyDecision {
     pub query_coordinate_frame: &'static str,
     pub qualified_paths: usize,
     pub supported_candidates: Vec<ShortBodyCandidate>,
+    pub conditional_sketch_attempts: Vec<ShortBodySketchAttempt>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,7 +239,11 @@ pub(crate) fn write_row_with_fragment(
                         .iter()
                         .any(|c| c.rank_in_pool == supported.rank_in_pool && c.strand == "-")
                     {
-                        for (position, _) in &mut supported.disjoint_unique_indexed_seeds {
+                        for (position, _) in supported
+                            .disjoint_unique_indexed_seeds
+                            .iter_mut()
+                            .chain(supported.disjoint_mate_conditioned_indexed_seeds.iter_mut())
+                        {
                             *position += suffix as u32;
                         }
                     }

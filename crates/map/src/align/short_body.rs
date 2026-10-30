@@ -1,12 +1,16 @@
 //! Observable qualification of coverage-ineligible paired RNA candidates.
 //! Indexed sketch support is not exhaustive uniqueness; output is always MAPQ0.
 use super::*;
-use crate::diagnostics::{ShortBodyCandidate, ShortBodyDecision};
+use crate::diagnostics::{ShortBodyCandidate, ShortBodyDecision, ShortBodySketchAttempt};
 use crate::index::unpack_pos;
 
 /// Exact, complex body with one observably separated canonical terminal tail.
 /// Query is already in candidate alignment orientation.
-fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u32, u64)>> {
+fn exact_body_seeds(
+    index: &Index,
+    query: &[u8],
+    p: &Placement,
+) -> Option<Vec<(u32, crate::seed::Minimizer)>> {
     if p.primary_eligible(query.len()) || p.strict.score <= 0 || !p.has_consistent_junctions() {
         return None;
     }
@@ -49,7 +53,7 @@ fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u3
     let mut q = 0usize;
     let mut r = p.pos;
     let mut counts = [0usize; 4];
-    let mut supported = Vec::new();
+    let mut seeds = Vec::new();
     for op in &p.cigar {
         match *op {
             CigarOp::Match(n) => {
@@ -68,14 +72,13 @@ fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u3
                     counts[code] += 1;
                 }
                 for seed in crate::seed::minimizers(block, index.params) {
-                    let hits = index.query(seed.kmer);
-                    if hits.count != 1 {
-                        continue;
-                    }
-                    let (contig, position, strand) = unpack_pos(hits.positions[0]);
-                    if contig == p.contig && position == r + seed.pos && strand == seed.strand {
-                        supported.push((q as u32 + seed.pos, seed.kmer));
-                    }
+                    seeds.push((
+                        q as u32 + seed.pos,
+                        crate::seed::Minimizer {
+                            pos: r + seed.pos,
+                            ..seed
+                        },
+                    ));
                 }
                 q = qe;
                 r = re;
@@ -98,6 +101,10 @@ fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u3
     {
         return None;
     }
+    Some(seeds)
+}
+
+fn disjoint_support(mut supported: Vec<(u32, u64)>, k: u32) -> Vec<(u32, u64)> {
     supported.sort_unstable();
     supported.dedup();
     let mut end = 0;
@@ -105,9 +112,106 @@ fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u3
     for (start, key) in supported {
         if start >= end {
             disjoint.push((start, key));
-            end = start + index.params.k;
+            end = start + k;
         }
     }
+    disjoint
+}
+
+/// Original global-index support contract, unchanged by conditional recovery.
+fn indexed_support(index: &Index, query: &[u8], p: &Placement) -> Option<Vec<(u32, u64)>> {
+    let mut supported = Vec::new();
+    for (query_position, seed) in exact_body_seeds(index, query, p)? {
+        let hits = index.query(seed.kmer);
+        if hits.count != 1 {
+            continue;
+        }
+        let (contig, position, strand) = unpack_pos(hits.positions[0]);
+        if contig == p.contig && position == seed.pos && strand == seed.strand {
+            supported.push((query_position, seed.kmer));
+        }
+    }
+    let disjoint = disjoint_support(supported, index.params.k);
+    (disjoint.len() >= 2).then_some(disjoint)
+}
+
+/// Bounded supplied-index evidence conditioned on the actual complete mate.
+/// Only contiguous bodies use this proposal; the original route handles N.
+fn mate_conditioned_support(
+    index: &Index,
+    query: &[u8],
+    p: &Placement,
+    mate: &ReadAlignment,
+    attempt: &mut ShortBodySketchAttempt,
+) -> Option<Vec<(u32, u64)>> {
+    if p.cigar
+        .iter()
+        .any(|op| !matches!(op, CigarOp::Match(_) | CigarOp::SoftClip(_)))
+    {
+        return None;
+    }
+    let mut seeds = exact_body_seeds(index, query, p)?;
+    seeds.sort_unstable_by_key(|(q, seed)| (index.query(seed.kmer).count, *q, seed.kmer));
+    let body = p
+        .cigar
+        .iter()
+        .filter_map(|op| match op {
+            CigarOp::Match(n) => Some(*n),
+            _ => None,
+        })
+        .sum::<u32>();
+    let mut supported = Vec::new();
+    for (q, seed) in seeds {
+        let hits = index.query(seed.kmer);
+        if hits.count == 0 {
+            continue;
+        }
+        if hits.count > MID_OCC_CAP {
+            attempt.over_cap_seed_lists += 1;
+            attempt.omitted_seed_lists += 1;
+            continue;
+        }
+        if hits.count as usize > MID_ROUND_MAX_ANCHORS - attempt.scanned_postings {
+            attempt.omitted_seed_lists += 1;
+            continue;
+        }
+        attempt.scanned_seed_lists += 1;
+        attempt.scanned_postings += hits.count as usize;
+        let body_offset = seed.pos.checked_sub(p.pos)?;
+        let mut conditioned_positions = 0usize;
+        let mut expected_position = false;
+        for &packed in hits.positions {
+            let (contig, position, strand) = unpack_pos(packed);
+            if contig != mate.contig || strand != seed.strand {
+                continue;
+            }
+            let Some(start) = position.checked_sub(body_offset) else {
+                continue;
+            };
+            let Some(end) = start.checked_add(body) else {
+                continue;
+            };
+            if end > index.reference.contigs[contig as usize].len {
+                continue;
+            }
+            let hypothetical = ReadAlignment {
+                contig,
+                pos: start,
+                strand: p.strand,
+                cigar: vec![CigarOp::Match(body)],
+                ..Default::default()
+            };
+            if crate::pair::relate(&hypothetical, mate) == crate::pair::PairRelation::Proper {
+                conditioned_positions += 1;
+                expected_position |= start == p.pos;
+            }
+        }
+        if conditioned_positions == 1 && expected_position {
+            supported.push((q, seed.kmer));
+        }
+    }
+    let disjoint = disjoint_support(supported, index.params.k);
+    attempt.retained_disjoint_seeds = disjoint.len();
     (disjoint.len() >= 2).then_some(disjoint)
 }
 
@@ -163,15 +267,13 @@ impl Aligner<'_> {
             let query = if p.strand == Strand::Minus { &rc } else { seq };
             self.rescore_strict(query, p);
         }
-        let mut qualifying: Vec<(usize, Vec<(u32, u64)>)> = Vec::new();
+        let mut qualifying: Vec<(usize, Vec<(u32, u64)>, &'static str)> = Vec::new();
+        let mut conditional_sketch_attempts = Vec::new();
         for (rank, p) in placements.iter().enumerate() {
             if p.contig != mate.contig || p.strand == mate.strand {
                 continue;
             }
             let query = if p.strand == Strand::Minus { &rc } else { seq };
-            let Some(seeds) = indexed_support(self.index, query, p) else {
-                continue;
-            };
             let geometry = ReadAlignment {
                 contig: p.contig,
                 pos: p.pos,
@@ -182,11 +284,23 @@ impl Aligner<'_> {
             if crate::pair::relate(&geometry, mate) != crate::pair::PairRelation::Proper {
                 continue;
             }
+            let (seeds, scope) = if let Some(seeds) = indexed_support(self.index, query, p) {
+                (seeds, "global_index")
+            } else {
+                let mut attempt = ShortBodySketchAttempt {
+                    rank_in_pool: rank,
+                    ..Default::default()
+                };
+                let seeds = mate_conditioned_support(self.index, query, p, mate, &mut attempt);
+                conditional_sketch_attempts.push(attempt);
+                let Some(seeds) = seeds else { continue };
+                (seeds, "mate_conditioned_index")
+            };
             if !qualifying
                 .iter()
-                .any(|(i, _)| same_path(&placements[*i], p))
+                .any(|(i, _, _)| same_path(&placements[*i], p))
             {
-                qualifying.push((rank, seeds));
+                qualifying.push((rank, seeds, scope));
             }
         }
         if let Some(slot) = diagnostic {
@@ -207,11 +321,24 @@ impl Aligner<'_> {
                 qualified_paths: qualifying.len(),
                 supported_candidates: qualifying
                     .iter()
-                    .map(|(rank, seeds)| ShortBodyCandidate {
+                    .map(|(rank, seeds, scope)| ShortBodyCandidate {
                         rank_in_pool: *rank,
-                        disjoint_unique_indexed_seeds: seeds.clone(),
+                        support_scope: scope,
+                        disjoint_unique_indexed_seeds: if *scope == "global_index" {
+                            seeds.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        disjoint_mate_conditioned_indexed_seeds: if *scope
+                            == "mate_conditioned_index"
+                        {
+                            seeds.clone()
+                        } else {
+                            Vec::new()
+                        },
                     })
                     .collect(),
+                conditional_sketch_attempts,
             });
             *slot = Some(pool);
         }
@@ -219,7 +346,7 @@ impl Aligner<'_> {
         if qualifying.len() != 1 {
             return None;
         }
-        let (rank, seeds) = &qualifying[0];
+        let (rank, seeds, _) = &qualifying[0];
         let p = &placements[*rank];
         Some(ReadAlignment {
             contig: p.contig,
@@ -510,14 +637,197 @@ mod tests {
         let duplicated = index(&genome);
         assert!(indexed_support(&duplicated, &seq, &p).is_none());
         let mut aligner = Aligner::new(&duplicated, AlignConfig::rna_default());
+        let conditional = aligner
+            .recover_short_body_observed(
+                &seq,
+                &mate(2300, Strand::Minus),
+                Some(&cache(vec![p])),
+                None,
+            )
+            .expect("remote represented duplicate is compatible with conditional support");
+        assert_eq!(crate::mapq::mapq_of(&conditional), 0);
+        // Identical observations also arise when the source is missing or the
+        // mate is wrong. Conditional evidence cannot identify those worlds.
+    }
+
+    #[test]
+    fn short_body_conditional_remote_repeat_support_both_strands_and_clip_ends() {
+        let (mut genome, _, _) = fixture();
+        // Same complex body occurs remotely; no globally unique body seed can
+        // authorize recovery. The supplied mate distinguishes the two copies.
+        let body = genome[2000..2080].to_vec();
+        genome[5000..5080].copy_from_slice(&body);
+        for prefix in [false, true] {
+            let adjacent = if prefix { body[0] } else { body[79] };
+            let tail = *b"ACGT".iter().find(|&&b| b != adjacent).unwrap();
+            let oriented = if prefix {
+                [&vec![tail; 70], body.as_slice()].concat()
+            } else {
+                [body.as_slice(), &vec![tail; 70]].concat()
+            };
+            let idx = index(&genome);
+            for strand in [Strand::Plus, Strand::Minus] {
+                let cigar = if prefix {
+                    vec![CigarOp::SoftClip(70), CigarOp::Match(80)]
+                } else {
+                    vec![CigarOp::Match(80), CigarOp::SoftClip(70)]
+                };
+                let p = candidate(2000, strand, cigar);
+                assert!(indexed_support(&idx, &oriented, &p).is_none());
+                let seq = if strand == Strand::Minus {
+                    revcomp(&oriented)
+                } else {
+                    oriented.clone()
+                };
+                let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+                let mut diagnostic = None;
+                let result = aligner.recover_short_body_observed(
+                    &seq,
+                    &mate(2300, strand.flip()),
+                    Some(&cache(vec![p])),
+                    Some(&mut diagnostic),
+                );
+                assert!(
+                    result.is_some(),
+                    "remote repeat must be distinguishable by existing complete mate geometry"
+                );
+                let result = result.unwrap();
+                assert_eq!(result.pos, 2000);
+                assert_eq!(crate::mapq::mapq_of(&result), 0);
+                assert!(result.rescued && result.short_body_qualified);
+                let evidence = serde_json::to_value(diagnostic.unwrap()).unwrap();
+                assert_eq!(
+                    evidence["short_body"]["supported_candidates"][0]["support_scope"],
+                    "mate_conditioned_index"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_body_conditional_nearby_omitted_repeat_still_refuses() {
+        let (mut genome, seq, p) = fixture();
+        let body = genome[2000..2080].to_vec();
+        genome[2500..2580].copy_from_slice(&body);
+        let idx = index(&genome);
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        // The competing full path is absent from the cached pool. Its indexed
+        // seed occurrences must still defeat conditional support.
         assert!(aligner
             .recover_short_body_observed(
                 &seq,
                 &mate(2300, Strand::Minus),
                 Some(&cache(vec![p])),
-                None
+                None,
             )
             .is_none());
+    }
+
+    #[test]
+    fn short_body_conditional_whole_list_budget_and_over_cap_refusal() {
+        let (base, seq, p) = fixture();
+        let segment = [&base[2000..2080], &base[3000..3040]].concat();
+        for copies in [4500, 5001] {
+            let mut genome = base.clone();
+            for _ in 0..copies {
+                genome.extend_from_slice(&segment);
+            }
+            let idx = index(&genome);
+            assert!(indexed_support(&idx, &seq, &p).is_none());
+            let mut attempt = ShortBodySketchAttempt::default();
+            let supported =
+                mate_conditioned_support(&idx, &seq, &p, &mate(2300, Strand::Minus), &mut attempt);
+            assert!(attempt.scanned_postings <= MID_ROUND_MAX_ANCHORS);
+            assert!(attempt.omitted_seed_lists > 0);
+            if copies == 5001 {
+                assert!(supported.is_none());
+                assert_eq!(attempt.scanned_postings, 0);
+                assert!(attempt.over_cap_seed_lists > 0);
+            } else {
+                assert!(attempt.scanned_postings > 0);
+                assert_eq!(attempt.scanned_postings % (copies + 1), 0);
+                let mut again = ShortBodySketchAttempt::default();
+                assert_eq!(
+                    supported,
+                    mate_conditioned_support(
+                        &idx,
+                        &seq,
+                        &p,
+                        &mate(2300, Strand::Minus),
+                        &mut again,
+                    ),
+                );
+                assert_eq!(
+                    serde_json::to_value(attempt).unwrap(),
+                    serde_json::to_value(again).unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_body_conditional_diagnostics_lift_seeds_without_global_unique_claim() {
+        let (mut genome, seq, mut p) = fixture();
+        let body = genome[2000..2080].to_vec();
+        genome[5000..5080].copy_from_slice(&body);
+        p.strand = Strand::Minus;
+        let idx = index(&genome);
+        let raw = revcomp(&seq);
+        let mut aligner = Aligner::new(&idx, AlignConfig::rna_default());
+        let mut diagnostic = None;
+        assert!(aligner
+            .recover_short_body_observed(
+                &raw,
+                &mate(2300, Strand::Plus),
+                Some(&cache(vec![p])),
+                Some(&mut diagnostic),
+            )
+            .is_some());
+        let pool = diagnostic.unwrap();
+        let supported = &pool.short_body.as_ref().unwrap().supported_candidates[0];
+        assert!(supported.disjoint_unique_indexed_seeds.is_empty());
+        let original = supported.disjoint_mate_conditioned_indexed_seeds.clone();
+        assert!(original.len() >= 2);
+        let read = crate::fastq::FastqRecord {
+            name: b"conditional-lift/1".to_vec(),
+            seq: [raw.as_slice(), &vec![b'C'; 50]].concat(),
+            qual: vec![b'I'; 200],
+        };
+        let mut output = Vec::new();
+        crate::diagnostics::write_row_with_fragment(
+            &mut output,
+            &read,
+            Some(1),
+            true,
+            crate::diagnostics::CandidatePool::capture(&idx, 150, &[], "independent"),
+            Some(pool),
+            Some(crate::fragment::FragmentEvidence {
+                fragment_length: 150,
+                overlap_bases: 100,
+                viable_offsets: 1,
+                adapter_family: "synthetic",
+                adapter_bases_r1: 50,
+                adapter_bases_r2: 50,
+            }),
+        )
+        .unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let supported = &row["mate_attempt"]["short_body"]["supported_candidates"][0];
+        assert_eq!(supported["support_scope"], "mate_conditioned_index");
+        assert_eq!(
+            supported["disjoint_unique_indexed_seeds"],
+            serde_json::json!([])
+        );
+        let lifted: Vec<(u32, u64)> =
+            serde_json::from_value(supported["disjoint_mate_conditioned_indexed_seeds"].clone())
+                .unwrap();
+        assert_eq!(
+            lifted,
+            original
+                .into_iter()
+                .map(|(q, key)| (q + 50, key))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

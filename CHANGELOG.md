@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.25`, add bounded mate-conditioned primary-index support for
+  otherwise unplaced exact unspliced short bodies. Preserve observable tail
+  boundaries, ordinary coverage, existing mapped reads and MAPQ0 qualification.
+  Keep global versus conditional support distinct and disclose whole-list
+  posting budgets. Add remote/local repeat, budget, query-frame and native
+  pipeline controls; see `docs/mate-conditioned-sketch.md`. Mapper superiority
+  and scientific adoption remain unproven.
+
 - In `1.1.1-dev.24`, make extension's first gap base pay open+extension,
   matching the existing common candidate domain for both insertions and
   deletions. Shared scalar/SIMD/traceback logic now avoids selecting a path

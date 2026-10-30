@@ -1,5 +1,12 @@
 # Known scientific qualification issues
 
+Dev.25 proposes mate-conditioned primary-index support for otherwise unplaced
+exact unspliced bodies with observably separated homopolymer clips. This can
+distinguish remote represented repeats only under the actual mate geometry;
+it cannot establish exhaustive uniqueness or correct a wrong mate. Every new
+placement remains MAPQ0. Shared-QC and raw full replay, adverse accounting and
+independent generalization remain separate; see `mate-conditioned-sketch.md`.
+
 Dev.23 adds a pair-supported sparse-substitution scoring proposal for clipped
 read-through ends. Every accepted extension is MAPQ0, so higher body coverage
 can reduce evidence admitted by the downstream MAPQ20 gate. Shared observations
