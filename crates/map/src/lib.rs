@@ -27,5 +27,6 @@ pub mod span;
 pub mod splice;
 pub mod split;
 pub mod stats;
+pub mod timing;
 
 pub use mapq::ReadAlignment;

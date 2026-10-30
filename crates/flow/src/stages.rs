@@ -764,10 +764,13 @@ pub fn map_stage_with_context_budget_options(
     if context_posting_budget == 0 || context_proposal_budget == 0 {
         return Err(FlowError::Entry("context budgets must be positive".into()));
     }
+    let _total = esperanto_map::timing::StageTimer::start("flow.map.total");
     let dir = out_dir;
     fs::create_dir_all(dir)?;
+    let load_timer = esperanto_map::timing::StageTimer::start("flow.load.primary");
     let index: &'static esperanto_map::index::Index<'static> =
         Box::leak(Box::new(index_io::load(paidx).map_err(stage_err("map"))?));
+    drop(load_timer);
     // Primary alignment uses all four bases. Hyperediting rescue uses
     // separate three-letter transforms (Porath, Carmi & Levanon,
     // Nat Commun 5:4726, 2014).
@@ -784,6 +787,7 @@ pub fn map_stage_with_context_budget_options(
     config.context_proposal_budget = context_proposal_budget;
     let jlib = match gtf_path {
         Some(g) => {
+            let _annotation = esperanto_map::timing::StageTimer::start("flow.annotation");
             let cache = annotation_cache_dir();
             let started = std::time::Instant::now();
             let (lib, status) = gtf::from_gtf_cached(g, index.reference, cache.as_deref())
@@ -796,6 +800,7 @@ pub fn map_stage_with_context_budget_options(
         }
         None => None,
     };
+    let l1_timer = esperanto_map::timing::StageTimer::start("flow.load.l1");
     let l1 = match l1_bundle {
         Some(p) => {
             let l1 = L1Index::open(p).map_err(stage_err("map"))?;
@@ -813,6 +818,7 @@ pub fn map_stage_with_context_budget_options(
         }
         None => None,
     };
+    drop(l1_timer);
 
     let raw_bam = dir.join("raw.bam");
     let mut out = PipelineOut {
@@ -831,12 +837,15 @@ pub fn map_stage_with_context_budget_options(
         l1: l1.clone(),
     };
     let n_annotated = out.jlib.as_ref().map_or(0, |l| l.junctions.len());
+    let primary_timer = esperanto_map::timing::StageTimer::start("flow.primary.total");
     let (stats, discoveries, _merged, n_annotated_replaced) = match r2 {
         None => run_se_2pass(&mut out, r1, threads),
         Some(c2) => run_pe_2pass(&mut out, r1, c2, threads),
     }
     .map_err(stage_err("map"))?;
+    drop(primary_timer);
 
+    let metadata_timer = esperanto_map::timing::StageTimer::start("flow.primary.metadata");
     let json = serde_json::to_string_pretty(&stats).map_err(stage_err("map"))?;
     fs::write(dir.join("align_qc.json"), format!("{json}\n"))?;
     eprintln!(
@@ -876,6 +885,7 @@ pub fn map_stage_with_context_budget_options(
         }
         fs::write(dir.join("discovered_junctions.bed"), bed)?;
     }
+    drop(metadata_timer);
     rescue_collapsed(paidx, Some(index.reference), dir, threads, &raw_bam)?;
     Ok((raw_bam, index, l1))
 }
@@ -961,6 +971,8 @@ fn rescue_collapsed(
     threads: usize,
     raw_bam: &Path,
 ) -> Result<u64, FlowError> {
+    let _total = esperanto_map::timing::StageTimer::start("rescue.total");
+    let preparation_timer = esperanto_map::timing::StageTimer::start("rescue.prepare");
     let mut dirs: Vec<((u8, u8), PathBuf, u8, u8)> = Vec::new();
     for &(dir, ext, from, to) in rescue_dirs().iter() {
         let path = paidx.with_extension(ext);
@@ -1090,9 +1102,12 @@ fn rescue_collapsed(
     // Count rejection reasons separately by strand.
     let mut why: std::collections::BTreeMap<(&'static str, bool), u64> =
         std::collections::BTreeMap::new();
+    drop(preparation_timer);
     let mut rescue_index = crate::rescue_index::RescueIndex::default();
     for (pass, (dir, ipath, from, to)) in dirs.iter().enumerate() {
+        let load_timer = esperanto_map::timing::StageTimer::start("rescue.index");
         let idx = rescue_index.index_for(ipath).map_err(stage_err("map"))?;
+        drop(load_timer);
         // Seed k/w and the chain anchor reward must match the transformed
         // index. `edit_dir` stays off: under the matching transform this
         // direction's edits are already identities, and exempting anything
@@ -1114,6 +1129,7 @@ fn rescue_collapsed(
         cfg.extend.gap_open = RESCUE_GAP_PENALTY;
         cfg.extend.gap_ext = RESCUE_GAP_PENALTY;
         let (lo_from, lo_to) = (from.to_ascii_lowercase(), to.to_ascii_lowercase());
+        let search_timer = esperanto_map::timing::StageTimer::start("rescue.search");
         let results: Vec<Option<esperanto_map::mapq::ReadAlignment>> = pool.install(|| {
             use rayon::prelude::*;
             cand_idx
@@ -1139,11 +1155,15 @@ fn rescue_collapsed(
                 )
                 .collect()
         });
+        drop(search_timer);
         // Rayon workers and their aligners have joined. Results own their
         // placements. Only an immediately following pass on the same immutable
         // index retains the owner. No transformed index overlaps another;
         // the final pass in each run releases before placement verification.
+        let release_timer = esperanto_map::timing::StageTimer::start("rescue.release");
         rescue_index.release_unless(dirs.get(pass + 1).map(|(_, path, _, _)| path.as_path()));
+        drop(release_timer);
+        let _verification = esperanto_map::timing::StageTimer::start("rescue.verify");
         for (&i, aln) in cand_idx.iter().zip(results) {
             let Some(mut a) = aln else { continue };
             inherit_seed_limit(&mut a, &fq[i].0, &original_seed_limits);
@@ -1169,6 +1189,7 @@ fn rescue_collapsed(
             }
         }
     }
+    let adjudication_timer = esperanto_map::timing::StageTimer::start("rescue.adjudicate");
     for i in &ambiguous {
         winner.remove(i);
         rejected += 2; // both passes' placements discarded
@@ -1275,6 +1296,8 @@ fn rescue_collapsed(
         patch_stats(0, rejected)?;
         return Ok(0);
     }
+    drop(adjudication_timer);
+    let _output_timer = esperanto_map::timing::StageTimer::start("rescue.output");
     // Whether the verified placements clear the pileup gate is a separate
     // question from whether they are verified, and the two failure modes look
     // identical downstream: a placement held at 0 by the formula (too few

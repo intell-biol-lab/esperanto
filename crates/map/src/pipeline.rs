@@ -26,6 +26,7 @@ use crate::mapq::{mapq_of, ReadAlignment, PILEUP_GATE};
 use crate::pair::{relate, template_length, PairRelation};
 use crate::seed::Strand;
 use crate::stats::{AlignStats, StatsAcc};
+use crate::timing::StageTimer;
 
 /// Preserve original-search limitation on an unplaced record for later rescue.
 fn mark_unplaced_seed_limit(rec: &mut BamRecord, limited: bool) {
@@ -134,6 +135,7 @@ pub fn run_se(
     let mut reader = FastqReader::open(r1)?;
 
     loop {
+        let read_timer = StageTimer::start("primary.se.read");
         let mut chunk = Vec::with_capacity(CHUNK);
         for _ in 0..CHUNK {
             match reader.next_record()? {
@@ -141,9 +143,11 @@ pub fn run_se(
                 None => break,
             }
         }
+        drop(read_timer);
         if chunk.is_empty() {
             break;
         }
+        let prepare_timer = StageTimer::start("primary.se.prepare");
         let index = out.index;
         let cfg = out.config;
         let lib = out.jlib.clone();
@@ -154,6 +158,8 @@ pub fn run_se(
         // sharing it (each keeps its own name/qual). Deterministic algorithm +
         // ordered write ⇒ byte-identical.
         let (unique_seqs, uid_of_read) = dedup_se(&chunk);
+        drop(prepare_timer);
+        let search_timer = StageTimer::start("primary.se.search");
         let cached: Vec<(
             Option<ReadAlignment>,
             Option<crate::diagnostics::CandidatePool>,
@@ -177,6 +183,8 @@ pub fn run_se(
                     .collect()
             })
         };
+        drop(search_timer);
+        let output_timer = StageTimer::start("primary.se.output");
         // Build BamRecord per read in input order, cloning the cached
         // alignment and pairing it with the read's own name/qual.
         let mut results: Vec<BamRecord> = Vec::with_capacity(chunk.len());
@@ -220,12 +228,15 @@ pub fn run_se(
             }
             sinks.write(br)?;
         }
+        drop(output_timer);
     }
+    let finish_timer = StageTimer::start("primary.se.finish");
     sinks.finish()?;
     unm.finish()?;
     if let Some(sink) = out.diagnostics.as_mut() {
         crate::diagnostics::flush(&mut **sink)?;
     }
+    drop(finish_timer);
     let mode = if out.config.rna { "rna-se" } else { "dna-se" };
     Ok((
         stats.finalize(mode, false, t0.elapsed().as_secs_f64()),
@@ -327,6 +338,7 @@ pub fn run_pe(
     let mut rd2 = FastqReader::open(r2)?;
 
     loop {
+        let read_timer = StageTimer::start("primary.pe.read");
         let mut chunk: Vec<(FastqRecord, FastqRecord)> = Vec::with_capacity(CHUNK);
         for _ in 0..CHUNK {
             match (rd1.next_record()?, rd2.next_record()?) {
@@ -345,9 +357,11 @@ pub fn run_pe(
                 }
             }
         }
+        drop(read_timer);
         if chunk.is_empty() {
             break;
         }
+        let prepare_timer = StageTimer::start("primary.pe.prepare");
         let index = out.index;
         let cfg = out.config;
         let lib = out.jlib.clone();
@@ -374,6 +388,8 @@ pub fn run_pe(
             })
             .collect();
         let (unique_seqs, uid1_of_pair, uid2_of_pair) = dedup_pe_fragments(&chunk, &fragments);
+        drop(prepare_timer);
+        let search_timer = StageTimer::start("primary.pe.search");
         let unique_alns: Vec<(Option<ReadAlignment>, Option<CachedPlacements>)> =
             pool.install(|| {
                 let lib = lib.clone();
@@ -386,6 +402,8 @@ pub fn run_pe(
                     )
                     .collect()
             });
+        drop(search_timer);
+        let pairs_timer = StageTimer::start("primary.pe.pairs");
         // Parallel per-pair rescue arbitration reads the uid-indexed primary
         // results (order preserved by collect); BAM records are built in the
         // serial write section.
@@ -553,6 +571,8 @@ pub fn run_pe(
                 )
                 .collect()
         });
+        drop(pairs_timer);
+        let output_timer = StageTimer::start("primary.pe.output");
         for (i, ((a, b), (aln1, aln2, diag1, diag2))) in chunk.iter().zip(&results).enumerate() {
             if let Some(sink) = out.diagnostics.as_mut() {
                 for (read, mate, aln, uid, attempt) in [
@@ -656,12 +676,15 @@ pub fn run_pe(
             sinks.write(&ra)?;
             sinks.write(&rb)?;
         }
+        drop(output_timer);
     }
+    let finish_timer = StageTimer::start("primary.pe.finish");
     sinks.finish()?;
     unm.finish()?;
     if let Some(sink) = out.diagnostics.as_mut() {
         crate::diagnostics::flush(&mut **sink)?;
     }
+    drop(finish_timer);
     let mode = if out.config.rna { "rna-pe" } else { "dna-pe" };
     Ok((
         stats.finalize(mode, true, t0.elapsed().as_secs_f64()),
@@ -767,7 +790,9 @@ pub fn run_se_2pass(
     out.bam = Some(Box::new(std::io::sink()));
     let real_unm = std::mem::replace(&mut out.unmapped_fq, Box::new(std::io::sink()));
     let real_diagnostics = out.diagnostics.take();
+    let pass1_timer = StageTimer::start("primary.se.2pass.pass1");
     let pass1 = run_se(out, r1, threads);
+    drop(pass1_timer);
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
@@ -801,7 +826,9 @@ pub fn run_se_2pass(
         .zip(final_lib.counts.iter().copied())
         .collect();
     out.jlib = Some(Arc::new(final_lib));
+    let pass2_timer = StageTimer::start("primary.se.2pass.pass2");
     let (stats, _) = run_se(out, r1, threads)?;
+    drop(pass2_timer);
     Ok((stats, kept, final_list, removed_annotated.len()))
 }
 
@@ -832,7 +859,9 @@ pub fn run_pe_2pass(
     out.config.mate_short_body = false;
     out.config.pair_substitution = false;
     out.config.weak_mate_proposals = false;
+    let pass1_timer = StageTimer::start("primary.pe.2pass.pass1");
     let pass1 = run_pe(out, r1, r2, threads);
+    drop(pass1_timer);
     out.config.mate_short_body = mate_short_body;
     out.config.pair_substitution = pair_substitution;
     out.config.weak_mate_proposals = weak_mate_proposals;
@@ -869,7 +898,9 @@ pub fn run_pe_2pass(
         .collect();
     out.jlib = Some(Arc::new(final_lib));
     // pass2: production alignment with the merged library.
+    let pass2_timer = StageTimer::start("primary.pe.2pass.pass2");
     let (stats, _) = run_pe(out, r1, r2, threads)?;
+    drop(pass2_timer);
     Ok((stats, kept, final_list, removed_annotated.len()))
 }
 

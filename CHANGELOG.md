@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1-dev.36 (unreleased)
+
+- Add opt-in stage wall-time profiling with `ESP_PROFILE_STAGES=1`. Separate
+  load, annotation, primary read/search/arbitration/output and rescue phases.
+  Disabled profiling does not read the clock; scientific outputs are unchanged.
+
 ## 1.1.1-dev.35 (unreleased)
 
 - Combine independently qualified dev.33 adjacent TC reuse and dev.34 direct
