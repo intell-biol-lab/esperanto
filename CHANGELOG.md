@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1-dev.31 (unreleased)
+
+- Stream GTF annotation with bounded input buffering and preserve junction support.
+- Add content/reference/schema/payload-verified annotation caching, atomic cache
+  publication and parse fallback. `ESP_ANNOTATION_CACHE=off` bypasses; an explicit
+  path overrides XDG/HOME user cache. No discovered sample junctions are cached.
+
+
 ## [Unreleased]
 
 - In `1.1.1-dev.30`, read L1 transcript-index entries through owned, demand-paged mappings and

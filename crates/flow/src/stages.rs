@@ -286,14 +286,21 @@ fn qc_outputs(params: &RunParams, entry: Entry) -> (PathBuf, Option<PathBuf>) {
 
 /// contig name → SQ id for the junction library; unknown contigs map to
 /// `u32::MAX` (their junctions can never match a real alignment).
-fn contig_id(index: &Index, name: &str) -> u32 {
-    index
-        .reference
-        .contigs
-        .iter()
-        .position(|c| c.name == name)
-        .map(|i| i as u32)
-        .unwrap_or(u32::MAX)
+// User cache, never sidecars in immutable reference/index directories.
+// An explicit empty value or "off" bypasses both reads and writes.
+fn annotation_cache_dir() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("ESP_ANNOTATION_CACHE") {
+        return if value.is_empty() || value == "off" {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        };
+    }
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".cache")))
+        .map(|p| p.join("esperanto/annotation-v1"))
 }
 
 /// (raw BAM, leaked shared alignment index, L1 bundle when present). The
@@ -777,9 +784,17 @@ pub fn map_stage_with_context_budget_options(
     config.context_posting_budget = context_posting_budget;
     config.context_proposal_budget = context_proposal_budget;
     let jlib = match gtf_path {
-        Some(g) => Some(Arc::new(
-            gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,
-        )),
+        Some(g) => {
+            let cache = annotation_cache_dir();
+            let started = std::time::Instant::now();
+            let (lib, status) = gtf::from_gtf_cached(g, index.reference, cache.as_deref())
+                .map_err(stage_err("map"))?;
+            eprintln!(
+                "[map] annotation cache: {status:?}, {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+            Some(Arc::new(lib))
+        }
         None => None,
     };
     let l1 = match l1_bundle {
