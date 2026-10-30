@@ -75,6 +75,10 @@ pub struct AlignConfig {
     pub boundary_core: bool,
     /// Experimental extra loci from exact MAPQ0 mates; disabled by default.
     pub weak_mate_proposals: bool,
+    /// Repeat-context complete-list posting budget (experimental ablation).
+    pub context_posting_budget: usize,
+    /// Repeat-context retained proposal budget (experimental ablation).
+    pub context_proposal_budget: usize,
 }
 
 impl Default for AlignConfig {
@@ -93,6 +97,8 @@ impl Default for AlignConfig {
             pair_substitution: false,
             boundary_core: false,
             weak_mate_proposals: false,
+            context_posting_budget: crate::repeat_context::POSTING_BUDGET,
+            context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
     }
 }
@@ -113,6 +119,8 @@ impl AlignConfig {
             pair_substitution: true,
             boundary_core: true,
             weak_mate_proposals: false,
+            context_posting_budget: crate::repeat_context::POSTING_BUDGET,
+            context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
     }
 }
@@ -1339,11 +1347,14 @@ impl<'a> Aligner<'a> {
                     && p.cigar == [CigarOp::Match(read_len)]
             })
         {
-            let context = if cfg.context_background {
-                crate::repeat_context::generate(self.index, seq, cfg.extend)
-            } else {
-                crate::repeat_context::generate_with_background(self.index, seq, cfg.extend, false)
-            };
+            let context = crate::repeat_context::generate_budgeted(
+                self.index,
+                seq,
+                cfg.extend,
+                cfg.context_background,
+                cfg.context_posting_budget,
+                cfg.context_proposal_budget,
+            );
             if let Some((proposals, context)) = context {
                 seed_budget
                     .get_or_insert_with(Default::default)

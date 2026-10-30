@@ -1,6 +1,26 @@
 //! Native-index witnesses. All sequence is generated, never human-derived.
 use super::*;
 
+#[test]
+fn larger_context_budgets_do_not_claim_unique_repeat_placement() {
+    let (index, query) = fixture(true, true, 6000);
+    for seq in [query.clone(), revcomp(&query)] {
+        for (postings, candidates) in [(20_000, 8), (80_000, 8), (20_000, 32), (80_000, 32)] {
+            let mut config = AlignConfig::rna_default();
+            config.context_posting_budget = postings;
+            config.context_proposal_budget = candidates;
+            let mut aligner = Aligner::new(&index, config);
+            let (result, cache) = aligner.align_read_full(&seq);
+            let result = result.expect("repeat candidates must remain placeable");
+            assert_eq!(crate::mapq::mapq_of(&result), 0);
+            assert!(result.seed_search_limited);
+            let budget = cache.unwrap().seed_budget.unwrap().repeat_context.unwrap();
+            assert!(budget.scanned_postings <= postings);
+            assert!(budget.retained_candidates <= candidates);
+        }
+    }
+}
+
 fn random(state: &mut u64, n: usize) -> Vec<u8> {
     (0..n)
         .map(|_| {

@@ -11,6 +11,17 @@ pub(crate) const POSTING_BUDGET: usize = 20_000;
 pub(crate) const PROPOSAL_BUDGET: usize = 8;
 pub(crate) const MAX_QUERY: usize = 256;
 
+pub(crate) fn generate_budgeted(
+    index: &Index,
+    query: &[u8],
+    ep: ExtendParams,
+    background: bool,
+    postings: usize,
+    proposals: usize,
+) -> Option<(Vec<Proposal>, RepeatContextBudget)> {
+    generate_impl(index, query, ep, background, postings, proposals)
+}
+
 pub(crate) struct Proposal {
     pub contig: u32,
     pub pos: u32,
@@ -93,6 +104,7 @@ fn background_score(query: &[u8], ep: ExtendParams) -> i32 {
 /// `None` means no additional search; `Some` is conservatively limited even
 /// when every selected list fits, because this family verifies ungapped
 /// diagonals only and does not establish a calibrated complete search.
+#[cfg(test)]
 pub(crate) fn generate(
     index: &Index,
     query: &[u8],
@@ -101,11 +113,30 @@ pub(crate) fn generate(
     generate_with_background(index, query, ep, true)
 }
 
+#[cfg(test)]
 pub(crate) fn generate_with_background(
     index: &Index,
     query: &[u8],
     ep: ExtendParams,
     background: bool,
+) -> Option<(Vec<Proposal>, RepeatContextBudget)> {
+    generate_impl(
+        index,
+        query,
+        ep,
+        background,
+        POSTING_BUDGET,
+        PROPOSAL_BUDGET,
+    )
+}
+
+fn generate_impl(
+    index: &Index,
+    query: &[u8],
+    ep: ExtendParams,
+    background: bool,
+    posting_budget: usize,
+    proposal_budget: usize,
 ) -> Option<(Vec<Proposal>, RepeatContextBudget)> {
     let k = index.params.k as usize;
     if k == 0 || k > 32 || query.len() < k || query.len() > MAX_QUERY {
@@ -137,7 +168,7 @@ pub(crate) fn generate_with_background(
     let mut emitted = BTreeSet::new();
     let mut proposals = Vec::new();
     for (count, m) in seeds {
-        if count > POSTING_BUDGET - budget.scanned_postings {
+        if count > posting_budget - budget.scanned_postings {
             budget.omitted_seed_lists += 1;
             continue;
         }
@@ -218,7 +249,7 @@ pub(crate) fn generate_with_background(
             .then(a.pos.cmp(&b.pos))
             .then((a.strand as u8).cmp(&(b.strand as u8)))
     });
-    proposals.truncate(PROPOSAL_BUDGET);
+    proposals.truncate(proposal_budget);
     budget.retained_candidates = proposals.len();
     budget.omitted_candidates = budget.positive_candidates - proposals.len();
     Some((proposals, budget))
@@ -227,6 +258,50 @@ pub(crate) fn generate_with_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_scan_and_retention_budgets_preserve_whole_lists() {
+        let query = b"ACGTTGCAAGTCGAT";
+        let reference = [vec![b'N'; 32], query.to_vec(), vec![b'N'; 32]]
+            .concat()
+            .repeat(6000);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">repeat\n".as_slice(), &reference, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 1 },
+        );
+        let ep = ExtendParams::default();
+        let (none, skipped) = generate_budgeted(&index, query, ep, true, 5999, 8).unwrap();
+        assert!(
+            none.is_empty(),
+            "never sample a coordinate prefix of a list"
+        );
+        assert_eq!(skipped.scanned_postings, 0);
+        assert_eq!(skipped.omitted_seed_lists, 1);
+        let (small, a) = generate_budgeted(&index, query, ep, true, 6000, 8).unwrap();
+        let (large, b) = generate_budgeted(&index, query, ep, true, 6000, 32).unwrap();
+        assert_eq!((small.len(), large.len()), (8, 32));
+        assert_eq!((a.scanned_postings, b.scanned_postings), (6000, 6000));
+        assert_eq!(a.positive_candidates, b.positive_candidates);
+        assert_eq!(a.omitted_candidates - b.omitted_candidates, 24);
+        let (defaults, _) = generate(&index, query, ep).unwrap();
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|p| (p.contig, p.pos, p.score))
+                .collect::<Vec<_>>(),
+            small
+                .iter()
+                .map(|p| (p.contig, p.pos, p.score))
+                .collect::<Vec<_>>()
+        );
+        // Exhausting these ungapped lists does not make the evidence complete.
+        assert!(crate::index::AnchorBudget {
+            repeat_context: Some(b),
+            ..Default::default()
+        }
+        .limited());
+    }
 
     #[test]
     fn context_background_score_matches_exhaustive_subinterval_oracle() {

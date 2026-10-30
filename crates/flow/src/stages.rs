@@ -702,6 +702,62 @@ pub fn map_stage_with_weak_mate_options(
     ),
     FlowError,
 > {
+    map_stage_with_context_budget_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        pair_substitution,
+        boundary_core,
+        weak_mate_proposals,
+        20_000,
+        8,
+    )
+}
+
+/// Independent repeat-context budgets; defaults retain the dev.26 policy.
+/// These limits apply to both discovery and final mapping, without changing
+/// the conservative repeat-context MAPQ0 rule.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_context_budget_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    boundary_core: bool,
+    weak_mate_proposals: bool,
+    context_posting_budget: usize,
+    context_proposal_budget: usize,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
+    if context_posting_budget == 0 || context_proposal_budget == 0 {
+        return Err(FlowError::Entry("context budgets must be positive".into()));
+    }
     let dir = out_dir;
     fs::create_dir_all(dir)?;
     let index: &'static esperanto_map::index::Index =
@@ -718,6 +774,8 @@ pub fn map_stage_with_weak_mate_options(
     config.pair_substitution = pair_substitution;
     config.boundary_core = boundary_core;
     config.weak_mate_proposals = weak_mate_proposals;
+    config.context_posting_budget = context_posting_budget;
+    config.context_proposal_budget = context_proposal_budget;
     let jlib = match gtf_path {
         Some(g) => Some(Arc::new(
             gtf::from_gtf(g, |name| contig_id(index, name)).map_err(stage_err("map"))?,

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- In `1.1.1-dev.28`, expose independent experimental repeat-context posting and
+  proposal budgets with unchanged 20000/8 defaults and conservative MAPQ0.
+  Preserve whole seed lists, background/scoring rules and old flow APIs.
+  Add independent budget, CLI, repeat/strand and confidence controls for a
+  development-only factorial ablation with dev.27 weak-mate proposals.
+  See `docs/repeat-context-budgets.md`; no default/adoption change is implied.
+
 - In `1.1.1-dev.27`, add a default-off weak-mate candidate proposal experiment.
   An exact but search-limited MAPQ0 mate may propose one ordinary window;
   all original and remote candidates remain in competition, strict improvement

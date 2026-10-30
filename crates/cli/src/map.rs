@@ -52,6 +52,12 @@ pub struct MapArgs {
     /// Experiment: exact MAPQ0 mates may propose a locus without pruning rivals.
     #[arg(long)]
     experimental_weak_mate_proposals: bool,
+    /// Experiment: repeat-context complete-list posting budget.
+    #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..))]
+    experimental_context_postings: u32,
+    /// Experiment: number of retained repeat-context proposals.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
+    experimental_context_candidates: u32,
     /// Enable experimental exact-path arbitration (rejected for general adoption).
     #[arg(long, conflicts_with = "no_exact_path_competition")]
     experimental_exact_path_competition: bool,
@@ -62,7 +68,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_weak_mate_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_context_budget_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -79,6 +85,8 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         !a.no_pair_substitution,
         !a.no_boundary_core,
         a.experimental_weak_mate_proposals,
+        a.experimental_context_postings as usize,
+        a.experimental_context_candidates as usize,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -88,6 +96,36 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn context_budgets_are_independent_positive_and_keep_defaults() {
+        let base = [
+            "probe", "--r1", "r.fq", "--index", "r.paidx", "--out", "out",
+        ];
+        let default = Probe::try_parse_from(base).unwrap();
+        assert_eq!(default.map.experimental_context_postings, 20_000);
+        assert_eq!(default.map.experimental_context_candidates, 8);
+        for (flag, value) in [
+            ("--experimental-context-postings", "80000"),
+            ("--experimental-context-candidates", "32"),
+        ] {
+            let mut args = base.to_vec();
+            args.extend([flag, value]);
+            let a = Probe::try_parse_from(args).unwrap();
+            assert!(!a.map.experimental_weak_mate_proposals);
+            assert_eq!(
+                a.map.experimental_context_postings,
+                if value == "80000" { 80000 } else { 20000 }
+            );
+            assert_eq!(
+                a.map.experimental_context_candidates,
+                if value == "32" { 32 } else { 8 }
+            );
+            let mut zero = base.to_vec();
+            zero.extend([flag, "0"]);
+            assert!(Probe::try_parse_from(zero).is_err());
+        }
+    }
 
     #[derive(Parser)]
     struct Probe {
