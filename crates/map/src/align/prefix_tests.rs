@@ -12,11 +12,11 @@ fn random(state: &mut u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
-pub(crate) fn fixture() -> (Index, Vec<u8>) {
+pub(crate) fn fixture() -> (Index<'static>, Vec<u8>) {
     fixture_with_copies(0, 0)
 }
 
-fn fixture_with_copies(exact_copies: usize, interior_copies: usize) -> (Index, Vec<u8>) {
+fn fixture_with_copies(exact_copies: usize, interior_copies: usize) -> (Index<'static>, Vec<u8>) {
     let mut state = 1;
     let body = random(&mut state, 142);
     let mut decoy = body.clone();

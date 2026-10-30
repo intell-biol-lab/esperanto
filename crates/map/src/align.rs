@@ -297,7 +297,7 @@ pub(crate) struct GenomicBatch {
 /** Per-thread aligner state (reuses DP buffers).
  */
 pub struct Aligner<'a> {
-    pub index: &'a Index,
+    pub index: &'a Index<'a>,
     pub config: AlignConfig,
     /// Junction library (sjdb / 2-pass discoveries; RNA mode).
     pub jlib: Option<Arc<JunctionLib>>,
@@ -360,7 +360,7 @@ impl CachedPlacements {
 }
 
 impl<'a> Aligner<'a> {
-    pub fn new(index: &'a Index, config: AlignConfig) -> Self {
+    pub fn new(index: &'a Index<'a>, config: AlignConfig) -> Self {
         Aligner {
             index,
             config,

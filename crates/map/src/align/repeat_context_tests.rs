@@ -32,7 +32,7 @@ fn random(state: &mut u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
-pub(crate) fn fixture(editing: bool, duplicate: bool, copies: usize) -> (Index, Vec<u8>) {
+pub(crate) fn fixture(editing: bool, duplicate: bool, copies: usize) -> (Index<'static>, Vec<u8>) {
     fixture_extra(editing, duplicate, copies, None)
 }
 
@@ -41,7 +41,7 @@ fn fixture_extra(
     duplicate: bool,
     copies: usize,
     extra: Option<&[u8]>,
-) -> (Index, Vec<u8>) {
+) -> (Index<'static>, Vec<u8>) {
     let mut state = 719;
     let mut body = random(&mut state, 112);
     for p in [92, 100, 107] {

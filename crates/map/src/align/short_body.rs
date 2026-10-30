@@ -502,7 +502,7 @@ impl Aligner<'_> {
 mod tests {
     use super::*;
 
-    fn index(genome: &[u8]) -> Index {
+    fn index(genome: &[u8]) -> Index<'static> {
         Index::build(
             crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), genome, b"\n"].concat()).unwrap(),
             SeedParams { k: 15, w: 5 },

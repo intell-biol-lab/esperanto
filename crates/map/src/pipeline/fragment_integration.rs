@@ -1197,7 +1197,7 @@ fn query_edge_completion_paired_pipeline_preserves_raw_frame() {
     }
 }
 
-fn splice_world(n: usize) -> (Index, Vec<u8>, Junction) {
+fn splice_world(n: usize) -> (Index<'static>, Vec<u8>, Junction) {
     // Independent random reference with a single canonical intron.
     let mut state = 0x72a984b1821u64;
     let mut genome: Vec<u8> = (0..20000)

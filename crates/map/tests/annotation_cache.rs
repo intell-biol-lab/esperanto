@@ -347,3 +347,78 @@ fn cache_verification_fields_are_independently_required() {
     assert_eq!(status, CacheStatus::Rebuilt);
     equal(&lib, &baseline);
 }
+
+#[test]
+fn competing_processes_replace_bad_cache_while_readers_verify() {
+    use std::process::{Command, Stdio};
+    let f = Fixture::new();
+    fs::write(f.0.join("a.gtf"), GTF).unwrap();
+    let reference = fasta::parse_fasta_bytes(b">chr1\nACGT\n>chr2\nTGCA\n").unwrap();
+    let cache = f.0.join("cache");
+    gtf::from_gtf_cached(&f.0.join("a.gtf"), &reference, Some(&cache)).unwrap();
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(entry, b"invalid cache for simultaneous replacement").unwrap();
+    let mut children = Vec::new();
+    for slot in 0..6 {
+        children.push(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cache_process_child"])
+                .env("ESP_TEST_CACHE_ROOT", &f.0)
+                .env("ESP_TEST_CACHE_SLOT", slot.to_string())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let started = std::time::Instant::now();
+    while (0..6).any(|i| !f.0.join(format!("ready-{i}")).exists()) {
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "cache children did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    fs::write(f.0.join("go"), b"").unwrap();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+    assert_eq!(
+        gtf::from_gtf_cached(&f.0.join("a.gtf"), &reference, Some(&cache))
+            .unwrap()
+            .1,
+        CacheStatus::Hit
+    );
+}
+
+#[test]
+fn cache_process_child() {
+    let Some(root) = std::env::var_os("ESP_TEST_CACHE_ROOT") else {
+        return;
+    };
+    let root = Path::new(&root);
+    let slot = std::env::var("ESP_TEST_CACHE_SLOT").unwrap();
+    let reference = fasta::parse_fasta_bytes(b">chr1\nACGT\n>chr2\nTGCA\n").unwrap();
+    let (expected, _) = gtf::from_gtf_cached(&root.join("a.gtf"), &reference, None).unwrap();
+    fs::write(root.join(format!("ready-{slot}")), b"").unwrap();
+    let started = std::time::Instant::now();
+    while !root.join("go").exists() {
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "cache start gate timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for _ in 0..10 {
+        let (lib, status) =
+            gtf::from_gtf_cached(&root.join("a.gtf"), &reference, Some(&root.join("cache")))
+                .unwrap();
+        assert!(matches!(status, CacheStatus::Rebuilt | CacheStatus::Hit));
+        equal(&lib, &expected);
+    }
+}

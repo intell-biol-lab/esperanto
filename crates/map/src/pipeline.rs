@@ -47,7 +47,7 @@ pub struct PipelineOut<'a> {
     pub unmapped_fq: Box<dyn Write + Send>,
     /// Optional pass2-only candidate evidence, never an alignment source.
     pub diagnostics: Option<Box<dyn Write + Send>>,
-    pub index: &'a Index,
+    pub index: &'a Index<'a>,
     pub config: AlignConfig,
     /// Junction library (sjdb; RNA mode).
     pub jlib: Option<Arc<JunctionLib>>,
@@ -88,7 +88,7 @@ pub type TwoPassOut = (
 );
 
 fn make_aligner<'a>(
-    index: &'a Index,
+    index: &'a Index<'a>,
     cfg: AlignConfig,
     lib: &Option<Arc<JunctionLib>>,
     l1: &Option<Arc<esperanto_engine::L1Index>>,

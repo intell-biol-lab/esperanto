@@ -5,7 +5,13 @@ use super::*;
 mod tests {
     use super::*;
 
-    fn setup() -> (Index, Vec<u8>, Placement, ReadAlignment, ReadAlignment) {
+    fn setup() -> (
+        Index<'static>,
+        Vec<u8>,
+        Placement,
+        ReadAlignment,
+        ReadAlignment,
+    ) {
         let mut genome = crate::fragment::tests::body(8000);
         let seq = genome[2000..2150].to_vec();
         genome[5000..5150].copy_from_slice(&seq);

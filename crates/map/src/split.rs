@@ -76,7 +76,7 @@ pub struct SplitContext<'a> {
     /// Reference genome.
     pub reference: &'a Reference,
     /// Minimizer index (needed by the seed channel; `None` disables it).
-    pub index: Option<&'a Index>,
+    pub index: Option<&'a Index<'a>>,
     /// Junction library (empty ⇒ de-novo channels enabled).
     pub lib: &'a JunctionLib,
     /// The read in alignment orientation (anchor `qpos` space).

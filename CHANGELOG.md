@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1-dev.32 (unreleased)
+
+- Own directional rescue mmaps and decoded references, borrowing index/hit views
+  with Rust lifetimes. Release each direction after workers join, before
+  verification/next-direction loading. Standalone rescue also owns its fallback.
+- Preserve process-lifetime legacy build/load APIs and shared strict paidx checks.
+
 ## 1.1.1-dev.31 (unreleased)
 
 - Stream GTF annotation with bounded input buffering and preserve junction support.

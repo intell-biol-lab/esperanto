@@ -8,7 +8,6 @@ use std::sync::Arc;
 use esperanto_bamio::sort::{coordinate_sort, SortOptions};
 use esperanto_engine::L1Index;
 use esperanto_map::align::AlignConfig;
-use esperanto_map::index::Index;
 use esperanto_map::pipeline::{run_pe_2pass, run_se_2pass, PipelineOut};
 use esperanto_map::{gtf, index_io};
 use esperanto_qc::QcParams;
@@ -313,7 +312,7 @@ fn stage_map(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<esperanto_engine::L1Index>>,
     ),
     FlowError,
@@ -361,7 +360,7 @@ pub fn map_stage(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -383,7 +382,7 @@ pub fn map_stage_with_diagnostics(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -416,7 +415,7 @@ pub fn map_stage_with_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -451,7 +450,7 @@ pub fn map_stage_with_context_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -488,7 +487,7 @@ pub fn map_stage_with_background_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -527,7 +526,7 @@ pub fn map_stage_with_exact_path_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -568,7 +567,7 @@ pub fn map_stage_with_short_body_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -611,7 +610,7 @@ pub fn map_stage_with_pair_substitution_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -656,7 +655,7 @@ pub fn map_stage_with_boundary_core_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -704,7 +703,7 @@ pub fn map_stage_with_weak_mate_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -757,7 +756,7 @@ pub fn map_stage_with_context_budget_options(
 ) -> Result<
     (
         PathBuf,
-        &'static esperanto_map::index::Index,
+        &'static esperanto_map::index::Index<'static>,
         Option<Arc<L1Index>>,
     ),
     FlowError,
@@ -767,7 +766,7 @@ pub fn map_stage_with_context_budget_options(
     }
     let dir = out_dir;
     fs::create_dir_all(dir)?;
-    let index: &'static esperanto_map::index::Index =
+    let index: &'static esperanto_map::index::Index<'static> =
         Box::leak(Box::new(index_io::load(paidx).map_err(stage_err("map"))?));
     // Primary alignment uses all four bases. Hyperediting rescue uses
     // separate three-letter transforms (Porath, Carmi & Levanon,
@@ -1047,9 +1046,14 @@ fn rescue_collapsed(
     // True (four-letter) reference for post-placement verification. The
     // map stage hands its live index reference over; standalone callers
     // load the paidx once here.
-    let true_ref: &'static esperanto_map::fasta::Reference = match live_reference {
+    let fallback = if live_reference.is_none() {
+        Some(index_io::OwnedIndex::open(paidx).map_err(stage_err("map"))?)
+    } else {
+        None
+    };
+    let true_ref = match live_reference {
         Some(r) => r,
-        None => index_io::load(paidx).map_err(stage_err("map"))?.reference,
+        None => fallback.as_ref().unwrap().index().reference,
     };
 
     // Paired-end concordance table: mate placements from the primary
@@ -1087,7 +1091,8 @@ fn rescue_collapsed(
     let mut why: std::collections::BTreeMap<(&'static str, bool), u64> =
         std::collections::BTreeMap::new();
     for (dir, ipath, from, to) in &dirs {
-        let idx = index_io::load(ipath).map_err(stage_err("map"))?;
+        let owner = index_io::OwnedIndex::open(ipath).map_err(stage_err("map"))?;
+        let idx = owner.index();
         // Seed k/w and the chain anchor reward must match the transformed
         // index. `edit_dir` stays off: under the matching transform this
         // direction's edits are already identities, and exempting anything
@@ -1134,6 +1139,10 @@ fn rescue_collapsed(
                 )
                 .collect()
         });
+        // Rayon workers and their aligners have joined. Results own their
+        // placements; neither verification nor the next direction needs this
+        // transformed reference/mmap any longer.
+        drop(owner);
         for (&i, aln) in cand_idx.iter().zip(results) {
             let Some(mut a) = aln else { continue };
             inherit_seed_limit(&mut a, &fq[i].0, &original_seed_limits);

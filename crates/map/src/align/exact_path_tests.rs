@@ -32,7 +32,7 @@ fn terminal_fixture(
     n: usize,
     left: bool,
     distinct_base: bool,
-) -> (Index, Vec<u8>, Arc<JunctionLib>, u32, Vec<CigarOp>) {
+) -> (Index<'static>, Vec<u8>, Arc<JunctionLib>, u32, Vec<CigarOp>) {
     let mut genome = random(2000);
     let query = genome[200..350].to_vec();
     let (pos, start, end, cigar) = if left {
@@ -253,7 +253,7 @@ fn exact_paths_disabled_restores_original_annotation_preference() {
 }
 
 pub(crate) fn native_l1_fixture() -> (
-    Index,
+    Index<'static>,
     Vec<u8>,
     Arc<JunctionLib>,
     Arc<esperanto_engine::L1Index>,

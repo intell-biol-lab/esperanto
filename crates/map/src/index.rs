@@ -1,7 +1,7 @@
 //! Minimizer index over a reference genome.
 //!
-//! Tables are `Box::leak`-ed at build time (or leaked from an mmap at load
-//! time) so an `Index` is a read-only, shareable, zero-copy structure.
+//! A read-only, shareable, zero-copy view. Legacy build/load APIs provide
+//! process-lifetime storage; `OwnedIndex` views borrow scoped mmap storage.
 
 use crate::fasta::{Base, Reference};
 use crate::seed::{minimizers_from_codes, Minimizer, SeedParams, Strand};
@@ -43,7 +43,7 @@ impl Strand {
 }
 
 /// Read-only minimizer index.
-pub struct Index {
+pub struct Index<'a> {
     /// Seed parameters used at build time.
     pub params: SeedParams,
     /// Format version (paidx v1).
@@ -52,30 +52,30 @@ pub struct Index {
     /// by anchor collection.
     pub freq_cutoff: u32,
     /// The reference these tables describe.
-    pub reference: &'static Reference,
+    pub reference: &'a Reference,
     /// Distinct canonical k-mers, ascending.
-    pub kmers: &'static [u64],
+    pub kmers: &'a [u64],
     /// Start offset of each k-mer's position run in `positions`.
-    pub offsets: &'static [u64],
+    pub offsets: &'a [u64],
     /// Length of each k-mer's position run.
-    pub counts: &'static [u32],
+    pub counts: &'a [u32],
     /// Packed positions, grouped by k-mer, ascending within each run.
-    pub positions: &'static [u64],
+    pub positions: &'a [u64],
 }
 
 /// Zero-allocation query result: a slice into the position table.
-pub struct IndexHit {
+pub struct IndexHit<'a> {
     /// Number of reference occurrences of the queried k-mer.
     pub count: u32,
     /// Packed positions (ascending).
-    pub positions: &'static [u64],
+    pub positions: &'a [u64],
 }
 
-impl Index {
+impl Index<'static> {
     /// Build an index from a parsed reference (per-contig rayon parallel).
     ///
-    /// All tables and the reference itself are leaked and never freed.
-    pub fn build(reference: Reference, params: SeedParams) -> Index {
+    /// This legacy constructor retains process-lifetime tables/reference.
+    pub fn build(reference: Reference, params: SeedParams) -> Index<'static> {
         let k = params.k;
         let w = params.w;
 
@@ -132,9 +132,11 @@ impl Index {
             positions,
         }
     }
+}
 
+impl<'a> Index<'a> {
     /// Query a canonical k-mer; binary search, zero allocation.
-    pub fn query(&self, kmer: u64) -> IndexHit {
+    pub fn query(&self, kmer: u64) -> IndexHit<'a> {
         let pos = self.kmers.binary_search(&kmer);
         match pos {
             Ok(i) => {
@@ -479,7 +481,7 @@ mod budget_tests {
     use super::*;
     use crate::seed::Anchor;
 
-    fn fixture() -> (Index, Vec<Minimizer>) {
+    fn fixture() -> (Index<'static>, Vec<Minimizer>) {
         let reference =
             crate::fasta::parse_fasta_bytes(format!(">chrT\n{}\n", "ACGT".repeat(500)).as_bytes())
                 .unwrap();

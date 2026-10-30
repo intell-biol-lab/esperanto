@@ -8,7 +8,7 @@ use crate::{
 
 /// A boundary kmer occurs once per copy, while the constant kmer's whole
 /// posting list exceeds either scan budget. All sequence is synthetic.
-fn terminal_background_fixture(flank: usize, remote: bool) -> (Index, Vec<u8>) {
+fn terminal_background_fixture(flank: usize, remote: bool) -> (Index<'static>, Vec<u8>) {
     let mut state = 0x4b7e1_u64;
     let mut body = random(&mut state, 42);
     body[38..].copy_from_slice(b"CGTC");
@@ -140,7 +140,7 @@ fn random(state: &mut u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
-pub(crate) fn fixture(full_target: bool) -> (Index, Vec<u8>) {
+pub(crate) fn fixture(full_target: bool) -> (Index<'static>, Vec<u8>) {
     let mut state = 80817;
     let mut body = random(&mut state, 42);
     body[40..].copy_from_slice(b"GT");

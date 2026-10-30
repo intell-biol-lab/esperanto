@@ -297,7 +297,10 @@ impl Aligner<'_> {
 mod tests {
     use super::*;
 
-    fn fixture(dir: EditDir, rival: Option<Strand>) -> (Index, [Vec<u8>; 2], [ReadAlignment; 2]) {
+    fn fixture(
+        dir: EditDir,
+        rival: Option<Strand>,
+    ) -> (Index<'static>, [Vec<u8>; 2], [ReadAlignment; 2]) {
         let mut genome = crate::fragment::tests::body(8000);
         let mut query = genome[2000..2131].to_vec();
         let (reference, observed) = if dir == EditDir::Ag {

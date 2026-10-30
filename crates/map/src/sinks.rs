@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(txt, b"@a\nACGT\n+\nIIII\n@b/2\nTTTT\n+\nJJJJ\n");
     }
 
-    fn tiny_index() -> Index {
+    fn tiny_index() -> Index<'static> {
         let fasta = b">chrT\nACGTACGTACGTACGTACGT\n".to_vec();
         let reference = crate::fasta::parse_fasta_bytes(&fasta).expect("fasta");
         Index::build(reference, crate::seed::SeedParams { k: 5, w: 2 })
