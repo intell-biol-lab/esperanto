@@ -4,10 +4,13 @@
 //! parse args → zero-config resolution → crate entry points. No scientific
 //! semantics live here.
 
+mod batch;
 mod confirm;
 mod delete;
+mod evidence;
 mod fetch;
 mod index;
+mod joint;
 mod map;
 mod qc;
 mod report;
@@ -23,7 +26,18 @@ use clap::{Parser, Subcommand};
 
 /// ESPERANTO RNA editing analysis.
 #[derive(Parser)]
-#[command(name = "esperanto", version, about, propagate_version = true)]
+#[command(
+    name = "esperanto",
+    version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nrepository: https://github.com/intell-biol-lab/esperanto",
+        "\ncommit: ", env!("ESP_BUILD_GIT_SHA"),
+        "\nworktree: ", env!("ESP_BUILD_WORKTREE"),
+    ),
+    about,
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -43,6 +57,10 @@ enum Cmd {
     Score(score::ScoreArgs),
     /// Full pipeline: qc → map → sort → scan → score → vcf.
     Run(run::RunArgs),
+    /// Execute independent samples with bounded CPU and memory reservations.
+    Batch(batch::BatchArgs),
+    /// Union candidate sites and recount molecular evidence independently per sample.
+    Joint(joint::JointArgs),
     /// Regenerate the standalone HTML report for a finished run directory.
     Report(report::ReportArgs),
     /// Continue an interrupted run from the first broken stage.
@@ -65,6 +83,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Scan(a) => scan::run(a),
         Cmd::Score(a) => score::run(a),
         Cmd::Run(a) => run::run(a),
+        Cmd::Batch(a) => batch::run(a),
+        Cmd::Joint(a) => joint::run(a),
         Cmd::Report(a) => report::run(a),
         Cmd::Resume(a) => resume::run(a),
         Cmd::Setup(a) => setup::run(a),
