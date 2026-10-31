@@ -63,6 +63,24 @@ confirm its workers have stopped before explicitly removing a stale lock;
 native per-sample run locks may also need that check. Normal coordinator errors
 kill and reap its immediate active children.
 
+Input validation uses `--validation-threads` (default 4), capped by the total
+thread budget and unique canonical file count. Each reader holds one file and
+one 1 MiB SHA256 buffer. All input readers join before sample workers start;
+errors are reported in canonical-path order. File contents are read completely
+on every invocation, including resume. Output validation remains serial.
+
+`validation-N.json` is a new receipt per prepared invocation. It records input
+bytes/files, effective/requested validation concurrency, input-hash time,
+preparation time (including successful-output verification on resume), worker
+phase, serial output-hash time and full internal wall time. Hash time is included
+in preparation; output-hash time is included in the worker phase. These phases
+must not be added twice. External wall timing also includes process startup and
+final receipt publication. Early errors may leave no prepared receipt; retain
+stderr and the caller's exit/timing record. Validation concurrency is operational
+and can change on resume without changing scientific input identity. It is not
+an OS CPU/memory limit. Input enumeration and digest-map memory also scale with
+the number of files; the 1 MiB bound applies to each reader buffer.
+
 All content hashing is part of end-to-end batch overhead. It is not hidden from
 user-facing timing; it can dominate very small batches with large references.
 This version does not introduce an unverified identity cache to avoid that cost.

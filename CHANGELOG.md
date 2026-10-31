@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1-dev.40 (unreleased)
+
+- Bound complete-content batch input hashing by `--validation-threads`, total
+  thread budget and unique file count; deterministic identities, no hash cache.
+- Record preparation, input hashing, worker phase and serial output hashing in
+  per-invocation `validation-N.json` receipts, including complete wall time.
+- Validation finishes before sample workers; changing only validation concurrency
+  remains compatible with verified resume. Mapping and joint evidence unchanged.
+
 ## 1.1.1-dev.39 (unreleased)
 
 - Add sample-sheet batch execution with bounded worker CPU/estimated memory

@@ -161,6 +161,47 @@ fn impossible_budget_never_launches_children() {
 }
 
 #[test]
+fn bounded_validation_records_phases_and_cap_can_change_on_resume() {
+    let dir = fixture();
+    let result = command(&dir)
+        .args(["--validation-threads", "16"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("results/validation-1.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["validation_threads"], 4);
+    assert_eq!(receipt["status"], "succeeded");
+    assert!(receipt["input_bytes"].as_u64().unwrap() > 0);
+    assert!(
+        receipt["wall_seconds"].as_f64().unwrap()
+            >= receipt["input_hash_seconds"].as_f64().unwrap()
+    );
+    assert!(command(&dir)
+        .args(["--resume", "--validation-threads", "1"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(dir.join("results/validation-2.json").exists());
+}
+
+#[test]
+fn zero_validation_budget_never_launches_children() {
+    let dir = fixture();
+    assert!(!command(&dir)
+        .args(["--validation-threads", "0"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(!dir.join("results/samples").exists());
+}
+
+#[test]
 fn dry_run_is_reviewable_and_argv_does_not_invoke_a_shell() {
     let dir = fixture();
     std::fs::write(dir.join("read; touch SHOULD_NOT_EXIST.fq"), "read").unwrap();

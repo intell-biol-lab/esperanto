@@ -28,6 +28,10 @@ pub struct BatchArgs {
     /// Total worker-thread budget (0 = available parallelism).
     #[arg(long, default_value_t = 0)]
     total_threads: usize,
+    /// Complete-content input hash readers, capped by total threads and file count.
+    /// Validation finishes before sample workers; each reader uses a 1 MiB buffer.
+    #[arg(long, default_value_t = 4)]
+    validation_threads: usize,
     #[arg(long, default_value_t = 4)]
     threads_per_sample: usize,
     /// Total estimated memory budget; reservations are not OS-enforced limits.
@@ -175,7 +179,12 @@ fn command(a: &BatchArgs, sample: &Sample, executable: &Path) -> Result<Vec<Stri
 }
 
 pub fn run(mut a: BatchArgs) -> Result<()> {
+    let invocation_start = Instant::now();
     let total = crate::resolve::threads(a.total_threads);
+    ensure!(
+        a.validation_threads > 0,
+        "--validation-threads must be positive"
+    );
     let concurrency = parallel(
         total,
         a.threads_per_sample,
@@ -302,8 +311,19 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
         .iter()
         .map(|s| command(&a, s, &executable))
         .collect::<Result<Vec<_>>>()?;
+    let hash_start = Instant::now();
+    let hashes = evidence::identities_parallel(&paths, a.validation_threads.min(total))?;
+    let input_hash_seconds = hash_start.elapsed().as_secs_f64();
+    let input_bytes: u64 = hashes
+        .keys()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .sum();
+    let validation_threads = a.validation_threads.min(total).min(hashes.len());
+    let input_files = hashes.len();
     let identity = json!({
-        "samples": samples, "sha256": evidence::identities(&paths)?,
+        "samples": samples, "sha256": hashes,
         "commands": commands, "environment": controls,
         "worker_environment_overrides":{
             "OMP_NUM_THREADS":a.threads_per_sample.to_string(),
@@ -370,9 +390,30 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
         }
     };
     evidence::write_json(&state_path, &state)?;
+    let mut attempt = 1;
+    while a.out.join(format!("validation-{attempt}.json")).exists() {
+        attempt += 1;
+    }
+    let receipt_path = a.out.join(format!("validation-{attempt}.json"));
+    let mut receipt = json!({
+        "schema_version":1, "status":"prepared",
+        "validation_threads":validation_threads,
+        "requested_validation_threads":a.validation_threads,
+        "total_threads":total, "input_files":input_files, "input_bytes":input_bytes,
+        "input_hash_seconds":input_hash_seconds,
+        "preparation_seconds":invocation_start.elapsed().as_secs_f64(),
+        "output_hash_seconds":0.0,
+        "policy":"complete-content SHA256; readers joined before sample workers; output hashing serial"
+    });
+    evidence::write_json(&receipt_path, &receipt)?;
     if a.dry_run {
+        receipt["status"] = json!("dry_run");
+        receipt["wall_seconds"] = json!(invocation_start.elapsed().as_secs_f64());
+        evidence::write_json(&receipt_path, &receipt)?;
         return Ok(());
     }
+    let worker_phase = Instant::now();
+    let mut output_hash_seconds = 0.0;
     std::fs::create_dir_all(a.out.join("logs"))?;
     std::fs::create_dir_all(a.out.join("samples"))?;
     let pending: Vec<_> = state
@@ -470,6 +511,7 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
                 }
                 .to_owned();
                 if status.success() {
+                    let output_start = Instant::now();
                     match evidence::identities(&[a.out.join("samples").join(&job.sample)]) {
                         Ok(outputs) if !outputs.is_empty() => job.outputs = outputs,
                         outcome => {
@@ -480,6 +522,7 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
                             });
                         }
                     }
+                    output_hash_seconds += output_start.elapsed().as_secs_f64();
                 }
                 eprintln!("[batch] {}: {}", job.sample, job.status);
                 evidence::write_json(
@@ -498,8 +541,14 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+    let succeeded = state.jobs.iter().all(|j| j.status == "succeeded");
+    receipt["status"] = json!(if succeeded { "succeeded" } else { "failed" });
+    receipt["worker_phase_seconds"] = json!(worker_phase.elapsed().as_secs_f64());
+    receipt["output_hash_seconds"] = json!(output_hash_seconds);
+    receipt["wall_seconds"] = json!(invocation_start.elapsed().as_secs_f64());
+    evidence::write_json(&receipt_path, &receipt)?;
     ensure!(
-        state.jobs.iter().all(|j| j.status == "succeeded"),
+        succeeded,
         "one or more samples failed; inspect batch.json and logs, then --resume"
     );
     Ok(())
