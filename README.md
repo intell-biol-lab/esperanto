@@ -52,6 +52,10 @@ installing an upstream binary.
 
 ## Quick start
 
+Sample-sheet execution and independent joint candidate recount are documented in
+[the batch and joint guide](docs/specs/crates/batch-joint.md). Batch workers keep
+each sample independent; joint recount writes evidence without changing BAMs.
+
 Prepare GRCh38 reference files and indexes once:
 
 ```sh

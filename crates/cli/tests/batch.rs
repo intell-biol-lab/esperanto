@@ -136,6 +136,11 @@ fn failed_sample_isolated_and_retried_without_overwriting_attempt() {
     assert_eq!(state["jobs"][1]["attempts"], 2);
     assert!(dir.join("results/logs/B.attempt-1.stderr.log").exists());
     assert!(dir.join("results/failed-attempts/B.attempt-1").exists());
+    let failed: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("results/logs/B.attempt-1.execution.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failed["exit_code"], 7);
 }
 #[test]
 fn output_corruption_is_not_silently_skipped() {

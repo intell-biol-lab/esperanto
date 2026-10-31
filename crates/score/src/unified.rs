@@ -375,6 +375,52 @@ fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> R
     Ok(positions)
 }
 
+/// Independent informative A/C/G/T template counts using the frozen molecular
+/// observation reader. None denotes a contig absent from the BAM dictionary.
+/// Windows are bounded to 4096 reference bases; output follows input order.
+pub fn count_sites(bam_path: &Path, sites: &[(String, i64)]) -> Result<Vec<Option<[u64; 4]>>> {
+    let mut bam = IndexedReader::from_path(bam_path)?;
+    let mut order: Vec<_> = sites.iter().enumerate().collect();
+    for (_, (_, pos)) in &order {
+        ensure!(*pos >= 1, "recount positions must be 1-based and positive");
+    }
+    order.sort_by(|a, b| a.1.cmp(b.1));
+    let mut result = vec![None; sites.len()];
+    let mut first = 0;
+    while first < order.len() {
+        let (chrom, pos) = order[first].1;
+        let mut end = first + 1;
+        while end < order.len() && order[end].1 .0 == *chrom && order[end].1 .1 - pos < 4096 {
+            end += 1;
+        }
+        if let Some(tid) = bam.header().tid(chrom.as_bytes()) {
+            let right = order[end - 1].1 .1;
+            ensure!(
+                right as u64
+                    <= bam
+                        .header()
+                        .target_len(tid)
+                        .context("missing BAM contig length")?,
+                "recount position outside BAM contig"
+            );
+            let window = read_window(&mut bam, chrom, pos - 1, right)?;
+            for &(i, (_, p)) in &order[first..end] {
+                let mut counts = [0u64; 4];
+                if let Some(observations) = window.get(&(p - 1)) {
+                    for observation in observations.values() {
+                        if let Some(b) = base_index(observation.base) {
+                            counts[b] += 1;
+                        }
+                    }
+                }
+                result[i] = Some(counts);
+            }
+        }
+        first = end;
+    }
+    Ok(result)
+}
+
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
     let values: Vec<_> = values.filter(|value| value.is_finite()).collect();
     if values.is_empty() {

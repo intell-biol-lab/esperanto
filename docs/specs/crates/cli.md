@@ -9,6 +9,8 @@ The `esperanto` executable parses arguments, resolves reference and model paths,
 | `setup` | None | `--force`, `--no-decoys`; prepare reference files and indexes |
 | `index` | `--fasta`, `--out` | `--gtf`, `--k` (15), `--w` (5), repeatable `--decoy`; build alignment indexes |
 | `run` | `--out` and FASTQ or BAM input | `--r1`, `--r2`, `--bam`, `--sites`, `--index`, `--fasta`, `--gtf`, `--bundle`, `--l1-bundle`, `--sample`, `--threads`, `--stop-after` |
+| `batch` | `--samples`, `--out`, `--memory-gib`, `--memory-per-sample-gib` | Bounded independent sample processes, explicit resource paths, verified `--resume`; see [batch/joint contract](batch-joint.md) |
+| `joint` | `--samples`, `--fasta`, `--out` | Independent union recount, `--min-depth` (10), discovery `--threads` (1); evidence states, not joint calls |
 | `resume` | Run directory | Validate and continue a compatible interrupted run |
 | `map` | `--r1`, `--index`, `--out` | `--r2`, `--gtf`, `--l1-bundle`, `--threads`, `--candidate-diagnostics`, `--no-fragment-endpoints`, `--no-repeat-context`; write unsorted BAM |
 | `scan` | `--bam`, `--out` | `--fasta`, `--threads`; unified candidate discovery |

@@ -10,6 +10,7 @@ mod delete;
 mod evidence;
 mod fetch;
 mod index;
+mod joint;
 mod map;
 mod qc;
 mod report;
@@ -58,6 +59,8 @@ enum Cmd {
     Run(run::RunArgs),
     /// Execute independent samples with bounded CPU and memory reservations.
     Batch(batch::BatchArgs),
+    /// Union candidate sites and recount molecular evidence independently per sample.
+    Joint(joint::JointArgs),
     /// Regenerate the standalone HTML report for a finished run directory.
     Report(report::ReportArgs),
     /// Continue an interrupted run from the first broken stage.
@@ -81,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Score(a) => score::run(a),
         Cmd::Run(a) => run::run(a),
         Cmd::Batch(a) => batch::run(a),
+        Cmd::Joint(a) => joint::run(a),
         Cmd::Report(a) => report::run(a),
         Cmd::Resume(a) => resume::run(a),
         Cmd::Setup(a) => setup::run(a),

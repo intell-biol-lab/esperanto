@@ -305,6 +305,10 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
     let identity = json!({
         "samples": samples, "sha256": evidence::identities(&paths)?,
         "commands": commands, "environment": controls,
+        "worker_environment_overrides":{
+            "OMP_NUM_THREADS":a.threads_per_sample.to_string(),
+            "RAYON_NUM_THREADS":a.threads_per_sample.to_string()
+        },
         "mode": format!("{:?}",a.mode), "total_threads":total,
         "threads_per_sample":a.threads_per_sample, "memory_gib":a.memory_gib,
         "memory_per_sample_gib":a.memory_per_sample_gib, "parallel":concurrency,
@@ -421,6 +425,9 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
                 Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             job.status = "running".to_owned();
             job.error = None;
+            job.exit_code = None;
+            job.wall_seconds = None;
+            job.outputs.clear();
             let start = Instant::now();
             match Command::new(&executable)
                 .args(&args)
@@ -438,6 +445,13 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
                 Err(error) => {
                     job.status = "failed".to_owned();
                     job.error = Some(error.to_string());
+                    evidence::write_json(
+                        &a.out.join("logs").join(format!(
+                            "{}.attempt-{}.execution.json",
+                            job.sample, job.attempts
+                        )),
+                        &job,
+                    )?;
                 }
             }
             evidence::write_json(&state_path, &state)?;
@@ -468,6 +482,13 @@ pub fn run(mut a: BatchArgs) -> Result<()> {
                     }
                 }
                 eprintln!("[batch] {}: {}", job.sample, job.status);
+                evidence::write_json(
+                    &a.out.join("logs").join(format!(
+                        "{}.attempt-{}.execution.json",
+                        job.sample, job.attempts
+                    )),
+                    &job,
+                )?;
                 evidence::write_json(&state_path, &state)?;
             } else {
                 n += 1;
