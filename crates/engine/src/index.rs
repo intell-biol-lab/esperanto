@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
-use esperanto_tidx::Tidx as TidxFile;
+use esperanto_tidx::MappedTidx as TidxFile;
 use esperanto_txmap::Strand as TxStrand;
 use esperanto_txmap::TranscriptRecord;
 use esperanto_txmap::TxMap as TxMapFile;
@@ -115,9 +115,11 @@ impl L1Index {
 
     /// Open a bundle previously written by [`L1Index::save`].
     ///
-    /// The `.tidx` k-mer index is opened from the sibling file
+    /// The `.tidx` k-mer index is mapped read-only from the sibling file
     /// `<bundle-stem>.tidx` (the bundle itself stores only the projection
-    /// and the sequences).
+    /// and the sequences). Keep this index file immutable while the bundle is
+    /// open. Normal engine lookups use borrowed hit views and do not decode
+    /// the entire `.tidx` key or payload tables.
     pub fn open(bundle_path: &Path) -> Result<Self, Error> {
         let tidx_path = bundle_path.with_extension("tidx");
         let tidx = TidxFile::open(&tidx_path)?;
@@ -234,6 +236,10 @@ impl Tidx for L1Index {
 
     fn lookup(&self, canonical_kmer: u64) -> &[(u32, u32)] {
         self.tidx.lookup(canonical_kmer)
+    }
+
+    fn lookup_hits(&self, canonical_kmer: u64) -> esperanto_tidx::LookupHits<'_> {
+        self.tidx.lookup_hits(canonical_kmer)
     }
 
     fn transcript_name(&self, tx_id: u32) -> &str {
