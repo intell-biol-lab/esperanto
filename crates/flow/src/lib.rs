@@ -12,6 +12,7 @@ pub mod guard;
 pub mod params;
 mod rescue_index;
 pub mod resume;
+pub mod samples;
 pub mod stages;
 pub mod vcf;
 

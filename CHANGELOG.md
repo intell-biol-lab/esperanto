@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1-dev.39 (unreleased)
+
+- Add sample-sheet batch execution with bounded worker CPU/estimated memory
+  reservations, independent process outputs/logs and content-verified resume.
+  Preserve dev.36 mapping/search/model behavior. dev.36 remains the frozen baseline.
+- Add separate candidate-union and per-sample molecular recount output. Retain
+  missing/low-depth states; no pooled editing calls or cross-sample alignment.
+
 ## 1.1.1-dev.36 (unreleased)
 
 - Add opt-in stage wall-time profiling with `ESP_PROFILE_STAGES=1`. Separate

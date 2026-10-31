@@ -4,8 +4,10 @@
 //! parse args → zero-config resolution → crate entry points. No scientific
 //! semantics live here.
 
+mod batch;
 mod confirm;
 mod delete;
+mod evidence;
 mod fetch;
 mod index;
 mod map;
@@ -54,6 +56,8 @@ enum Cmd {
     Score(score::ScoreArgs),
     /// Full pipeline: qc → map → sort → scan → score → vcf.
     Run(run::RunArgs),
+    /// Execute independent samples with bounded CPU and memory reservations.
+    Batch(batch::BatchArgs),
     /// Regenerate the standalone HTML report for a finished run directory.
     Report(report::ReportArgs),
     /// Continue an interrupted run from the first broken stage.
@@ -76,6 +80,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Scan(a) => scan::run(a),
         Cmd::Score(a) => score::run(a),
         Cmd::Run(a) => run::run(a),
+        Cmd::Batch(a) => batch::run(a),
         Cmd::Report(a) => report::run(a),
         Cmd::Resume(a) => resume::run(a),
         Cmd::Setup(a) => setup::run(a),
