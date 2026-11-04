@@ -162,7 +162,13 @@ fn chain_group_into(
         return;
     }
     let k = params.k;
-    let ChainScratch { f, parent, used, order, idx } = scratch;
+    let ChainScratch {
+        f,
+        parent,
+        used,
+        order,
+        idx,
+    } = scratch;
     f.clear();
     f.resize(n, k);
     parent.clear();
@@ -265,16 +271,12 @@ pub fn second_score_with(chains: &[Chain], seen: &mut HashSet<(u32, u32)>) -> i3
     seen.clear();
     seen.extend(best.anchors.iter().map(|a| (a.qpos, a.rpos)));
     for c in chains.iter().skip(1) {
-        if c.anchors
-            .iter()
-            .all(|a| !seen.contains(&(a.qpos, a.rpos)))
-        {
+        if c.anchors.iter().all(|a| !seen.contains(&(a.qpos, a.rpos))) {
             return c.score;
         }
     }
     0
 }
-
 
 /// All chains scoring exactly what `chains[0]` scores (multi-mapping check).
 pub fn tied_best(chains: &[Chain]) -> Vec<&Chain> {
@@ -317,7 +319,10 @@ mod tests {
             .collect();
         chain_anchors_into(&mut a2.clone(), &params, &mut out, &mut scratch);
         assert_eq!(out, chain_anchors(a2, &params));
-        assert_ne!(out.first().map(|c| c.contig), first.first().map(|c| c.contig));
+        assert_ne!(
+            out.first().map(|c| c.contig),
+            first.first().map(|c| c.contig)
+        );
 
         // And the first input again reproduces the first result.
         let a1: Vec<Anchor> = (0..20)

@@ -1,95 +1,16 @@
 #!/usr/bin/env sh
-# ESPERANTO one-line installer.
-#
-# Usage (download + install, no sudo):
-#   curl -fsSL https://github.com/Zhazhupai603/esperanto/releases/latest/download/install.sh | sh
-#
-# Options (environment variables):
-#   ESPERANTO_PREFIX  install prefix for the binary (default ~/.local)
-#   ESPERANTO_TARBALL local tarball path (skips download when set)
 set -eu
 
-VERSION="v1.1.0"
-ARCH="linux-x86_64"
-PKG_BASE="esperanto-1.1.0-${ARCH}"
+cat >&2 <<'EOF'
+ESPERANTO organization development currently requires a source build.
+No organization binary release has been published.
 
-# CPU build selection: prefer the AVX2-optimized (-v3) build when the local
-# CPU supports it, fall back to the portable baseline build.
-try_build() {
-    # $1 = package suffix ("" or "-v3")
-    cand="${PKG_BASE}${1}"
-    echo "==> downloading $BASE_URL/${cand}.tar.gz"
-    if dl "$BASE_URL/${cand}.tar.gz" "$tmp/pkg.tar.gz"; then
-        PKG="$cand"
-        return 0
-    fi
-    echo "==> ${cand} unavailable; trying the next build"
-    return 1
-}
+  git clone https://github.com/intell-biol-lab/esperanto.git
+  cd esperanto
+  # Check out the exact reviewed commit required by your analysis.
+  cargo build --release --locked -p esperanto-cli
+  ./target/release/esperanto --version
 
-BASE_URL="https://github.com/Zhazhupai603/esperanto/releases/download/${VERSION}"
-PREFIX="${ESPERANTO_PREFIX:-$HOME/.local}"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
-BIN_DIR="$PREFIX/bin"
-BUNDLE_DIR="$DATA_DIR/esperanto/bundle"
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-echo "==> ESPERANTO installer (version $VERSION)"
-
-dl() {
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1" -o "$2"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$1" -O "$2"
-    else
-        echo "error: need curl or wget" >&2
-        exit 1
-    fi
-}
-
-if [ -n "${ESPERANTO_TARBALL:-}" ]; then
-    echo "==> using local tarball: $ESPERANTO_TARBALL"
-    cp "$ESPERANTO_TARBALL" "$tmp/pkg.tar.gz"
-    # Local tarballs are extracted by their top-level directory name; detect it.
-    PKG="$(tar -tzf "$tmp/pkg.tar.gz" | head -1 | cut -d/ -f1)"
-else
-    PKG=""
-    if grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
-        try_build "-v3" || true
-    fi
-    if [ -z "$PKG" ]; then
-        try_build "" || true
-    fi
-    if [ -z "$PKG" ]; then
-        echo "error: no downloadable build found for $VERSION" >&2
-        exit 1
-    fi
-fi
-
-echo "==> extracting $PKG"
-tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
-
-src="$tmp/$PKG"
-mkdir -p "$BIN_DIR" "$BUNDLE_DIR"
-
-echo "==> installing binary -> $BIN_DIR/esperanto"
-cp "$src/bin/esperanto" "$BIN_DIR/esperanto"
-chmod +x "$BIN_DIR/esperanto"
-
-echo "==> installing model bundle -> $BUNDLE_DIR"
-cp -r "$src/bundle/." "$BUNDLE_DIR/"
-
-echo "==> verifying"
-"$BIN_DIR/esperanto" --version
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *)
-        echo "warning: $BIN_DIR is not on your PATH." >&2
-        echo "         add it with:  export PATH=\"$BIN_DIR:\$PATH\"" >&2
-        ;;
-esac
-
-echo "==> done. run:  esperanto --help"
+See https://github.com/intell-biol-lab/esperanto for development status.
+EOF
+exit 1

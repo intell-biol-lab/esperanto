@@ -100,7 +100,8 @@ pub struct ExtendParams {
     pub match_score: i32,
     /// Mismatch penalty (stored negative).
     pub mismatch: i32,
-    /// Gap opening penalty (stored positive; subtracted).
+    /// Gap opening penalty (stored positive; subtracted in addition to the
+    /// per-base extension cost, including on the first gap base).
     pub gap_open: i32,
     /// Gap extension penalty per base (stored positive; subtracted).
     pub gap_ext: i32,
@@ -323,7 +324,14 @@ fn run_dispatch(
         if let Some((offset, num, den, half)) = band_spec {
             if num == 1 && den.max(1) == 1 {
                 return avx2_band::run(
-                    read, ref_window, &core, &mut buf.packed, offset, num, den, half,
+                    read,
+                    ref_window,
+                    &core,
+                    &mut buf.packed,
+                    offset,
+                    num,
+                    den,
+                    half,
                 );
             }
         }
@@ -403,7 +411,12 @@ pub fn extend_hint(
         ref_window,
         params,
         buf,
-        Some((hint.offset, hint.num as i64, hint.den.max(1) as i64, INITIAL_BAND)),
+        Some((
+            hint.offset,
+            hint.num as i64,
+            hint.den.max(1) as i64,
+            INITIAL_BAND,
+        )),
     );
     // Escalation: the band held the maximum on its edge, so a wider band can
     // still improve the path; or the score is under 85% of perfect.
@@ -438,7 +451,9 @@ impl CoreParams {
     fn new(params: &ExtendParams) -> CoreParams {
         CoreParams {
             lut: SubstLut::new(params),
-            open_ext: -params.gap_open, // first gap base pays gap_open only
+            // Match common candidate rescoring: a length-n gap costs
+            // open + n*extension. Traceback/end trimming use this same core.
+            open_ext: -(params.gap_open + params.gap_ext),
             ext: -params.gap_ext,
         }
     }
@@ -611,11 +626,9 @@ fn run_band<T: Acc>(
 
     let (offset, num, den, half) = match band_spec {
         Some((o, nm, dn, h)) => (o, nm, dn.max(1), h.max(0)),
-        // Full window: half = n covers every diagonal whenever m <= n.
-        None => {
-            debug_assert!(m <= n);
-            (0, 1, 1, n)
-        }
+        // Full window: each row's center is clamped into [1,n] below.
+        // Half=n therefore covers every column even for a longer read.
+        None => (0, 1, 1, n),
     };
     debug_assert!(num == 1 && den == 1);
     let width = (2 * half + 1) as usize;
@@ -698,7 +711,6 @@ fn run_band<T: Acc>(
         let rc = buf.read_codes[(i - 1) as usize];
         let mut row_max = T::NEG;
         let mut row_max_cell = 0i64;
-
 
         for jj in lo..=hi {
             let cidx = (jj - lo) as usize;
@@ -792,9 +804,19 @@ fn run_band<T: Acc>(
         let right_strict = hi < n;
         if !touch.touched {
             if left_strict && T::same(buf.h_cur[0], row_max) {
-                touch = TouchRec { touched: true, row: i, left: true, clamped: lo <= 1 };
+                touch = TouchRec {
+                    touched: true,
+                    row: i,
+                    left: true,
+                    clamped: lo <= 1,
+                };
             } else if right_strict && T::same(buf.h_cur[len - 1], row_max) {
-                touch = TouchRec { touched: true, row: i, left: false, clamped: hi >= n };
+                touch = TouchRec {
+                    touched: true,
+                    row: i,
+                    left: false,
+                    clamped: hi >= n,
+                };
             }
         }
 
@@ -871,10 +893,9 @@ fn finish_extension(
         match state {
             Tb::H => match cell & 3 {
                 H_DIAG => {
-                    let s = core.lut.score(
-                        read_codes[(i - 1) as usize],
-                        ref_codes[(j - 1) as usize],
-                    );
+                    let s = core
+                        .lut
+                        .score(read_codes[(i - 1) as usize], ref_codes[(j - 1) as usize]);
                     steps.push((CigarOp::Match(1), s as i32));
                     i -= 1;
                     j -= 1;
@@ -966,7 +987,66 @@ fn finish_extension(
             CigarOp::SoftClip(_) | CigarOp::RefSkip(_) => {}
         }
     }
-    let read_end = read_start + rm;
+    let mut read_end = read_start + rm;
+    if score > 0 {
+        // Local traceback and end trimming choose a shorter path at zero
+        // score. Apply the common decision order: do not introduce ordinary
+        // mismatches on a score tie, then prefer informative query coverage.
+        // An editing-direction substitution is not an ordinary mismatch even
+        // when this extension pass scores it strictly. Ambiguous bases stop
+        // the scan as well; neither barrier may be crossed to a later tie.
+        let neutral_column = |q: usize, r: usize| {
+            q < 4 && r < 4 && (q == r || exempt_dir(b"ACGT"[r], b"ACGT"[q]).is_some())
+        };
+        let mut neutral_left = 0u32;
+        let mut delta = 0i32;
+        for n in 1..=read_start.min(ref_start) {
+            let q = read_codes[(read_start - n) as usize];
+            let r = ref_codes[(ref_start - n) as usize];
+            if !neutral_column(q, r) {
+                break;
+            }
+            delta += core.lut.score(q, r) as i32;
+            if delta == 0 {
+                neutral_left = n;
+            }
+        }
+        let used_ref = kept
+            .iter()
+            .filter(|(op, _)| matches!(op, CigarOp::Match(_) | CigarOp::Del(_)))
+            .count() as u32;
+        let ref_end = ref_start + used_ref;
+        let mut neutral_right = 0u32;
+        delta = 0;
+        let available = (m as u32 - read_end).min(ref_codes.len() as u32 - ref_end);
+        for n in 0..available {
+            let q = read_codes[(read_end + n) as usize];
+            let r = ref_codes[(ref_end + n) as usize];
+            if !neutral_column(q, r) {
+                break;
+            }
+            delta += core.lut.score(q, r) as i32;
+            if delta == 0 {
+                neutral_right = n + 1;
+            }
+        }
+        if neutral_left > 0 || neutral_right > 0 {
+            let mut expanded = Vec::with_capacity(ops.len() + 2);
+            if neutral_left > 0 {
+                push_op(&mut expanded, CigarOp::Match(neutral_left));
+            }
+            for op in ops {
+                push_op(&mut expanded, op);
+            }
+            if neutral_right > 0 {
+                push_op(&mut expanded, CigarOp::Match(neutral_right));
+            }
+            ops = expanded;
+            read_start -= neutral_left;
+            ref_start -= neutral_left;
+            read_end += neutral_right;
+        }
+    }
     let mut cigar = Vec::new();
     if read_start > 0 {
         cigar.push(CigarOp::SoftClip(read_start));
@@ -1050,7 +1130,8 @@ mod avx2_full {
         if m == 0 || n == 0 {
             return (empty_extension(m as u32), TouchRec::default());
         }
-        debug_assert!(m <= n);
+        // Rectangular local alignment is valid with either dimension longer;
+        // the anti-diagonal bounds below cover every cell in [1,m]×[1,n].
 
         // LUT-derived substitution constants. The vector `add` assumes the
         // constant operand is never the sentinel; default scoring never is,
@@ -1107,15 +1188,15 @@ mod avx2_full {
         buf.avx_row_h1.clear();
         buf.avx_row_h1.resize(m as usize + 1, NEG);
         buf.avx_read.clear();
-        buf.avx_read.extend(buf.read_codes.iter().map(|&c| c as i16));
+        buf.avx_read
+            .extend(buf.read_codes.iter().map(|&c| c as i16));
         buf.avx_read.resize(m as usize + 16, 0);
         // Ref codes reversed: lane i (ascending) reads ref column d − i, so
         // `refrev[q] = ref_codes[n − 1 − q]` turns the descending gather
         // into the contiguous load at `i + n − d`.
         buf.avx_refrev.clear();
-        buf.avx_refrev.extend(
-            (0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16),
-        );
+        buf.avx_refrev
+            .extend((0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16));
         buf.avx_refrev.resize(n as usize + 16, 0);
 
         let hp = [
@@ -1269,8 +1350,7 @@ mod avx2_full {
                 // Lane i covers cell (i, d − i): read code [i − 1], ref code
                 // [d − i − 1] via the reversed array at [i + n − d].
                 let rc = _mm256_loadu_si256(read_i16.add((v - 1) as usize) as *const __m256i);
-                let rfc =
-                    _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
+                let rfc = _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
                 // Substitution LUT as blends: match (equal codes < 4) beats
                 // the exempt cells (G/A, C/T), which beat mismatch.
                 let eq = _mm256_cmpeq_epi16(rc, rfc);
@@ -1316,19 +1396,28 @@ mod avx2_full {
                 let mut hv = zero_v;
                 let mut hd = three_v;
                 let fmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(f_val, neg_v), _mm256_cmpgt_epi16(hv, f_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(f_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, f_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, f_val, fmask);
                 hd = _mm256_blendv_epi8(hd, two_v, fmask);
                 let emask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(e_val, neg_v), _mm256_cmpgt_epi16(hv, e_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(e_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, e_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, e_val, emask);
                 hd = _mm256_blendv_epi8(hd, one_v, emask);
                 let dmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(diag, neg_v), _mm256_cmpgt_epi16(hv, diag)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(diag, neg_v),
+                        _mm256_cmpgt_epi16(hv, diag),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, diag, dmask);
@@ -1496,7 +1585,11 @@ mod avx2_band {
         buf.rows_flat.clear();
         let lo0 = (offset - half).max(0);
         let hi0 = (offset + half).min(n);
-        let len0 = if lo0 <= hi0 { (hi0 - lo0 + 1) as usize } else { 0 };
+        let len0 = if lo0 <= hi0 {
+            (hi0 - lo0 + 1) as usize
+        } else {
+            0
+        };
         buf.rows_flat.resize(len0, H_START);
         buf.rows.push(RowTrace {
             lo: lo0,
@@ -1565,14 +1658,14 @@ mod avx2_band {
         buf.avx_row_hr.clear();
         buf.avx_row_hr.resize(m_us + 1, NEG);
         buf.avx_read.clear();
-        buf.avx_read.extend(buf.read_codes.iter().map(|&c| c as i16));
+        buf.avx_read
+            .extend(buf.read_codes.iter().map(|&c| c as i16));
         buf.avx_read.resize(m_us + 16, 0);
         // Ref codes reversed (lane i of diagonal d reads ref column d−i):
         // refrev[q] = ref_codes[n−1−q] turns the gather into a load.
         buf.avx_refrev.clear();
-        buf.avx_refrev.extend(
-            (0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16),
-        );
+        buf.avx_refrev
+            .extend((0..n as usize).map(|q| buf.ref_codes[(n as usize) - 1 - q] as i16));
         buf.avx_refrev.resize(n as usize + 16, 0);
 
         let hp = [
@@ -1769,8 +1862,7 @@ mod avx2_band {
                 // Lane i covers cell (i, d − i); all lanes in [blo, bhi]
                 // are in-band, so no per-lane validity check is needed.
                 let rc = _mm256_loadu_si256(read_i16.add((v - 1) as usize) as *const __m256i);
-                let rfc =
-                    _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
+                let rfc = _mm256_loadu_si256(refrev.add((v + (n - d)) as usize) as *const __m256i);
                 let eq = _mm256_cmpeq_epi16(rc, rfc);
                 let is_match = _mm256_and_si256(eq, _mm256_cmpgt_epi16(four_v, rc));
                 let ga = _mm256_and_si256(
@@ -1813,19 +1905,28 @@ mod avx2_band {
                 let mut hv = zero_v;
                 let mut hd = three_v;
                 let fmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(f_val, neg_v), _mm256_cmpgt_epi16(hv, f_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(f_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, f_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, f_val, fmask);
                 hd = _mm256_blendv_epi8(hd, two_v, fmask);
                 let emask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(e_val, neg_v), _mm256_cmpgt_epi16(hv, e_val)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(e_val, neg_v),
+                        _mm256_cmpgt_epi16(hv, e_val),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, e_val, emask);
                 hd = _mm256_blendv_epi8(hd, one_v, emask);
                 let dmask = _mm256_andnot_si256(
-                    _mm256_or_si256(_mm256_cmpeq_epi16(diag, neg_v), _mm256_cmpgt_epi16(hv, diag)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi16(diag, neg_v),
+                        _mm256_cmpgt_epi16(hv, diag),
+                    ),
                     ones_v,
                 );
                 hv = _mm256_blendv_epi8(hv, diag, dmask);
@@ -1928,18 +2029,432 @@ mod avx2_band {
 mod tests {
     use super::*;
 
+    #[test]
+    fn affine_gap_score_matches_the_common_candidate_domain() {
+        let reference = crate::fragment::tests::body(160);
+        for insertion in [false, true] {
+            for n in [1, 2, 3, 7] {
+                let mut query = reference.clone();
+                if insertion {
+                    let b = *b"ACGT"
+                        .iter()
+                        .find(|&&b| b != reference[79] && b != reference[80])
+                        .unwrap();
+                    query.splice(80..80, std::iter::repeat_n(b, n));
+                } else {
+                    query.drain(80..80 + n);
+                }
+                for reverse in [false, true] {
+                    let (query, reference) = if reverse {
+                        (
+                            crate::align::revcomp(&query),
+                            crate::align::revcomp(&reference),
+                        )
+                    } else {
+                        (query.clone(), reference.clone())
+                    };
+                    for dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                        let parameters = ExtendParams {
+                            edit_dir: dir,
+                            ..Default::default()
+                        };
+                        let core = CoreParams::new(&parameters);
+                        for offset in [0, 37] {
+                            let window =
+                                [vec![b'N'; offset], reference.clone(), vec![b'N'; 11]].concat();
+                            for band in [None, Some((offset as i64, 1, 1, 30))] {
+                                let mut buf = ExtendBuffer::default();
+                                let expected_match = if insertion {
+                                    reference.len()
+                                } else {
+                                    query.len()
+                                };
+                                let expected = expected_match as i32 * parameters.match_score
+                                    - parameters.gap_open
+                                    - parameters.gap_ext * n as i32;
+                                let mut outputs = vec![
+                                    run_band(&query, &window, &core, &mut buf.packed, band).0,
+                                    run_band(&query, &window, &core, &mut buf.scalar, band).0,
+                                    run_dispatch(&query, &window, &parameters, &mut buf, band).0,
+                                    extend_hint(
+                                        &query,
+                                        &window,
+                                        &parameters,
+                                        &mut buf,
+                                        DiagHint {
+                                            offset: offset as i64,
+                                            num: 1,
+                                            den: 1,
+                                        },
+                                    ),
+                                ];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2_full::available() {
+                                    outputs.push(if band.is_some() {
+                                        avx2_band::run(
+                                            &query,
+                                            &window,
+                                            &core,
+                                            &mut buf.packed,
+                                            offset as i64,
+                                            1,
+                                            1,
+                                            30,
+                                        )
+                                        .0
+                                    } else {
+                                        avx2_full::run(&query, &window, &core, &mut buf.packed).0
+                                    });
+                                }
+                                for ext in &outputs {
+                                    assert_eq!(ext.score, expected,
+                                        "insertion={insertion}, n={n}, reverse={reverse}, dir={dir:?}, offset={offset}, band={band:?}, cigar={:?}", ext.cigar);
+                                    assert_eq!(ext.read_start, 0);
+                                    assert_eq!(ext.read_end as usize, query.len());
+                                    assert_eq!(ext.ref_start as usize, offset);
+                                    assert!(ext.cigar.contains(&if insertion {
+                                        CigarOp::Ins(n as u32)
+                                    } else {
+                                        CigarOp::Del(n as u32)
+                                    }));
+                                    assert_eq!(ext.cigar, outputs[0].cigar);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_gap_terminal_path_cannot_borrow_a_missing_extension_penalty() {
+        let body = crate::fragment::tests::body(120);
+        let reference = [body.clone(), b"TAGC".to_vec()].concat();
+        let query = [body, b"AGC".to_vec(), vec![b'N'; 27]].concat();
+        for reverse in [false, true] {
+            let (q, r) = if reverse {
+                (
+                    crate::align::revcomp(&query),
+                    crate::align::revcomp(&reference),
+                )
+            } else {
+                (query.clone(), reference.clone())
+            };
+            let ext = extend(
+                &q,
+                &r,
+                &ExtendParams::default(),
+                &mut ExtendBuffer::default(),
+            );
+            assert_eq!(
+                ext.score, 240,
+                "terminal 1D3M costs exactly its six match points"
+            );
+            assert!(
+                !ext.cigar
+                    .iter()
+                    .any(|op| matches!(op, CigarOp::Ins(_) | CigarOp::Del(_))),
+                "a neutral gap is not an informative diagonal tie: {:?}",
+                ext.cigar
+            );
+        }
+    }
+
+    #[test]
+    fn affine_gap_rescue_penalties_keep_an_ungapped_local_body() {
+        let reference = crate::fragment::tests::body(160);
+        let mut query = reference.clone();
+        query.remove(80);
+        let params = ExtendParams {
+            gap_open: 400,
+            gap_ext: 400,
+            ..Default::default()
+        };
+        let ext = extend(&query, &reference, &params, &mut ExtendBuffer::default());
+        assert!(ext.score > 0);
+        assert!(!ext
+            .cigar
+            .iter()
+            .any(|op| matches!(op, CigarOp::Ins(_) | CigarOp::Del(_))));
+    }
+
+    #[test]
+    fn neutral_outer_flanks_keep_edit_evidence_without_score_gain() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        for (reference_flank, query_flank) in [(b"AAT", b"AAC"), (b"CCA", b"CCG")] {
+            for left in [true, false] {
+                let (mut reference, mut query) = (b"NN".to_vec(), Vec::new());
+                if left {
+                    reference.extend_from_slice(reference_flank);
+                    query.extend_from_slice(b"NN");
+                    query.extend_from_slice(query_flank);
+                }
+                reference.extend_from_slice(core);
+                query.extend_from_slice(core);
+                if !left {
+                    reference.extend_from_slice(
+                        &reference_flank.iter().rev().copied().collect::<Vec<_>>(),
+                    );
+                    query.extend_from_slice(&query_flank.iter().rev().copied().collect::<Vec<_>>());
+                    query.extend_from_slice(b"NN");
+                }
+                reference.extend_from_slice(b"NN");
+                let ext = extend_hint(
+                    &query,
+                    &reference,
+                    &ExtendParams::default(),
+                    &mut ExtendBuffer::default(),
+                    DiagHint {
+                        offset: if left { 0 } else { 2 },
+                        num: 1,
+                        den: 1,
+                    },
+                );
+                assert_eq!(ext.score, core.len() as i32 * 2);
+                assert_eq!(ext.ref_start, 2);
+                assert_eq!(
+                    ext.cigar,
+                    if left {
+                        vec![CigarOp::SoftClip(2), CigarOp::Match(23)]
+                    } else {
+                        vec![CigarOp::Match(23), CigarOp::SoftClip(2)]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_outer_flanks_do_not_absorb_negative_or_ambiguous_clips() {
+        let reference = b"AATGACGATCGGATACGCTAGCA";
+        for prefix in [b"NNN".as_slice(), b"ACC".as_slice()] {
+            let mut query = prefix.to_vec();
+            query.extend_from_slice(&reference[3..]);
+            let ext = extend_hint(
+                &query,
+                reference,
+                &ExtendParams::default(),
+                &mut ExtendBuffer::default(),
+                DiagHint {
+                    offset: 0,
+                    num: 1,
+                    den: 1,
+                },
+            );
+            assert_eq!(ext.score, 40);
+            assert_eq!(ext.read_start, 3);
+            assert_eq!(ext.ref_start, 3);
+            assert_eq!(ext.cigar, vec![CigarOp::SoftClip(3), CigarOp::Match(20)]);
+        }
+    }
+
+    #[test]
+    fn neutral_non_n_technical_tails_do_not_buy_coverage_with_ordinary_mismatches() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        let tails: [&[u8]; 3] = [
+            b"AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+            b"AAAAAAAAAAAAAAAAAAAA",
+            b"CAGTCGTACGATCTAG",
+        ];
+        for tail in tails {
+            for left in [true, false] {
+                let mut flank = if left {
+                    tail[tail.len() - 3..].to_vec()
+                } else {
+                    tail[..3].to_vec()
+                };
+                let mismatch = if left { 2 } else { 0 };
+                flank[mismatch] = *b"ACGT"
+                    .iter()
+                    .find(|&&r| {
+                        r != flank[mismatch]
+                            && exempt_dir(r, tail[if left { tail.len() - 1 } else { 0 }]).is_none()
+                    })
+                    .unwrap();
+                let padding = tail.len() + 2;
+                let (mut reference, mut query) = (vec![b'N'; padding], Vec::new());
+                if left {
+                    reference.extend_from_slice(&flank);
+                    query.extend_from_slice(tail);
+                }
+                reference.extend_from_slice(core);
+                query.extend_from_slice(core);
+                if !left {
+                    reference.extend_from_slice(&flank);
+                    query.extend_from_slice(tail);
+                }
+                reference.extend(vec![b'N'; padding]);
+                for edit_dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    for lowercase in [false, true] {
+                        let (mut r, mut q) = (reference.clone(), query.clone());
+                        if lowercase {
+                            r.make_ascii_lowercase();
+                            q.make_ascii_lowercase();
+                        }
+                        let ext = extend(
+                            &q,
+                            &r,
+                            &ExtendParams {
+                                edit_dir,
+                                ..ExtendParams::default()
+                            },
+                            &mut ExtendBuffer::default(),
+                        );
+                        assert_eq!(ext.score, 40);
+                        assert_eq!(ext.ref_start, (padding + if left { 3 } else { 0 }) as u32);
+                        assert_eq!(
+                            ext.cigar,
+                            if left {
+                                vec![CigarOp::SoftClip(tail.len() as u32), CigarOp::Match(20)]
+                            } else {
+                                vec![CigarOp::Match(20), CigarOp::SoftClip(tail.len() as u32)]
+                            },
+                            "same-score ordinary mismatch must not buy tail coverage: left={left}, edit={edit_dir:?}, scalar={lowercase}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_flank_scan_does_not_cross_an_ordinary_mismatch_to_reach_a_later_tie() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        // From the core outward: T>C (-4), A=A (+2), A=A (+2),
+        // T>G (-4), A=A (+2), A=A (+2). The first neutral edit block
+        // remains admissible; a second neutral ordinary block must not.
+        let mut reference = b"NNAATAAT".to_vec();
+        reference.extend_from_slice(core);
+        let mut query = b"NNAAGAAC".to_vec();
+        query.extend_from_slice(core);
+        let ext = extend(
+            &query,
+            &reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        assert_eq!(ext.score, 40);
+        assert_eq!(ext.read_start, 5);
+        assert_eq!(ext.ref_start, 5);
+        assert_eq!(ext.cigar, vec![CigarOp::SoftClip(5), CigarOp::Match(23)]);
+    }
+
+    #[test]
+    fn terminal_edit_ties_survive_all_edit_modes_and_scalar_dispatch() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        for (rf, qf, direction) in [(b"AAT", b"AAC", EditDir::Tc), (b"CCA", b"CCG", EditDir::Ag)] {
+            for left in [true, false] {
+                for edit_dir in [EditDir::Off, EditDir::Ag, EditDir::Tc] {
+                    for lowercase in [false, true] {
+                        let (mut r, mut q) = (b"NN".to_vec(), b"NN".to_vec());
+                        if left {
+                            r.extend_from_slice(rf);
+                            q.extend_from_slice(qf);
+                        }
+                        r.extend_from_slice(core);
+                        q.extend_from_slice(core);
+                        if !left {
+                            r.extend(rf.iter().rev());
+                            q.extend(qf.iter().rev());
+                        }
+                        r.extend_from_slice(b"NN");
+                        q.extend_from_slice(b"NN");
+                        if lowercase {
+                            r.make_ascii_lowercase();
+                            q.make_ascii_lowercase();
+                        }
+                        let ext = extend(
+                            &q,
+                            &r,
+                            &ExtendParams {
+                                edit_dir,
+                                ..ExtendParams::default()
+                            },
+                            &mut ExtendBuffer::default(),
+                        );
+                        assert_eq!(ext.score, 40 + if edit_dir == direction { 4 } else { 0 });
+                        assert_eq!(ext.ref_start, 2);
+                        assert_eq!(
+                            ext.cigar,
+                            vec![
+                                CigarOp::SoftClip(2),
+                                CigarOp::Match(23),
+                                CigarOp::SoftClip(2),
+                            ]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_edit_and_technical_origin_sequences_remain_indistinguishable() {
+        let reference = b"NNAATGACGATCGGATACGCTAGCA";
+        let same_sequence = b"NNAACGACGATCGGATACGCTAGCA";
+        let body_interpretation = extend(
+            same_sequence,
+            reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        // No origin label is an aligner input. Relabeling the same AAC as
+        // technical cannot justify a different sequence-based decision.
+        let technical_interpretation = extend(
+            same_sequence,
+            reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        assert_eq!(body_interpretation.score, technical_interpretation.score);
+        assert_eq!(body_interpretation.cigar, technical_interpretation.cigar);
+        assert_eq!(
+            body_interpretation.cigar,
+            vec![CigarOp::SoftClip(2), CigarOp::Match(23)]
+        );
+    }
+
+    #[test]
+    fn positive_score_ordinary_terminal_alignment_is_not_a_neutral_tie() {
+        let core = b"GACGATCGGATACGCTAGCA";
+        let mut reference = b"NNAAAC".to_vec();
+        reference.extend_from_slice(core);
+        let mut query = b"NNAAAA".to_vec();
+        query.extend_from_slice(core);
+        let ext = extend(
+            &query,
+            &reference,
+            &ExtendParams::default(),
+            &mut ExtendBuffer::default(),
+        );
+        // Three matches and one ordinary mismatch add +2. The tie
+        // convention must not become an unrequested terminal penalty.
+        assert_eq!(ext.score, 42);
+        assert_eq!(ext.cigar, vec![CigarOp::SoftClip(2), CigarOp::Match(24)]);
+    }
+
     /// The i16 sentinel contract: exact-equality NEG with a max() clamp —
     /// deep E/F chains on long windows all collapse to NEG (load-bearing for
     /// tie behavior; see the impl's NOTE).
     #[test]
     fn i16_sentinel_clamp_semantics() {
         type A = i16;
-        assert_eq!(<A as Acc>::NEG.add(<A as Acc>::from_i32(6)), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::NEG.add(<A as Acc>::from_i32(6)),
+            <A as Acc>::NEG
+        );
         assert_eq!(<A as Acc>::NEG.add(<A as Acc>::NEG), <A as Acc>::NEG);
-        assert_eq!(<A as Acc>::from_i32(0).add(<A as Acc>::NEG), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::from_i32(0).add(<A as Acc>::NEG),
+            <A as Acc>::NEG
+        );
         assert_eq!(<A as Acc>::from_i32(300).add(<A as Acc>::from_i32(2)), 302);
         // Deep chains clamp to the sentinel, not saturate below it.
-        assert_eq!(<A as Acc>::from_i32(-31000).add(<A as Acc>::from_i32(-6)), <A as Acc>::NEG);
+        assert_eq!(
+            <A as Acc>::from_i32(-31000).add(<A as Acc>::from_i32(-6)),
+            <A as Acc>::NEG
+        );
     }
 
     // ---- AVX2 full-matrix kernel vs scalar kernel (bit-identity) ----
@@ -2023,6 +2538,38 @@ mod tests {
         assert_touch_same(&sim_touch, &sca_touch, ctx);
     }
 
+    #[test]
+    fn full_matrix_short_reference_covers_late_query_matches() {
+        // A local reference window can be shorter than the read, especially
+        // a stitched splice pseudo-reference. Full matrix must include late
+        // query rows, not silently turn into a diagonal band of half-width n.
+        for (m, n) in [(4, 1), (33, 7), (80, 15), (150, 55), (301, 31)] {
+            let rf: Vec<u8> = (0..n).map(|i| b"ACGT"[i % 4]).collect();
+            let read = [vec![b'N'; m - n], rf.clone()].concat();
+            let params = ExtendParams::default();
+            let core = CoreParams::new(&params);
+            let mut buf = ExtendBuffer::default();
+            let (scalar, _) = run_band(&read, &rf, &core, &mut buf.packed, None);
+            assert_eq!(scalar.read_start, (m - n) as u32);
+            assert_eq!(scalar.read_end, m as u32);
+            assert_eq!(scalar.ref_start, 0);
+            assert_eq!(scalar.score, (2 * n) as i32);
+            assert_eq!(
+                scalar.cigar,
+                vec![CigarOp::SoftClip((m - n) as u32), CigarOp::Match(n as u32)]
+            );
+            let (wide, _) = run_band(&read, &rf, &core, &mut buf.scalar, None);
+            assert_ext_same(&scalar, &wide, "short reference wide");
+            let dispatched = extend(&read, &rf, &params, &mut buf);
+            assert_ext_same(&scalar, &dispatched, "short reference dispatch");
+            #[cfg(target_arch = "x86_64")]
+            if avx2_full::available() {
+                let (simd, _) = avx2_full::run(&read, &rf, &core, &mut buf.packed);
+                assert_ext_same(&scalar, &simd, "short reference simd fallback");
+            }
+        }
+    }
+
     /// Randomized ACGTN read/window pairs across lengths (including edge
     /// shapes m = 1, n < 16, n not a multiple of 16), all three editing
     /// directions: the AVX2 kernel must return the exact scalar Extension.
@@ -2034,24 +2581,30 @@ mod tests {
             return;
         }
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        let lens_m = [1usize, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 100, 150, 151, 200];
-        let lens_n = [1, 2, 3, 7, 8, 15, 16, 17, 31, 48, 63, 64, 100, 127, 255, 257, 1000, 3000];
+        let lens_m = [
+            1usize, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 100, 150, 151, 200,
+        ];
+        let lens_n = [
+            1, 2, 3, 7, 8, 15, 16, 17, 31, 48, 63, 64, 100, 127, 255, 257, 1000, 3000,
+        ];
         let dirs = [EditDir::Off, EditDir::Ag, EditDir::Tc];
         let mut cases = 0usize;
         for &m in lens_m.iter() {
             for &n in lens_n.iter() {
-                if n < m {
-                    continue;
-                }
                 for rep in 0..3 {
                     let read = rand_seq(&mut rng, m);
-                    let win = if rep == 2 {
+                    let win = if rep == 2 || n < m {
                         rand_seq(&mut rng, n)
                     } else {
                         rand_window(&mut rng, &read, n)
                     };
                     let dir = dirs[rng.below(3) as usize];
-                    cmp_case(&read, &win, dir, &format!("m={m} n={n} rep={rep} dir={dir:?}"));
+                    cmp_case(
+                        &read,
+                        &win,
+                        dir,
+                        &format!("m={m} n={n} rep={rep} dir={dir:?}"),
+                    );
                     cases += 1;
                 }
             }
@@ -2083,10 +2636,11 @@ mod tests {
         }
         let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
         for m in 14usize..=20 {
-            for n in m..=20 { // production contract: read fits the window (m <= n)
+            for n in 1..=20 {
+                // Both rectangular orientations are valid local windows.
                 for rep in 0..4 {
                     let read = rand_seq(&mut rng, m);
-                    let win = if rep & 1 == 0 {
+                    let win = if rep & 1 == 0 && n >= m {
                         rand_window(&mut rng, &read, n)
                     } else {
                         rand_seq(&mut rng, n)
@@ -2136,7 +2690,6 @@ mod tests {
         }
     }
 
-
     // ---- AVX2 banded kernel vs scalar kernel (bit-identity) ----
 
     #[cfg(target_arch = "x86_64")]
@@ -2149,8 +2702,13 @@ mod tests {
         let mut buf = ExtendBuffer::new();
         let (sim_ext, sim_touch) =
             avx2_band::run(read, win, &core, &mut buf.packed, offset, 1, 1, half);
-        let (sca_ext, sca_touch) =
-            run_band(read, win, &core, &mut buf.packed, Some((offset, 1, 1, half)));
+        let (sca_ext, sca_touch) = run_band(
+            read,
+            win,
+            &core,
+            &mut buf.packed,
+            Some((offset, 1, 1, half)),
+        );
         assert_ext_same(&sim_ext, &sca_ext, ctx);
         assert_touch_same(&sim_touch, &sca_touch, ctx);
     }
@@ -2182,7 +2740,7 @@ mod tests {
             (100, 300),
             (150, 151),
             (150, 1000),
-            (40, 20),  // m > n: scalar supports it; kernel must too
+            (40, 20), // m > n: scalar supports it; kernel must too
             (17, 9),
         ];
         let dirs = [EditDir::Off, EditDir::Ag, EditDir::Tc];
@@ -2204,14 +2762,14 @@ mod tests {
                 for &half in halfs.iter() {
                     let hh = half.min(mn);
                     for &offset in [
-                        -hh - 5,             // row 0 empty (left)
+                        -hh - 5, // row 0 empty (left)
                         -1i64,
                         0,
                         5,
                         (n as i64 - m as i64), // band along the read diagonal
-                        n as i64,           // right window edge
-                        n as i64 + hh + 5,  // row 0 empty (right)
-                        4 * n as i64,       // huge
+                        n as i64,              // right window edge
+                        n as i64 + hh + 5,     // row 0 empty (right)
+                        4 * n as i64,          // huge
                     ]
                     .iter()
                     {
@@ -2333,8 +2891,13 @@ mod tests {
                 let (dsp_ext, dsp_touch) =
                     run_dispatch(&read, &win, &params, &mut buf, Some((offset, 1, 1, half)));
                 let core = CoreParams::new(&params);
-                let (sca_ext, sca_touch) =
-                    run_band(&read, &win, &core, &mut buf.packed, Some((offset, 1, 1, half)));
+                let (sca_ext, sca_touch) = run_band(
+                    &read,
+                    &win,
+                    &core,
+                    &mut buf.packed,
+                    Some((offset, 1, 1, half)),
+                );
                 assert_ext_same(
                     &dsp_ext,
                     &sca_ext,
@@ -2371,9 +2934,16 @@ mod tests {
                 win,
                 &ExtendParams::default(),
                 &mut buf,
-                DiagHint { offset: 3, num: 1, den: 1 },
+                DiagHint {
+                    offset: 3,
+                    num: 1,
+                    den: 1,
+                },
             );
-            assert!(h.score > 0, "scalar banded fallback must still align: {h:?}");
+            assert!(
+                h.score > 0,
+                "scalar banded fallback must still align: {h:?}"
+            );
             return;
         }
         let exe = std::env::current_exe().unwrap();
@@ -2387,5 +2957,4 @@ mod tests {
             .unwrap();
         assert!(st.success());
     }
-
 }

@@ -8,3 +8,4 @@ license.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 blake3.workspace = true
+memmap2.workspace = true

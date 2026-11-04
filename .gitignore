@@ -1,2 +1,5 @@
 target/
 /target-x86-64-baseline/
+.worktrees/
+/refs/
+/results/

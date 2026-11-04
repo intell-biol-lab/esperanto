@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-const LATEST_API: &str = "https://api.github.com/repos/Zhazhupai603/esperanto/releases/latest";
+const LATEST_API: &str = "https://api.github.com/repos/intell-biol-lab/esperanto/releases/latest";
 
 #[derive(Args)]
 pub struct UpdateArgs {
@@ -119,6 +119,12 @@ fn copy_tree(src: &PathBuf, dst: &PathBuf) -> anyhow::Result<()> {
 
 pub fn run(a: UpdateArgs) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION").to_string();
+    if current.contains('-') {
+        anyhow::bail!(
+            "self-update is disabled for development builds; build a pinned commit from \
+             https://github.com/intell-biol-lab/esperanto instead"
+        );
+    }
     let (tag, _name) = latest_release()?;
     let latest_v = tag.trim_start_matches('v');
     eprintln!("current: {current}  latest: {latest_v}");
@@ -135,7 +141,7 @@ pub fn run(a: UpdateArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     let url = format!(
-        "https://github.com/Zhazhupai603/esperanto/releases/download/{tag}/esperanto-{latest_v}-linux-x86_64.tar.gz"
+        "https://github.com/intell-biol-lab/esperanto/releases/download/{tag}/esperanto-{latest_v}-linux-x86_64.tar.gz"
     );
     eprintln!("[update] downloading {url}");
     let agent = ureq::Agent::config_builder()

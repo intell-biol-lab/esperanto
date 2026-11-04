@@ -6,6 +6,10 @@ The crate owns record encoding, sequential BAM inspection, BGZF writing, and coo
 
 `OutRecord` contains a raw-byte read name, SAM flags, MAPQ, optional `AlnView`, sequence, Phred qualities, and optional mate coordinates. `AlnView` contains a contig identifier, 0-based position, CIGAR, and ordered auxiliary tags. CIGAR operations are `Match`, `Ins`, `Del`, `RefSkip`, and `SoftClip`. Tags support character, integer, and string values.
 
+`OutRecord.unmapped_tags` carries auxiliary evidence when `AlnView` is absent.
+Both encoders preserve it; mapped records use only `AlnView.tags`. This allows
+an unplaced read to retain incomplete-search evidence across later rescue.
+
 Mapped minus-strand records store reverse-complemented sequence and reversed qualities. Plus-strand and unmapped records retain their original read orientation. Reverse complementation recognizes A/C/G/T case-insensitively, emits uppercase bases, and maps other symbols to N. `restore_original` reverses the mapped-strand transformation when required.
 
 Contig identifiers follow header SQ order. Qualities contain raw Phred values; an empty quality vector represents missing qualities and is encoded as `0xFF`. A nonempty quality vector must match sequence length. Unmapped records use the unmapped flag and have no aligned reference view.

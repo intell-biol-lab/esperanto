@@ -109,14 +109,47 @@ pub fn minimizers_into(
 ) {
     let SeedScratch { codes, keys, dq } = scratch;
     codes.clear();
-    codes.extend(
-        seq.iter()
-            .map(|&b| match Base::from_ascii(b).code() {
-                Some(c) => c as u64,
-                None => N_CODE,
-            }),
-    );
+    codes.extend(seq.iter().map(|&b| match Base::from_ascii(b).code() {
+        Some(c) => c as u64,
+        None => N_CODE,
+    }));
     minimizers_core(codes, params.k, params.w, keys, dq, out);
+}
+
+/// Complete the query's two incomplete minimizer-window edges.
+///
+/// Call immediately after `minimizers_into` for the same query and parameters.
+/// Only valid, canonical k-mers from the first/last `w - 1` starts are added;
+/// reference sketching and the original minimizer extraction are unchanged.
+/// The caller must apply the ordinary occurrence/anchor budgets to the union.
+pub(crate) fn append_query_edge_kmers(
+    read_len: usize,
+    params: SeedParams,
+    scratch: &SeedScratch,
+    out: &mut Vec<Minimizer>,
+) -> usize {
+    let k = params.k as usize;
+    if k == 0 || k > 32 || params.w <= 1 || read_len < k {
+        return 0;
+    }
+    let n = read_len - k + 1;
+    if scratch.codes.len() != read_len || scratch.keys.len() != n || n > u32::MAX as usize {
+        return 0;
+    }
+    let before = out.len();
+    let edge = (params.w as usize - 1).min(n);
+    for pos in (0..edge).chain(n.saturating_sub(edge).max(edge)..n) {
+        if let Some((_, kmer, strand)) = scratch.keys[pos] {
+            out.push(Minimizer {
+                kmer,
+                pos: pos as u32,
+                strand,
+            });
+        }
+    }
+    out.sort_unstable_by_key(|m| (m.pos, m.kmer));
+    out.dedup_by_key(|m| (m.pos, m.kmer));
+    out.len() - before
 }
 
 /** Extract minimizers from pre-encoded 2-bit codes (`N` must be 0xFF).
@@ -126,14 +159,7 @@ pub fn minimizers_into(
  */
 pub fn minimizers_from_codes(codes: &[u64], k: u32, w: u32) -> Vec<Minimizer> {
     let mut out = Vec::new();
-    minimizers_core(
-        codes,
-        k,
-        w,
-        &mut Vec::new(),
-        &mut VecDeque::new(),
-        &mut out,
-    );
+    minimizers_core(codes, k, w, &mut Vec::new(), &mut VecDeque::new(), &mut out);
     out
 }
 
@@ -158,7 +184,11 @@ fn minimizers_core(
     let mut fwd: u64 = 0;
     let mut rev: u64 = 0;
     let mut valid_run = 0usize; // current N-free run length
-    let mask: u64 = if k == 32 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
+    let mask: u64 = if k == 32 {
+        u64::MAX
+    } else {
+        (1u64 << (2 * k)) - 1
+    };
     for (i, &c) in codes.iter().enumerate() {
         if c == N_CODE {
             valid_run = 0;
@@ -230,6 +260,96 @@ fn minimizers_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_edge_kmers_are_bounded_canonical_deduplicated_and_query_only() {
+        let seq = b"AGTCTGATCGTAGCTAGCATCGATCGTTAGCGATACGT";
+        let params = SeedParams { k: 15, w: 5 };
+        let mut scratch = SeedScratch::default();
+        let mut out = Vec::new();
+        minimizers_into(seq, params, &mut scratch, &mut out);
+        let original = out.clone();
+        let added = append_query_edge_kmers(seq.len(), params, &scratch, &mut out);
+        assert_eq!(out.len(), original.len() + added);
+        assert!(added <= 8);
+        assert!(original.iter().all(|m| out.contains(m)));
+        assert!(out.windows(2).all(|m| m[0].pos < m[1].pos));
+        let n = seq.len() - 15 + 1;
+        for pos in (0..4).chain(n - 4..n) {
+            let mut expected = minimizers(&seq[pos..pos + 15], SeedParams { k: 15, w: 1 });
+            expected[0].pos = pos as u32;
+            assert!(out.contains(&expected[0]));
+        }
+        assert_eq!(
+            append_query_edge_kmers(seq.len(), params, &scratch, &mut out),
+            0
+        );
+        minimizers_into(seq, params, &mut scratch, &mut out);
+        assert_eq!(
+            out, original,
+            "reference sketch and original extraction are unchanged"
+        );
+    }
+
+    #[test]
+    fn query_edge_kmers_reject_invalid_domains_and_skip_ambiguous_bases() {
+        let seq = b"NNNTACGTTAGCTAGCTAGCATCGATCGATNGNNN";
+        for params in [
+            SeedParams { k: 15, w: 5 },
+            SeedParams { k: 15, w: 1 },
+            SeedParams { k: 15, w: 0 },
+            SeedParams { k: 0, w: 5 },
+            SeedParams { k: 33, w: 5 },
+        ] {
+            let mut scratch = SeedScratch::default();
+            let mut out = Vec::new();
+            // Populate first so early-return paths cannot reuse stale keys.
+            minimizers_into(seq, SeedParams { k: 5, w: 2 }, &mut scratch, &mut out);
+            minimizers_into(seq, params, &mut scratch, &mut out);
+            let old = out.clone();
+            let added = append_query_edge_kmers(seq.len(), params, &scratch, &mut out);
+            if params.w <= 1 || params.k == 0 || params.k > 32 {
+                assert_eq!(added, 0);
+                assert_eq!(out, old);
+            } else {
+                for m in out {
+                    assert!(seq[m.pos as usize..m.pos as usize + 15]
+                        .iter()
+                        .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')));
+                }
+            }
+        }
+        for seq in [b"".as_slice(), b"ACGT", b"NNNNNNNNNNNNNNNNNNNN"] {
+            let params = SeedParams { k: 15, w: 5 };
+            let mut scratch = SeedScratch::default();
+            let mut out = Vec::new();
+            minimizers_into(seq, params, &mut scratch, &mut out);
+            assert_eq!(
+                append_query_edge_kmers(seq.len(), params, &scratch, &mut out),
+                0
+            );
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn query_edge_kmers_handle_overlapping_edges_and_reject_stale_lengths() {
+        let seq = b"ACGTTACGTTACGTTACGTTACGTTACGTTACGTT";
+        for k in [1, 15, 32] {
+            let params = SeedParams { k, w: 50 };
+            let mut scratch = SeedScratch::default();
+            let mut out = Vec::new();
+            minimizers_into(seq, params, &mut scratch, &mut out);
+            append_query_edge_kmers(seq.len(), params, &scratch, &mut out);
+            assert_eq!(out, minimizers(seq, SeedParams { k, w: 1 }));
+            let before = out.clone();
+            assert_eq!(
+                append_query_edge_kmers(seq.len() + 1, params, &scratch, &mut out),
+                0
+            );
+            assert_eq!(out, before);
+        }
+    }
 
     #[test]
     fn scratch_reuse_yields_independent_results() {

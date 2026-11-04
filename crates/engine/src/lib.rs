@@ -345,6 +345,10 @@ pub trait Tidx {
     /// Look up a canonical k-mer; `(tx_id, offset)` pairs in ascending
     /// order, empty on miss.
     fn lookup(&self, canonical_kmer: u64) -> &[(u32, u32)];
+    /// Borrowed entry view; existing providers retain their slice behavior.
+    fn lookup_hits(&self, canonical_kmer: u64) -> esperanto_tidx::LookupHits<'_> {
+        esperanto_tidx::LookupHits::from_slice(self.lookup(canonical_kmer))
+    }
     /// Display name of transcript `tx_id` (empty when out of range).
     fn transcript_name(&self, tx_id: u32) -> &str;
     /// Performance hint only; default no-op, no semantic effect.
@@ -418,8 +422,7 @@ pub fn align_read(
     }
     stats.branch = Branch::NoHit;
 
-    let (mut fulls, parts, read_rc) =
-        collect_extensions(read, tidx, txseqs, cfg, stats);
+    let (mut fulls, parts, read_rc) = collect_extensions(read, tidx, txseqs, cfg, stats);
     if fulls.is_empty() && parts.is_empty() {
         stats.branch = Branch::NoHit;
         return L1Outcome::Fallback;
@@ -427,9 +430,7 @@ pub fn align_read(
 
     // EA-Myers infix distance of one candidate against its anchored
     // transcript window (None when the window is empty).
-    let verify = |e: &ExtEntry| -> Option<u32> {
-        verify_dist(read, &read_rc, txseqs, e, cfg)
-    };
+    let verify = |e: &ExtEntry| -> Option<u32> { verify_dist(read, &read_rc, txseqs, e, cfg) };
     stats.fulls_count = fulls.len() as u32;
     stats.parts_count = parts.len() as u32;
 
@@ -437,7 +438,11 @@ pub fn align_read(
     if !fulls.is_empty() {
         stats.branch = Branch::Full;
         fulls.sort_by(|a, b| {
-            (a.strand.sam_flag(), a.tx_id, a.diagonal).cmp(&(b.strand.sam_flag(), b.tx_id, b.diagonal))
+            (a.strand.sam_flag(), a.tx_id, a.diagonal).cmp(&(
+                b.strand.sam_flag(),
+                b.tx_id,
+                b.diagonal,
+            ))
         });
         let mut placed: Vec<placement::Placed> = fulls
             .iter()
@@ -447,9 +452,7 @@ pub fn align_read(
             stats.branch = Branch::GateFail;
             return L1Outcome::Fallback;
         }
-        placed.sort_by(|a, b| {
-            (a.score, a.tx_id, a.diagonal).cmp(&(b.score, b.tx_id, b.diagonal))
-        });
+        placed.sort_by(|a, b| (a.score, a.tx_id, a.diagonal).cmp(&(b.score, b.tx_id, b.diagonal)));
         let Some((best, mapq)) = placement::finalize_candidates(&placed, false) else {
             stats.branch = Branch::GateFail;
             return L1Outcome::Fallback;
@@ -586,8 +589,8 @@ pub fn align_read(
         strand: bestp.strand,
         cigar: bestp.cigar.clone(),
         score: bestp.score,
-mapq,
-}
+        mapq,
+    }
 }
 
 /// Seed a read against the transcriptome index and greedily extend every
@@ -635,12 +638,12 @@ fn collect_extensions(
         let exhausted = batch.len() < batch_size;
         for (pos, code) in batch.iter().copied() {
             let canon = kmer::canonical(code, k);
-            let hits = tidx.lookup(canon);
+            let hits = tidx.lookup_hits(canon);
             stats.queries += 1;
             if hits.len() > cfg.max_hits_per_kmer {
                 continue;
             }
-            for &(tx_id, tx_off) in hits {
+            for (tx_id, tx_off) in hits.iter() {
                 if raw_hits >= cfg.max_raw_hits {
                     break 'seeding;
                 }
@@ -770,10 +773,7 @@ pub fn align_read_candidates(
                 break;
             }
             if out.iter().any(|x| {
-                x.contig == p.contig
-                    && x.pos == p.pos
-                    && x.strand == p.strand
-                    && x.cigar == p.cigar
+                x.contig == p.contig && x.pos == p.pos && x.strand == p.strand && x.cigar == p.cigar
             }) {
                 continue;
             }
@@ -825,10 +825,7 @@ pub fn align_read_candidates(
             continue;
         };
         if out.iter().any(|x| {
-            x.contig == p.contig
-                && x.pos == p.pos
-                && x.strand == p.strand
-                && x.cigar == p.cigar
+            x.contig == p.contig && x.pos == p.pos && x.strand == p.strand && x.cigar == p.cigar
         }) {
             continue;
         }
@@ -877,4 +874,3 @@ fn verify_dist(
         myers::long::infix(oriented, &tx_seq[wlo..whi])
     })
 }
-

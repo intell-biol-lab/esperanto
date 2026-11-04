@@ -1,5 +1,6 @@
 //! Native reference-aware molecular evidence scoring for ESPERANTO 1.1.
 pub mod bundle;
+pub mod joint;
 pub mod pipeline;
 pub mod unified;
 

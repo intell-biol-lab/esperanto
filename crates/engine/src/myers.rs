@@ -134,7 +134,8 @@ impl MyersEa {
             let mut cin = false;
             for blk in 0..self.blocks {
                 let eq = self.eq_vec(blk, tcode);
-                let (h, c) = calculate_block(eq, &mut pv[blk], &mut mv[blk], hin, cin, self.top[blk]);
+                let (h, c) =
+                    calculate_block(eq, &mut pv[blk], &mut mv[blk], hin, cin, self.top[blk]);
                 hin = h;
                 cin = c;
             }
@@ -157,7 +158,8 @@ impl MyersEa {
             let mut cin = false;
             for blk in 0..self.blocks {
                 let eq = self.eq_vec(blk, tcode);
-                let (h, c) = calculate_block(eq, &mut pv[blk], &mut mv[blk], hin, cin, self.top[blk]);
+                let (h, c) =
+                    calculate_block(eq, &mut pv[blk], &mut mv[blk], hin, cin, self.top[blk]);
                 hin = h;
                 cin = c;
             }
@@ -174,7 +176,14 @@ impl MyersEa {
 /// and this block's own adder carry (`cout`) — both must be chained into
 /// the next block (dropping `cout` corrupts multi-block columns).
 #[inline]
-fn calculate_block(eq: u128, pv: &mut u128, mv: &mut u128, hin: i8, cin: bool, top: u128) -> (i8, bool) {
+fn calculate_block(
+    eq: u128,
+    pv: &mut u128,
+    mv: &mut u128,
+    hin: i8,
+    cin: bool,
+    top: u128,
+) -> (i8, bool) {
     let xv = eq | *mv;
     let (sum, cout) = (eq & *pv).carrying_add(*pv, cin);
     let xh = (sum ^ *pv) | xv;
