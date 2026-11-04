@@ -2,6 +2,9 @@
 
 ## 1.1.1-dev.41 (unreleased)
 
+- Removing invalid zero-length deletions also removes their phantom gap-open
+  penalties under the unchanged scorer; candidate scores, EK evidence, ranking
+  and MAPQ may change. Strict validity does not imply exact output-field parity.
 - Avoid emitting zero-length Match/Del operations when a spliced alignment
   resumes at an exhausted exon boundary. Preserve intron advancement, indels,
   clipping and query/reference consumption; no BAM post-processing repair.

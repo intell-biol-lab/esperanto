@@ -5,6 +5,11 @@ from `stitch_cigar` at exhausted exon boundaries, including MAPQ60 records.
 Dev.41 prevents that emission at its source, with boundary/strand/indel
 regressions. Native quickcheck and successful scoring do not certify strict
 CIGAR validity; replay and independent alignment-relevant parity are required.
+Removing `Del(0)` also removes its phantom gap-open penalty under the unchanged
+common scorer. Competing scores, EK evidence, ranking or MAPQ can consequently
+change, including for reads whose winning CIGAR was already legal. Preserve and
+report these effects; do not describe the fix as output-format-only or relax
+the independent evaluator to obtain parity.
 This targeted interface repair does not resolve the other scientific
 qualification limitations listed below or qualify biological editing calls.
 

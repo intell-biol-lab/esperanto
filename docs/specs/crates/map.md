@@ -74,6 +74,10 @@ Dev.41 prevents zero-length Match/Del emission at exhausted exon boundaries in
 positive reference span. Insertions and clips retain their order. The executable
 contract is `crates/map/tests/splice_stitch.rs`; real-input strict validation and
 coordinate/tag parity must be checked independently before adopting a build.
+Scoring parameters are unchanged, but an invalid `Del(0)` previously incurred
+a gap-open penalty. Removing it can change a candidate's common score and
+therefore runner-up evidence, ranking or MAPQ. Exact all-field parity is not
+guaranteed; retain the full observed effects separately from strict validity.
 
 ## Placement evidence
 
