@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1-dev.41 (unreleased)
+
+- Avoid emitting zero-length Match/Del operations when a spliced alignment
+  resumes at an exhausted exon boundary. Preserve intron advancement, indels,
+  clipping and query/reference consumption; no BAM post-processing repair.
+- Add generated regressions for both strand metadata, multiple exon boundaries,
+  non-crossing paths and offsets. Real-input strict interface and alignment
+  parity evidence remain separate from software CI and scientific adoption.
+
 ## 1.1.1-dev.40 (unreleased)
 
 - Bound complete-content batch input hashing by `--validation-threads`, total

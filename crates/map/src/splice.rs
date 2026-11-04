@@ -469,10 +469,9 @@ pub fn stitch_cigar(
                     }
                     let remain_in_exon = exon_end(ei).saturating_sub(p);
                     let take = remaining.min(remain_in_exon);
-                    // Zero-take ops ARE emitted: a Match/Del resuming exactly
-                    // at an exon boundary yields a 0-length op before the
-                    // RefSkip (splice boundary).
-                    push_op(&mut out, kind(take as u32));
+                    if take > 0 {
+                        push_op(&mut out, kind(take as u32));
+                    }
                     p += take;
                     remaining -= take;
                     if remaining > 0 {

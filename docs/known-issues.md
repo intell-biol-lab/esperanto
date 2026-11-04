@@ -1,5 +1,13 @@
 # Known scientific qualification issues
 
+Dev.40 real Geuvadis/MAGE pilot outputs exposed zero-length Match/Del operations
+from `stitch_cigar` at exhausted exon boundaries, including MAPQ60 records.
+Dev.41 prevents that emission at its source, with boundary/strand/indel
+regressions. Native quickcheck and successful scoring do not certify strict
+CIGAR validity; replay and independent alignment-relevant parity are required.
+This targeted interface repair does not resolve the other scientific
+qualification limitations listed below or qualify biological editing calls.
+
 Dev.26 proposes a final invariant-column fallback when homopolymer boundary
 assignment is unidentifiable. It emits only supported complex-body columns,
 records uncertainty in XB/diagnostics and leaves all new projections at MAPQ0.

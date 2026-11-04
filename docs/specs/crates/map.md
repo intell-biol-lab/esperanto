@@ -69,6 +69,12 @@ adoption; see [the endpoint contract](../../paired-fragment-endpoints.md).
 
 Alignment positions and reference intervals use 0-based coordinates. CIGAR operations are `M`, `I`, `D`, `N`, and `S`; skipped introns use `N`. BAM sequence for a mapped minus-strand record is reverse-complemented and its qualities are reversed. Unmapped reads retain their original orientation.
 
+Dev.41 prevents zero-length Match/Del emission at exhausted exon boundaries in
+`stitch_cigar`; the intron transition still occurs before consuming the next
+positive reference span. Insertions and clips retain their order. The executable
+contract is `crates/map/tests/splice_stitch.rs`; real-input strict validation and
+coordinate/tag parity must be checked independently before adopting a build.
+
 ## Placement evidence
 
 Candidate placement ranking considers alignment score, alternative locations, splice structure, and paired-end agreement. MAPQ is bounded by 60. Ambiguous placements remain representable with low MAPQ; downstream observations require MAPQ at least 20.
