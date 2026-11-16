@@ -239,6 +239,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_soft_clip_helper_rejects_partial_proposals() {
+        assert!(has_terminal_soft_clip(&[
+            CigarOp::SoftClip(1),
+            CigarOp::Match(74),
+        ]));
+        assert!(has_terminal_soft_clip(&[
+            CigarOp::Match(74),
+            CigarOp::SoftClip(1),
+        ]));
+        assert!(!has_terminal_soft_clip(&[CigarOp::Match(75)]));
+    }
+
+    #[test]
     fn wrong_orientation_and_no_strict_improvement_refuse() {
         let (idx, seq, p, old, mate) = setup();
         let cache = CachedPlacements {
@@ -388,6 +401,9 @@ impl Aligner<'_> {
             pool.seed_budget = cache.seed_budget;
             *slot = Some(pool);
         }
+        if has_terminal_soft_clip(&proposal.cigar) {
+            return None;
+        }
         // A mate is an extra generator, not a license to delete a remote rival.
         if placements
             .iter()
@@ -414,6 +430,15 @@ impl Aligner<'_> {
 
 fn same_path(a: &Placement, b: &Placement) -> bool {
     a.contig == b.contig && a.pos == b.pos && a.strand == b.strand && a.cigar == b.cigar
+}
+
+fn has_terminal_soft_clip(cigar: &[CigarOp]) -> bool {
+    cigar
+        .first()
+        .is_some_and(|op| matches!(op, CigarOp::SoftClip(n) if *n > 0))
+        || cigar
+            .last()
+            .is_some_and(|op| matches!(op, CigarOp::SoftClip(n) if *n > 0))
 }
 
 fn exact_ordinary_path(aligner: &mut Aligner<'_>, sequence: &[u8], path: &ReadAlignment) -> bool {
