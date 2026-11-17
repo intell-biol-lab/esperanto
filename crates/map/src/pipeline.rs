@@ -480,6 +480,7 @@ pub fn run_pe(
                                     seq2,
                                     old2,
                                     c1,
+                                    c2,
                                     diagnostics_enabled.then_some(&mut proposed_diag1),
                                 );
                                 let next2 = aligner.propose_discordant_pair(
@@ -488,6 +489,7 @@ pub fn run_pe(
                                     seq1,
                                     old1,
                                     c2,
+                                    c1,
                                     diagnostics_enabled.then_some(&mut proposed_diag2),
                                 );
                                 match (next1, next2) {

@@ -4457,7 +4457,9 @@ mod tests {
         let old = aligner
             .arbitrate(&read, placements.clone(), 20, true)
             .unwrap();
-        let mate = aligner.align_read(&mate_seq).unwrap();
+        let (mate, mate_cache) = aligner.align_read_full(&mate_seq);
+        let mate = mate.unwrap();
+        let mate_cache = mate_cache.unwrap();
         assert_eq!(old.pos, 5000);
         assert!(crate::mapq::mapq_of(&old) >= crate::mapq::PILEUP_GATE);
         assert_eq!(mate.pos, 1300);
@@ -4469,7 +4471,15 @@ mod tests {
         };
         let mut diagnostic = None;
         let result = aligner
-            .propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, Some(&mut diagnostic))
+            .propose_discordant_pair(
+                &read,
+                &old,
+                &mate_seq,
+                &mate,
+                &cache,
+                &mate_cache,
+                Some(&mut diagnostic),
+            )
             .expect(
                 "a compatible cached locus must compete even when its independent score is lower",
             );

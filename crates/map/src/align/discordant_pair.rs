@@ -28,6 +28,7 @@ impl Aligner<'_> {
         mate_seq: &[u8],
         mate: &ReadAlignment,
         cache: &CachedPlacements,
+        mate_cache: &CachedPlacements,
         diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
     ) -> Option<ReadAlignment> {
         if !self.config.rna
@@ -37,13 +38,17 @@ impl Aligner<'_> {
             || old.seed_search_limited
             || mate.seed_search_limited
             || cache.seed_search_limited()
+            || mate_cache.seed_search_limited()
             || !full_match(&old.cigar, seq.len())
             || !full_match(&mate.cigar, mate_seq.len())
+            || crate::mapq::mapq_of(old) < crate::mapq::PILEUP_GATE
+            || crate::mapq::mapq_of(old) == 255
             || crate::mapq::mapq_of(mate) < crate::mapq::PILEUP_GATE
             || crate::mapq::mapq_of(mate) == 255
             || crate::pair::relate(old, mate) == crate::pair::PairRelation::Proper
             || !weak_mate::exact_ordinary_path(self, mate_seq, mate)
             || cache.placements.iter().any(|p| p.ea_dir.is_on())
+            || mate_cache.placements.iter().any(|p| p.ea_dir.is_on())
         {
             return None;
         }
@@ -56,6 +61,26 @@ impl Aligner<'_> {
                 && p.cigar == old.cigar
                 && p.strict.score == old.score
         })?;
+        // The apparent exact mate may itself be at the wrong homolog. Any
+        // retained primary-eligible reciprocal path supporting the original
+        // target is conflicting fragment evidence, even if its score deficit
+        // is too large for a positive relocation proposal. Clipped paths count:
+        // refusing to move a correct target must not require restoring its mate.
+        if mate_cache.placements.iter().any(|p| {
+            p.primary_eligible(mate_seq.len())
+                && compatible(
+                    &ReadAlignment {
+                        contig: p.contig,
+                        pos: p.pos,
+                        strand: p.strand,
+                        cigar: p.cigar.clone(),
+                        ..Default::default()
+                    },
+                    old,
+                )
+        }) {
+            return None;
+        }
         let placements: Vec<_> = cache
             .placements
             .iter()
@@ -110,6 +135,80 @@ impl Aligner<'_> {
 mod tests {
     use super::*;
 
+    fn placement(contig: u32, pos: u32, cigar: &[CigarOp]) -> Placement {
+        Placement::from_genomic(
+            contig,
+            pos,
+            Strand::Plus,
+            cigar.to_vec(),
+            Vec::new(),
+            0,
+            100,
+        )
+    }
+
+    #[test]
+    fn discordant_pair_refuses_reciprocal_support_even_below_proposal_score_margin() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let read = genome[1000..1100].to_vec();
+        genome[5000..5100].copy_from_slice(&read);
+        genome[5045] = if genome[5045] == b'A' { b'C' } else { b'A' };
+        let mate_body = genome[1300..1400].to_vec();
+        genome[5300..5400].copy_from_slice(&mate_body);
+        for i in 5396..5400 {
+            genome[i] = if genome[i] == b'A' { b'C' } else { b'A' };
+        }
+        let mate_seq = revcomp(&genome[5300..5400]);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        let mut config = AlignConfig::rna_default();
+        config.discordant_pair_arbitration = true;
+        let mut aligner = Aligner::new(&index, config);
+        let mut targets = vec![
+            placement(0, 1000, &[CigarOp::Match(100)]),
+            placement(0, 5000, &[CigarOp::Match(100)]),
+        ];
+        let mut mates = vec![
+            placement(0, 5300, &[CigarOp::Match(100)]),
+            placement(0, 1300, &[CigarOp::Match(96), CigarOp::SoftClip(4)]),
+        ];
+        for p in &mut targets {
+            aligner.rescore_strict(&read, p);
+        }
+        for p in &mut mates {
+            p.strand = Strand::Minus;
+            aligner.rescore_strict(&revcomp(&mate_seq), p);
+        }
+        let old = aligner.arbitrate(&read, targets.clone(), 20, true).unwrap();
+        let mate = aligner
+            .arbitrate(&mate_seq, mates.clone(), 20, true)
+            .unwrap();
+        assert_eq!((old.score, old.second_score), (200, 194));
+        assert_eq!((mate.score, mate.second_score), (200, 192));
+        assert_eq!(crate::mapq::mapq_of(&mate), crate::mapq::PILEUP_GATE);
+        let cache = CachedPlacements {
+            placements: targets,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let mate_cache = CachedPlacements {
+            placements: mates,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        assert!(
+            aligner
+                .propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, &mate_cache, None)
+                .is_none(),
+            "a clipped reciprocal mate hypothesis must veto sacrificing an exact target, even though its score deficit exceeds the one-substitution proposal margin"
+        );
+    }
+
     #[test]
     fn conditional_pair_requires_complete_exact_disjoint_mate_and_local_separation() {
         let mut genome = crate::fragment::tests::body(8000);
@@ -123,7 +222,7 @@ mod tests {
                 .unwrap(),
             SeedParams { k: 15, w: 5 },
         );
-        for case in 0..14 {
+        for case in 0..17 {
             let mut config = AlignConfig::rna_default();
             config.discordant_pair_arbitration = case != 1;
             config.rna = case != 2;
@@ -147,7 +246,9 @@ mod tests {
             }
             let mut old = aligner.arbitrate(&read, ps.clone(), 20, true).unwrap();
             let mut mate_seq = revcomp(&genome[1300..1400]);
-            let mut mate = aligner.align_read(&mate_seq).unwrap();
+            let (mate, mate_cache) = aligner.align_read_full(&mate_seq);
+            let mut mate = mate.unwrap();
+            let mut mate_cache = mate_cache.unwrap();
             match case {
                 3 => mate.rescued = true,
                 4 => old.rescued = true,
@@ -177,6 +278,9 @@ mod tests {
                     };
                 }
                 13 => ps[1].strict.score = ps[0].strict.score - crate::mapq::UNIQUE_MARGIN - 1,
+                14 => crate::mapq::force_mapq0(&mut old),
+                15 => mate_cache.placements[0].ea_dir = EditDir::Ag,
+                16 => old.mapq_override = Some(255),
                 _ => {}
             }
             let cache = CachedPlacements {
@@ -185,8 +289,15 @@ mod tests {
                 genomic_any: true,
                 seed_budget: None,
             };
-            let proposal =
-                aligner.propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, None);
+            let proposal = aligner.propose_discordant_pair(
+                &read,
+                &old,
+                &mate_seq,
+                &mate,
+                &cache,
+                &mate_cache,
+                None,
+            );
             assert_eq!(proposal.is_some(), case == 0, "guard case {case}");
         }
     }

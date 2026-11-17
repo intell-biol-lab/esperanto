@@ -1,5 +1,10 @@
 # Changelog
 
+- Veto experimental discordant-pair relocation when a retained eligible mate
+  path supports the original target, including clipped paths below the positive
+  proposal margin. Refuse original targets below the existing pileup gate.
+  Preserve the rejected development replay and require fresh qualification.
+
 - Add default-off discordant full-body pair arbitration using cached candidates,
   exact disjoint mate support and the existing pileup-confidence ceiling.
   Scientific qualification and independent generalization remain separate;
