@@ -2,6 +2,9 @@
 
 ## 1.1.1-dev.41 (unreleased)
 
+- Reject terminally soft-clipped experimental weak-mate proposals before they
+  replace an alignment, while retaining candidate diagnostics. The experiment
+  remains opt-in and default-off; model and independent scoring are unchanged.
 - Removing invalid zero-length deletions also removes their phantom gap-open
   penalties under the unchanged scorer; candidate scores, EK evidence, ranking
   and MAPQ may change. Strict validity does not imply exact output-field parity.
