@@ -1,5 +1,8 @@
 # Changelog
 
+- Repair experimental short-exon qualification after common scoring across both
+  genomic and L1 candidates, preserving existing informative high-coverage paths.
+
 - Add default-off library-supported short-exon candidate discovery. Preserve
   the ordinary chain/extension work and scoring; supplement bounded short
   chains only when existing library junctions yield a sequence-supported

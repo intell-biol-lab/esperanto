@@ -541,12 +541,9 @@ impl<'a> Aligner<'a> {
         // 2. Candidate generation — genomic layer (always consulted).
         let batch = self.genomic_candidates(seq);
         let n_seeds = batch.n_seeds;
-        let genomic_any = !batch.placements.is_empty();
-        let seed_budget = batch.seed_budget;
+        let mut genomic_any = !batch.placements.is_empty();
+        let mut seed_budget = batch.seed_budget;
         placements.extend(batch.placements);
-        if placements.is_empty() && seed_budget.is_none() {
-            return None;
-        }
 
         // 3. Unified strict rescoring: same function, same parameters, no
         // editing exemption.
@@ -558,6 +555,40 @@ impl<'a> Aligner<'a> {
                 seq
             };
             self.rescore_strict(q, p);
+        }
+
+        // Supplement only a genuinely incomplete pool. Genomic placements
+        // carry zero-initialized coverage until common rescoring; inspect both
+        // layers here so a complete L1 path cannot be replaced by a new path
+        // which merely clips its terminal substitutions.
+        if self.config.short_exon_candidates
+            && self.config.rna
+            && !self.config.extend.edit_dir.is_on()
+            && !placements.iter().any(|p| {
+                p.strict.score > 0
+                    && p.informative_query_coverage() as f64 >= 0.9 * seq.len() as f64
+            })
+        {
+            let mins = std::mem::take(&mut self.scratch.mins_out);
+            let (mut extra, budget) = self.short_exon_placements(seq, &mins);
+            self.scratch.mins_out = mins;
+            if seed_budget.is_none() && budget.is_some_and(|b| b.limited()) {
+                seed_budget = budget;
+            }
+            genomic_any |= !extra.is_empty();
+            for p in &mut extra {
+                let q = if p.strand == Strand::Minus {
+                    &rc_storage
+                } else {
+                    seq
+                };
+                self.rescore_strict(q, p);
+            }
+            placements.extend(extra);
+        }
+        if placements.is_empty() && seed_budget.is_none() {
+            self.scratch.rc = rc_storage;
+            return None;
         }
 
         // 4. Same-locus dedup within coverage classes, then decision order.
@@ -1420,22 +1451,6 @@ impl<'a> Aligner<'a> {
             q.pos = tmp.pos;
             q.cigar = tmp.cigar;
             q.junctions = tmp.junctions;
-        }
-
-        // Supplemental paths never replace the ordinary chain/extension work.
-        // They enter the same downstream rescoring and ambiguity competition.
-        if cfg.short_exon_candidates
-            && cfg.rna
-            && !cfg.extend.edit_dir.is_on()
-            && !placements
-                .iter()
-                .any(|p| p.informative_query_coverage() as f64 >= 0.9 * f64::from(read_len))
-        {
-            let (extra, budget) = self.short_exon_placements(seq, &mins);
-            if seed_budget.is_none() && budget.is_some_and(|b| b.limited()) {
-                seed_budget = budget;
-            }
-            placements.extend(extra);
         }
 
         // Additional context candidates must not replace or consume the old

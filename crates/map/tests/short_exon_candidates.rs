@@ -213,3 +213,138 @@ fn short_exon_supplement_preserves_left_tail_and_minus_transcript() {
         ]
     );
 }
+
+#[test]
+fn short_exon_supplement_preserves_an_existing_high_coverage_genomic_path() {
+    let (source, mut read, lib) = fixture();
+    read[..22].copy_from_slice(&body(400)[350..372]);
+    let mut remote = body(200);
+    remote[50..123].copy_from_slice(&read);
+    for offset in [42, 46, 50, 54, 58, 62, 66, 70] {
+        let base = &mut remote[50 + offset];
+        *base = if *base == b'A' { b'C' } else { b'A' };
+    }
+    let genome = source.reference.contigs[0].slice_ascii(0, 1200);
+    let index = Index::build(
+        parse_fasta_bytes(
+            &[
+                b">source\n".as_slice(),
+                &genome,
+                b"\n>remote\n",
+                &remote,
+                b"\n",
+            ]
+            .concat(),
+        )
+        .unwrap(),
+        SeedParams::rna_default(),
+    );
+    let lib = Arc::new(lib);
+    let config = AlignConfig::rna_default();
+    let before = Aligner::new(&index, config)
+        .with_lib(lib.clone())
+        .align_read(&read)
+        .unwrap();
+    assert_eq!((before.contig, before.pos), (1, 50), "{before:?}");
+    assert_eq!(
+        before.cigar,
+        vec![CigarOp::Match(70), CigarOp::SoftClip(3)],
+        "{before:?}"
+    );
+    let mut enabled = config;
+    enabled.short_exon_candidates = true;
+    let after = Aligner::new(&index, enabled)
+        .with_lib(lib)
+        .align_read(&read)
+        .unwrap();
+    assert_eq!(format!("{before:?}"), format!("{after:?}"));
+}
+
+#[test]
+fn short_exon_supplement_preserves_complete_l1_terminal_edit_on_both_strands() {
+    let mut genome = body(1200);
+    genome[239..241].copy_from_slice(b"GT");
+    genome[549..551].copy_from_slice(b"AG");
+    genome[561] = b'A';
+    let mut read = [genome[200..239].to_vec(), genome[551..563].to_vec()].concat();
+    read[49] = b'G';
+    let directory =
+        std::env::temp_dir().join(format!("esp-short-exon-l1-edit-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let bytes = [b">source\n".to_vec(), genome, b"\n".to_vec()].concat();
+    let fasta = directory.join("reference.fa");
+    std::fs::write(&fasta, &bytes).unwrap();
+    std::fs::write(
+        directory.join("reference.fa.fai"),
+        b"source\t1200\t8\t1200\t1201\n",
+    )
+    .unwrap();
+    let gtf = directory.join("annotation.gtf");
+    std::fs::write(
+        &gtf,
+        concat!(
+            "source\tx\ttranscript\t151\t700\t.\t+\t.\ttranscript_id \"a\";\n",
+            "source\tx\texon\t151\t239\t.\t+\t.\ttranscript_id \"a\";\n",
+            "source\tx\texon\t552\t700\t.\t+\t.\ttranscript_id \"a\";\n",
+        ),
+    )
+    .unwrap();
+    let tidx = directory.join("reference.tidx");
+    esperanto_tidx::build(
+        &gtf,
+        &fasta,
+        &tidx,
+        &esperanto_tidx::BuildOptions::default(),
+    )
+    .unwrap();
+    let l1 = Arc::new(esperanto_engine::L1Index::build(&tidx, &gtf, &fasta).unwrap());
+    let index = Index::build(
+        parse_fasta_bytes(&bytes).unwrap(),
+        SeedParams::rna_default(),
+    );
+    let lib = Arc::new(JunctionLib::build([Junction {
+        contig: 0,
+        start: 239,
+        end: 551,
+        minus_strand: false,
+    }]));
+    for reverse in [false, true] {
+        let query: Vec<_> = if reverse {
+            read.iter()
+                .rev()
+                .map(|b| match b {
+                    b'A' => b'T',
+                    b'C' => b'G',
+                    b'G' => b'C',
+                    b'T' => b'A',
+                    _ => b'N',
+                })
+                .collect()
+        } else {
+            read.clone()
+        };
+        let config = AlignConfig::rna_default();
+        let before = Aligner::new(&index, config)
+            .with_l1(l1.clone())
+            .with_lib(lib.clone())
+            .align_read(&query)
+            .unwrap();
+        assert_eq!(
+            before.cigar,
+            vec![
+                CigarOp::Match(39),
+                CigarOp::RefSkip(312),
+                CigarOp::Match(12)
+            ]
+        );
+        assert_eq!(before.ea_ag, 1);
+        let mut enabled = config;
+        enabled.short_exon_candidates = true;
+        let after = Aligner::new(&index, enabled)
+            .with_l1(l1.clone())
+            .with_lib(lib.clone())
+            .align_read(&query)
+            .unwrap();
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
+    }
+}

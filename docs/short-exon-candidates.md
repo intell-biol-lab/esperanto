@@ -15,7 +15,8 @@ rescue postprocesses only the best ordinary extension, which can still be the
 remote homolog. A synthetic regression reproduces both the original remote
 winner and recovery of the library-supported splice.
 
-When all ordinary genomic placements cover less than 90% of the query,
+After common strict rescoring, when all positive ordinary placements from both
+the genomic and L1 layers cover less than 90% of the informative query,
 the option considers additional chains scoring at least 25 and below the
 ordinary chain threshold. A chain endpoint must be within the existing
 split-library window of a library junction. The primary index and its
@@ -74,3 +75,20 @@ this failure.
 Private evidence is retained outside Git under
 `experiments/esp-short-exon-library-20261117-attempt01` in the research
 workspace, including every changed/adverse score row and the rejected gate.
+
+## Coverage qualification repair
+
+The first supplement checked `informative_query_coverage` before genomic
+placements had been rescored, when `strict.aligned` was still zero. It also
+omitted L1 candidates from that check. The supplement now runs after the
+ordinary candidates from both layers have received common strict scores,
+before coverage-class deduplication. A positive path covering at least 90%
+of the read suppresses supplemental discovery. N columns do not provide
+informative coverage. The genomic minimizers and original search-limitation
+evidence are retained; extra candidates still receive identical rescoring.
+
+Generated regressions reproduce replacement of an existing high-coverage
+genomic path and loss of a terminal A-to-G base from a complete L1 projection
+on both query strands. This is a discovery-eligibility repair, not a change
+to match, mismatch, clipping, gap or splice scores. False tail extensions and
+pair effects on incomplete pools require native all-input evaluation.
