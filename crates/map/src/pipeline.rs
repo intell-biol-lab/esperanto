@@ -831,9 +831,12 @@ pub fn run_se_2pass(
     out.bam = Some(Box::new(std::io::sink()));
     let real_unm = std::mem::replace(&mut out.unmapped_fq, Box::new(std::io::sink()));
     let real_diagnostics = out.diagnostics.take();
+    let short_exon_candidates = out.config.short_exon_candidates;
+    out.config.short_exon_candidates = false;
     let pass1_timer = StageTimer::start("primary.se.2pass.pass1");
     let pass1 = run_se(out, r1, threads);
     drop(pass1_timer);
+    out.config.short_exon_candidates = short_exon_candidates;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
@@ -899,11 +902,13 @@ pub fn run_pe_2pass(
     let weak_mate_proposals = out.config.weak_mate_proposals;
     let mate_window_score_ties = out.config.mate_window_score_ties;
     let discordant_pair_arbitration = out.config.discordant_pair_arbitration;
+    let short_exon_candidates = out.config.short_exon_candidates;
     out.config.mate_short_body = false;
     out.config.pair_substitution = false;
     out.config.weak_mate_proposals = false;
     out.config.mate_window_score_ties = false;
     out.config.discordant_pair_arbitration = false;
+    out.config.short_exon_candidates = false;
     let pass1_timer = StageTimer::start("primary.pe.2pass.pass1");
     let pass1 = run_pe(out, r1, r2, threads);
     drop(pass1_timer);
@@ -912,6 +917,7 @@ pub fn run_pe_2pass(
     out.config.weak_mate_proposals = weak_mate_proposals;
     out.config.mate_window_score_ties = mate_window_score_ties;
     out.config.discordant_pair_arbitration = discordant_pair_arbitration;
+    out.config.short_exon_candidates = short_exon_candidates;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;

@@ -1,5 +1,11 @@
 # Known scientific qualification issues
 
+The experimental short-exon candidate supplement addresses a discovery gap
+between a subthreshold exon seed chain and the best-only tail rescue stage.
+It preserves existing scoring and adds no genotype or mate-anchor exception.
+Synthetic recovery does not establish read-origin truth, calibrated confidence
+or human qualification; see [the contract](short-exon-candidates.md).
+
 Dev.40 real Geuvadis/MAGE pilot outputs exposed zero-length Match/Del operations
 from `stitch_cigar` at exhausted exon boundaries, including MAPQ60 records.
 Dev.41 prevents that emission at its source, with boundary/strand/indel

@@ -1,5 +1,10 @@
 # Changelog
 
+- Add default-off library-supported short-exon candidate discovery. Preserve
+  the ordinary chain/extension work and scoring; supplement bounded short
+  chains only when existing library junctions yield a sequence-supported
+  split. Require native replay and independent adverse accounting.
+
 - Require an independent exact discordant-pair anchor to outrank the existing
   rescue-confidence ceiling, without quality overrides. Permit natural global
   target ties to compete under the unchanged conditional scorer and reciprocal

@@ -869,6 +869,63 @@ pub fn map_stage_with_discordant_pair_options(
     ),
     FlowError,
 > {
+    map_stage_with_short_exon_options(
+        paidx,
+        gtf_path,
+        l1_bundle,
+        r1,
+        r2,
+        out_dir,
+        threads,
+        candidate_diagnostics,
+        fragment_endpoints,
+        repeat_context,
+        context_background,
+        exact_path_competition,
+        mate_short_body,
+        pair_substitution,
+        boundary_core,
+        weak_mate_proposals,
+        context_posting_budget,
+        context_proposal_budget,
+        mate_window_score_ties,
+        discordant_pair_arbitration,
+        false,
+    )
+}
+
+/// Supplement short chains near library junctions; older APIs stay disabled.
+#[allow(clippy::too_many_arguments)]
+pub fn map_stage_with_short_exon_options(
+    paidx: &Path,
+    gtf_path: Option<&Path>,
+    l1_bundle: Option<&Path>,
+    r1: &Path,
+    r2: Option<&Path>,
+    out_dir: &Path,
+    threads: usize,
+    candidate_diagnostics: bool,
+    fragment_endpoints: bool,
+    repeat_context: bool,
+    context_background: bool,
+    exact_path_competition: bool,
+    mate_short_body: bool,
+    pair_substitution: bool,
+    boundary_core: bool,
+    weak_mate_proposals: bool,
+    context_posting_budget: usize,
+    context_proposal_budget: usize,
+    mate_window_score_ties: bool,
+    discordant_pair_arbitration: bool,
+    short_exon_candidates: bool,
+) -> Result<
+    (
+        PathBuf,
+        &'static esperanto_map::index::Index<'static>,
+        Option<Arc<L1Index>>,
+    ),
+    FlowError,
+> {
     if context_posting_budget == 0 || context_proposal_budget == 0 {
         return Err(FlowError::Entry("context budgets must be positive".into()));
     }
@@ -893,6 +950,7 @@ pub fn map_stage_with_discordant_pair_options(
     config.weak_mate_proposals = weak_mate_proposals;
     config.mate_window_score_ties = mate_window_score_ties;
     config.discordant_pair_arbitration = discordant_pair_arbitration;
+    config.short_exon_candidates = short_exon_candidates;
     config.context_posting_budget = context_posting_budget;
     config.context_proposal_budget = context_proposal_budget;
     let jlib = match gtf_path {

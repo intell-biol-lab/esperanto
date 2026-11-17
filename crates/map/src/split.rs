@@ -451,15 +451,68 @@ pub(crate) fn extend_tail(
 
 /// Channel A (library-driven): best retry over the ±20bp window junctions.
 fn channel_a(ctx: &SplitContext, right: bool, buf: &mut ExtendBuffer) -> Option<SplitRescue> {
-    let cands = if right {
+    channel_a_with_policy(ctx, right, buf, false)
+}
+
+/// Experimental supplemental discovery accepts either transcript strand.
+/// Query coordinates are already in reference orientation; the library's
+/// transcript strand still determines its own splice signal.
+pub(crate) fn rescue_library_tail(
+    ctx: &SplitContext,
+    right: bool,
+    buf: &mut ExtendBuffer,
+) -> Option<SplitRescue> {
+    channel_a_with_policy(ctx, right, buf, true)
+}
+
+fn channel_a_with_policy(
+    ctx: &SplitContext,
+    right: bool,
+    buf: &mut ExtendBuffer,
+    either_transcript_strand: bool,
+) -> Option<SplitRescue> {
+    let cands = if either_transcript_strand && right {
+        let (js, counts) = ctx.lib.range_start(
+            ctx.contig,
+            ctx.ref_end.saturating_sub(SPLIT_LIB_WINDOW),
+            ctx.ref_end.saturating_add(SPLIT_LIB_WINDOW),
+        );
+        js.iter().zip(counts.iter().copied()).collect()
+    } else if either_transcript_strand {
+        ctx.lib
+            .range_end(
+                ctx.contig,
+                ctx.pos.saturating_sub(SPLIT_LIB_WINDOW),
+                ctx.pos.saturating_add(SPLIT_LIB_WINDOW),
+            )
+            .iter()
+            .map(|&i| (&ctx.lib.junctions[i as usize], ctx.lib.counts[i as usize]))
+            .collect()
+    } else if right {
         ctx.right_lib_candidates()
     } else {
         ctx.left_lib_candidates()
     };
+    // The supplemental candidate retains the already clipped opposite end.
+    // Retry coverage is measured on the body plus the proposed tail, rather
+    // than treating that unchanged outer clip as a splice-seam failure.
+    let leading = if either_transcript_strand && right {
+        ctx.read_start as usize
+    } else {
+        0
+    };
+    let trailing = if either_transcript_strand && !right {
+        ctx.read.len().saturating_sub(ctx.read_end as usize)
+    } else {
+        0
+    };
+    let query = ctx
+        .read
+        .get(leading..ctx.read.len().checked_sub(trailing)?)?;
     let ctg = ctx.reference.contigs.get(ctx.contig as usize)?;
     let mut best: Option<(RetryOutcome, RefinedJunction)> = None;
     for (j, support) in cands {
-        if j.minus_strand != ctx.minus() {
+        if !either_transcript_strand && j.minus_strand != ctx.minus() {
             continue;
         }
         let intron_len = j.end - j.start;
@@ -470,10 +523,11 @@ fn channel_a(ctx: &SplitContext, right: bool, buf: &mut ExtendBuffer) -> Option<
         if signal == SpliceSignal::NonCanonical && support < 2 {
             continue;
         }
-        let tail_start = if right { ctx.read_end } else { ctx.read_start };
+        let tail_start =
+            (if right { ctx.read_end } else { ctx.read_start }).checked_sub(leading as u32)?;
         let outcome = match retry_tail_start(
             ctx.reference,
-            ctx.read,
+            query,
             tail_start,
             j,
             signal,
@@ -498,7 +552,17 @@ fn channel_a(ctx: &SplitContext, right: bool, buf: &mut ExtendBuffer) -> Option<
         }
     }
     let (outcome, refined) = best?;
-    let rescue = build_rescue_ext(&outcome, &refined);
+    let mut rescue = build_rescue_ext(&outcome, &refined);
+    if leading > 0 {
+        let mut cigar = vec![CigarOp::SoftClip(leading as u32)];
+        for op in rescue.cigar {
+            push_op(&mut cigar, op);
+        }
+        rescue.cigar = cigar;
+    }
+    if trailing > 0 {
+        push_op(&mut rescue.cigar, CigarOp::SoftClip(trailing as u32));
+    }
     if !rescue_cigar_valid(rescue.pos, &rescue.cigar, ctx.read.len(), &refined.junction) {
         return None;
     }

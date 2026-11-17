@@ -26,6 +26,7 @@ use crate::splice::{
 };
 
 mod discordant_pair;
+mod short_exon;
 
 /// Keep uncovered query ends available without increasing the maximum
 /// continuous-reference window width. Both verification paths use this geometry.
@@ -81,6 +82,9 @@ pub struct AlignConfig {
     pub mate_window_score_ties: bool,
     /// Experimental re-arbitration of discordant full-body pairs, default off.
     pub discordant_pair_arbitration: bool,
+    /// Supplement short seed chains with library-supported splice candidates.
+    /// Experimental and disabled by default.
+    pub short_exon_candidates: bool,
     /// Repeat-context complete-list posting budget (experimental ablation).
     pub context_posting_budget: usize,
     /// Repeat-context retained proposal budget (experimental ablation).
@@ -105,6 +109,7 @@ impl Default for AlignConfig {
             weak_mate_proposals: false,
             mate_window_score_ties: false,
             discordant_pair_arbitration: false,
+            short_exon_candidates: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -129,6 +134,7 @@ impl AlignConfig {
             weak_mate_proposals: false,
             mate_window_score_ties: false,
             discordant_pair_arbitration: false,
+            short_exon_candidates: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -1416,6 +1422,22 @@ impl<'a> Aligner<'a> {
             q.junctions = tmp.junctions;
         }
 
+        // Supplemental paths never replace the ordinary chain/extension work.
+        // They enter the same downstream rescoring and ambiguity competition.
+        if cfg.short_exon_candidates
+            && cfg.rna
+            && !cfg.extend.edit_dir.is_on()
+            && !placements
+                .iter()
+                .any(|p| p.informative_query_coverage() as f64 >= 0.9 * f64::from(read_len))
+        {
+            let (extra, budget) = self.short_exon_placements(seq, &mins);
+            if seed_budget.is_none() && budget.is_some_and(|b| b.limited()) {
+                seed_budget = budget;
+            }
+            placements.extend(extra);
+        }
+
         // Additional context candidates must not replace or consume the old
         // chain/splice/indel extension work above. A perfect whole-query edge
         // hit attains the ordinary score ceiling and bypasses this search.
@@ -1989,6 +2011,15 @@ impl<'a> Aligner<'a> {
     }
 
     fn propose_split_rescue(&mut self, seq: &[u8], aln: ReadAlignment) -> ReadAlignment {
+        self.propose_split_rescue_with_library_policy(seq, aln, false)
+    }
+
+    fn propose_split_rescue_with_library_policy(
+        &mut self,
+        seq: &[u8],
+        aln: ReadAlignment,
+        library_only_either_strand: bool,
+    ) -> ReadAlignment {
         let empty_lib = JunctionLib::default();
         // Query in extension orientation: (RC'd if minus) read; tails operate
         // in extension coordinates; result CIGAR is plus-reference isomorphic.
@@ -2047,7 +2078,12 @@ impl<'a> Aligner<'a> {
                 splice_params: params,
                 extend_params: self.config.extend,
             };
-            if let Some(rescue) = crate::split::rescue_right_tail(&ctx, &mut self.buf) {
+            let rescue = if library_only_either_strand {
+                crate::split::rescue_library_tail(&ctx, true, &mut self.buf)
+            } else {
+                crate::split::rescue_right_tail(&ctx, &mut self.buf)
+            };
+            if let Some(rescue) = rescue {
                 if cigar_read_span(&rescue.cigar) == query.len() as u32 {
                     // tail-rescue gate: tails <12bp require either
                     // known_support ≥ 2 OR (canonical signal + zero tail-vs-ref
@@ -2091,7 +2127,12 @@ impl<'a> Aligner<'a> {
                 splice_params: params,
                 extend_params: self.config.extend,
             };
-            if let Some(rescue) = crate::split::rescue_left_tail(&ctx, &mut self.buf) {
+            let rescue = if library_only_either_strand {
+                crate::split::rescue_library_tail(&ctx, false, &mut self.buf)
+            } else {
+                crate::split::rescue_left_tail(&ctx, &mut self.buf)
+            };
+            if let Some(rescue) = rescue {
                 if cigar_read_span(&rescue.cigar) == query.len() as u32 {
                     // Mirror of the right-tail gate:
                     // de-novo short tails accepted with canonical signal +

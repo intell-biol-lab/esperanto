@@ -58,6 +58,9 @@ pub struct MapArgs {
     /// Experiment: pair-arbitrate discordant full-body ordinary placements.
     #[arg(long)]
     experimental_discordant_pair_arbitration: bool,
+    /// Experiment: supplement short seed chains near known library junctions.
+    #[arg(long)]
+    experimental_short_exon_candidates: bool,
     /// Experiment: repeat-context complete-list posting budget.
     #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..))]
     experimental_context_postings: u32,
@@ -74,7 +77,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_discordant_pair_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_short_exon_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -95,6 +98,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         a.experimental_context_candidates as usize,
         a.experimental_mate_window_score_ties,
         a.experimental_discordant_pair_arbitration,
+        a.experimental_short_exon_candidates,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -164,6 +168,7 @@ mod tests {
         assert!(!default.map.experimental_weak_mate_proposals);
         assert!(!default.map.experimental_mate_window_score_ties);
         assert!(!default.map.experimental_discordant_pair_arbitration);
+        assert!(!default.map.experimental_short_exon_candidates);
     }
 
     #[test]

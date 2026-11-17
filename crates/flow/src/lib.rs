@@ -24,7 +24,8 @@ pub use stages::{
     map_stage_with_diagnostics, map_stage_with_discordant_pair_options,
     map_stage_with_exact_path_options, map_stage_with_mate_window_tie_options,
     map_stage_with_options, map_stage_with_pair_substitution_options,
-    map_stage_with_short_body_options, map_stage_with_weak_mate_options, run_from,
+    map_stage_with_short_body_options, map_stage_with_short_exon_options,
+    map_stage_with_weak_mate_options, run_from,
 };
 
 /// Run the pipeline selected by `params.entry()`.
