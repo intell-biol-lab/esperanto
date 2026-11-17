@@ -2,6 +2,8 @@
 
 - Repair experimental short-exon qualification after common scoring across both
   genomic and L1 candidates, preserving existing informative high-coverage paths.
+- Require supplemental splice-tail sequence gain to beat the existing constant
+  background explanation when the context-background policy is enabled.
 
 - Add default-off library-supported short-exon candidate discovery. Preserve
   the ordinary chain/extension work and scoring; supplement bounded short

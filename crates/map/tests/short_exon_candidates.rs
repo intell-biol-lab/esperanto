@@ -348,3 +348,75 @@ fn short_exon_supplement_preserves_complete_l1_terminal_edit_on_both_strands() {
         assert_eq!(format!("{before:?}"), format!("{after:?}"));
     }
 }
+
+#[test]
+fn short_exon_supplement_requires_tail_evidence_beyond_constant_background() {
+    let (source, _, _) = fixture();
+    let mut genome = source.reference.contigs[0].slice_ascii(0, 1200);
+    genome[551..563].fill(b'A');
+    let core = [genome[200..239].to_vec(), genome[551..563].to_vec()].concat();
+    let read = [vec![b'N'; 22], core.clone()].concat();
+    let mut remote = body(200);
+    remote[50..101].copy_from_slice(&core);
+    remote[74] = if remote[74] == b'A' { b'C' } else { b'A' };
+    let rc = |seq: &[u8]| -> Vec<u8> {
+        seq.iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => b'N',
+            })
+            .collect()
+    };
+    for mirror in [false, true] {
+        let (source, remote, read, start, end) = if mirror {
+            (rc(&genome), rc(&remote), rc(&read), 649, 961)
+        } else {
+            (genome.clone(), remote.clone(), read.clone(), 239, 551)
+        };
+        let index = Index::build(
+            parse_fasta_bytes(
+                &[
+                    b">source\n".as_slice(),
+                    &source,
+                    b"\n>remote\n",
+                    &remote,
+                    b"\n",
+                ]
+                .concat(),
+            )
+            .unwrap(),
+            SeedParams::rna_default(),
+        );
+        let lib = Arc::new(JunctionLib::build([Junction {
+            contig: 0,
+            start,
+            end,
+            minus_strand: mirror,
+        }]));
+        for reverse in [false, true] {
+            let query = if reverse { rc(&read) } else { read.clone() };
+            let baseline = Aligner::new(&index, AlignConfig::rna_default())
+                .with_lib(lib.clone())
+                .align_read(&query)
+                .unwrap();
+            assert_eq!(baseline.contig, 1);
+            let mut config = AlignConfig::rna_default();
+            config.short_exon_candidates = true;
+            let guarded = Aligner::new(&index, config)
+                .with_lib(lib.clone())
+                .align_read(&query)
+                .unwrap();
+            assert_eq!(guarded.contig, baseline.contig, "{guarded:?}");
+            config.context_background = false;
+            let unguarded = Aligner::new(&index, config)
+                .with_lib(lib.clone())
+                .align_read(&query)
+                .unwrap();
+            assert_eq!(unguarded.contig, 0, "background-off control: {unguarded:?}");
+        }
+    }
+}

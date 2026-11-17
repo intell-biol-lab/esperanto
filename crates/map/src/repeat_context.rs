@@ -77,7 +77,7 @@ fn local(query: &[u8], reference: &[u8], ep: ExtendParams) -> Local {
 
 /// Best strict local score against a coordinate-free constant-base reference.
 /// This is a competing explanation, not a technical-origin classifier.
-fn background_score(query: &[u8], ep: ExtendParams) -> i32 {
+pub(crate) fn background_score(query: &[u8], ep: ExtendParams) -> i32 {
     b"ACGT"
         .iter()
         .map(|&base| {

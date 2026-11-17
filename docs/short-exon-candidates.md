@@ -92,3 +92,20 @@ genomic path and loss of a terminal A-to-G base from a complete L1 projection
 on both query strands. This is a discovery-eligibility repair, not a change
 to match, mismatch, clipping, gap or splice scores. False tail extensions and
 pair effects on incomplete pools require native all-input evaluation.
+
+## Supplemental tail background competition
+
+When the existing context-background policy is enabled, supplemental sequence
+gain without junction priors must also beat the best local constant-reference
+explanation of newly covered terminal query intervals. The same four-letter
+match/mismatch constants and existing background implementation are reused.
+Only newly covered ends contribute: an unchanged outer clip on the opposite
+side cannot veto a short complex exon. This adds no minimum tail seed length,
+so a complex 12-base exon can still qualify. Disabling context background
+bypasses this additional qualification for an explicit ablation.
+
+This conservative competition rejects constant biological and technical tails
+with identical observed sequence. It cannot distinguish a complex technical
+tail that matches an annotated exon, and annotation is not source truth.
+Generated controls cover both query orientations and both reference-coordinate
+tail ends, background-off behavior, and retained short complex-tail recovery.

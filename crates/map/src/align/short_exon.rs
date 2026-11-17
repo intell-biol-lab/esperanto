@@ -68,9 +68,10 @@ impl Aligner<'_> {
                 };
                 let proposal =
                     self.propose_split_rescue_with_library_policy(seq, before.clone(), true);
-                let rescued = self.select_rescue(seq, before, proposal);
+                let rescued = self.select_rescue(seq, before.clone(), proposal);
                 if rescued.junctions.is_empty()
                     || rescued.junctions.iter().any(|j| !lib.contains(&j.junction))
+                    || !self.short_exon_tail_beats_background(seq, &before, &rescued)
                 {
                     continue;
                 }
@@ -87,5 +88,68 @@ impl Aligner<'_> {
         }
         self.scratch.rc = rc;
         (out, Some(budget))
+    }
+
+    /// Library support is not evidence that a constant terminal run belongs
+    /// to the exon. Compare sequence gain alone with the existing coordinate-
+    /// free background on newly covered query ends. This conservatively also
+    /// refuses biological tails with identical sequence evidence.
+    fn short_exon_tail_beats_background(
+        &mut self,
+        seq: &[u8],
+        before: &ReadAlignment,
+        after: &ReadAlignment,
+    ) -> bool {
+        if !self.config.context_background {
+            return true;
+        }
+        let clips = |cigar: &[CigarOp]| {
+            let left = match cigar.first() {
+                Some(CigarOp::SoftClip(n)) => *n as usize,
+                _ => 0,
+            };
+            let right = match cigar.last() {
+                Some(CigarOp::SoftClip(n)) => *n as usize,
+                _ => 0,
+            };
+            (left, right)
+        };
+        let (old_left, old_right) = clips(&before.cigar);
+        let (new_left, new_right) = clips(&after.cigar);
+        let rc = self.take_rc(seq);
+        let query = if before.strand == Strand::Minus {
+            &rc
+        } else {
+            seq
+        };
+        let mut background = 0;
+        if new_left < old_left {
+            background += crate::repeat_context::background_score(
+                &query[new_left..old_left],
+                self.config.extend,
+            );
+        }
+        if new_right < old_right {
+            background += crate::repeat_context::background_score(
+                &query[query.len() - old_right..query.len() - new_right],
+                self.config.extend,
+            );
+        }
+        let mut placement = |a: &ReadAlignment| {
+            let mut p = Placement::from_genomic(
+                a.contig,
+                a.pos,
+                a.strand,
+                a.cigar.clone(),
+                a.junctions.clone(),
+                a.chain_score,
+                a.score,
+            );
+            self.rescore_strict(query, &mut p);
+            p.strict.score - p.strict.splice_score
+        };
+        let sequence_gain = placement(after) - placement(before);
+        self.scratch.rc = rc;
+        sequence_gain > background
     }
 }
