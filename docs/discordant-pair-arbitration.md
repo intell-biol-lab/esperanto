@@ -12,9 +12,11 @@ already cached candidates under explicit fragment geometry, without adding
 reference searches or changing sequence scores.
 
 Both original placements must be full-length one-M paths, unrescued and
-search-complete. The supporting mate must satisfy the existing pileup gate
-and match the reference exactly. The original target must also satisfy that
-gate; this mechanism cannot promote an original MAPQ0 target.
+search-complete. The supporting mate must independently outrank the existing
+rescued-placement ceiling (computed MAPQ strictly above PILEUP_GATE), have no
+quality override, and match the reference exactly. A target may be globally
+ambiguous at MAPQ0; its conditional candidate must earn confidence through
+the unchanged ordinary scorer. Explicit target quality overrides are refused.
 The target must still match its independently
 scored cache. Editing-rescored pools are excluded. Candidate bodies must be
 disjoint, inward-facing on the mate contig and within the existing proper-span
@@ -24,7 +26,7 @@ The best compatible candidate must be a full-body ordinary genomic primary
 path and cannot trail the old target by more than the existing UNIQUE_MARGIN.
 The unchanged scorer retains within-fragment competitors; its computed MAPQ
 must reach the existing pileup gate. New results are marked rescued and capped
-at that gate. No MAPQ0 result is overridden upward. Conflicting proposals in
+at that gate. A locally ambiguous MAPQ0 result is never forced upward. Conflicting proposals in
 both directions are refused using the original pair, without order effects.
 
 The supporting mate's cached candidates also provide negative evidence.
@@ -42,7 +44,12 @@ that candidate despite its positive net totals and ALT gains. They motivated
 the reciprocal veto. An intermediate all-positive-path veto restored those
 reads but removed all seven-cell gains and was also rejected. The joint-score
 separation rule retains the existing ordinary margin rather than treating
-every low-score path as a credible competitor. None of those replays or
+every low-score path as a credible competitor. Requiring an independently
+confident target then retained only one pilot pair and no trusted ALT gain,
+so that build also failed the predeclared gate. The current proposal instead
+requires a stronger independent anchor than the confidence ceiling it grants
+to the conditional result. Pileup-floor anchors cannot bootstrap a target's
+confidence. None of those replays or
 regression tests qualify a revised build without a separate native replay.
 
 This is conditional reference-placement evidence. A mistaken supporting mate,

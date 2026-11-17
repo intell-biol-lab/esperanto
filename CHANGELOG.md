@@ -1,5 +1,11 @@
 # Changelog
 
+- Require an independent exact discordant-pair anchor to outrank the existing
+  rescue-confidence ceiling, without quality overrides. Permit natural global
+  target ties to compete under the unchanged conditional scorer and reciprocal
+  joint-margin veto; local ambiguity is never forced past the pileup gate.
+  Preserve rejected attempts and require fresh native qualification.
+
 - Use the existing ordinary UNIQUE_MARGIN on joint fragment score separation
   for reciprocal-conflict vetoes. An all-positive-path veto removed all native
   pilot gains; retain credible clipped conflicts without admitting weak paths

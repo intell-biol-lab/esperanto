@@ -41,9 +41,9 @@ impl Aligner<'_> {
             || mate_cache.seed_search_limited()
             || !full_match(&old.cigar, seq.len())
             || !full_match(&mate.cigar, mate_seq.len())
-            || crate::mapq::mapq_of(old) < crate::mapq::PILEUP_GATE
-            || crate::mapq::mapq_of(old) == 255
-            || crate::mapq::mapq_of(mate) < crate::mapq::PILEUP_GATE
+            || old.mapq_override.is_some()
+            || mate.mapq_override.is_some()
+            || crate::mapq::mapq_of(mate) <= crate::mapq::PILEUP_GATE
             || crate::mapq::mapq_of(mate) == 255
             || crate::pair::relate(old, mate) == crate::pair::PairRelation::Proper
             || !weak_mate::exact_ordinary_path(self, mate_seq, mate)
@@ -150,17 +150,11 @@ mod tests {
     }
 
     #[test]
-    fn discordant_pair_refuses_reciprocal_support_even_below_proposal_score_margin() {
+    fn discordant_pair_can_condition_a_global_tie_on_stronger_independent_mate() {
         let mut genome = crate::fragment::tests::body(8000);
         let read = genome[1000..1100].to_vec();
         genome[5000..5100].copy_from_slice(&read);
-        genome[5045] = if genome[5045] == b'A' { b'C' } else { b'A' };
-        let mate_body = genome[1300..1400].to_vec();
-        genome[5300..5400].copy_from_slice(&mate_body);
-        for i in 5396..5400 {
-            genome[i] = if genome[i] == b'A' { b'C' } else { b'A' };
-        }
-        let mate_seq = revcomp(&genome[5300..5400]);
+        let mate_seq = revcomp(&genome[1300..1400]);
         let index = Index::build(
             crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
                 .unwrap(),
@@ -170,12 +164,61 @@ mod tests {
         config.discordant_pair_arbitration = true;
         let mut aligner = Aligner::new(&index, config);
         let mut targets = vec![
+            placement(0, 5000, &[CigarOp::Match(100)]),
+            placement(0, 1000, &[CigarOp::Match(100)]),
+        ];
+        for p in &mut targets {
+            aligner.rescore_strict(&read, p);
+        }
+        let old = aligner.arbitrate(&read, targets.clone(), 20, true).unwrap();
+        let (mate, mate_cache) = aligner.align_read_full(&mate_seq);
+        let mate = mate.unwrap();
+        let mate_cache = mate_cache.unwrap();
+        assert_eq!(crate::mapq::mapq_of(&old), 0);
+        assert!(old.mapq_override.is_none());
+        assert!(crate::mapq::mapq_of(&mate) > crate::mapq::PILEUP_GATE);
+        let cache = CachedPlacements {
+            placements: targets,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let result = aligner
+            .propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, &mate_cache, None)
+            .expect("an independently stronger mate can resolve a global target tie through ordinary conditional scoring");
+        assert_eq!(result.pos, 1000);
+        assert_eq!(crate::mapq::mapq_of(&result), crate::mapq::PILEUP_GATE);
+        assert!(result.mapq_override.is_none());
+    }
+
+    #[test]
+    fn discordant_pair_refuses_reciprocal_support_even_below_proposal_score_margin() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let read = genome[1000..1100].to_vec();
+        genome[5000..5100].copy_from_slice(&read);
+        genome[5045] = if genome[5045] == b'A' { b'C' } else { b'A' };
+        let mate_body = genome[1300..1375].to_vec();
+        genome[5300..5375].copy_from_slice(&mate_body);
+        for i in 5370..5375 {
+            genome[i] = if genome[i] == b'A' { b'C' } else { b'A' };
+        }
+        let mate_seq = revcomp(&genome[5300..5375]);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 7, w: 5 },
+        );
+        let mut config = AlignConfig::rna_default();
+        config.discordant_pair_arbitration = true;
+        config.seed.k = 7;
+        let mut aligner = Aligner::new(&index, config);
+        let mut targets = vec![
             placement(0, 1000, &[CigarOp::Match(100)]),
             placement(0, 5000, &[CigarOp::Match(100)]),
         ];
         let mut mates = vec![
-            placement(0, 5300, &[CigarOp::Match(100)]),
-            placement(0, 1300, &[CigarOp::Match(96), CigarOp::SoftClip(4)]),
+            placement(0, 5300, &[CigarOp::Match(75)]),
+            placement(0, 1300, &[CigarOp::Match(70), CigarOp::SoftClip(5)]),
         ];
         for p in &mut targets {
             aligner.rescore_strict(&read, p);
@@ -189,8 +232,8 @@ mod tests {
             .arbitrate(&mate_seq, mates.clone(), 20, true)
             .unwrap();
         assert_eq!((old.score, old.second_score), (200, 194));
-        assert_eq!((mate.score, mate.second_score), (200, 192));
-        assert_eq!(crate::mapq::mapq_of(&mate), crate::mapq::PILEUP_GATE);
+        assert_eq!((mate.score, mate.second_score), (150, 140));
+        assert!(crate::mapq::mapq_of(&mate) > crate::mapq::PILEUP_GATE);
         let cache = CachedPlacements {
             placements: targets,
             n_seeds: 20,
@@ -226,10 +269,11 @@ mod tests {
         let index = Index::build(
             crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
                 .unwrap(),
-            SeedParams { k: 15, w: 5 },
+            SeedParams { k: 7, w: 5 },
         );
         let mut config = AlignConfig::rna_default();
         config.discordant_pair_arbitration = true;
+        config.seed.k = 7;
         let mut aligner = Aligner::new(&index, config);
         let mut targets = vec![
             placement(0, 5000, &[CigarOp::Match(100)]),
@@ -304,7 +348,7 @@ mod tests {
                 .unwrap(),
             SeedParams { k: 15, w: 5 },
         );
-        for case in 0..17 {
+        for case in 0..19 {
             let mut config = AlignConfig::rna_default();
             config.discordant_pair_arbitration = case != 1;
             config.rna = case != 2;
@@ -363,6 +407,11 @@ mod tests {
                 14 => crate::mapq::force_mapq0(&mut old),
                 15 => mate_cache.placements[0].ea_dir = EditDir::Ag,
                 16 => old.mapq_override = Some(255),
+                17 => mate.mapq_override = Some(crate::mapq::PILEUP_GATE),
+                18 => {
+                    mate.second_score = mate.score - 8;
+                    assert_eq!(crate::mapq::mapq_of(&mate), crate::mapq::PILEUP_GATE);
+                }
                 _ => {}
             }
             let cache = CachedPlacements {
