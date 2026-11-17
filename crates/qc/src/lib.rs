@@ -27,8 +27,8 @@
 
 #![deny(unsafe_code)]
 
-mod trim;
 mod detect;
+mod trim;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -126,7 +126,7 @@ pub struct QcParams {
     pub adapter_trim: bool,
     /// User-supplied R1 adapter table; empty = builtin Illumina table.
     pub adapters_r1: Vec<String>,
-/// User-supplied R2 adapter table; empty = builtin Illumina table.
+    /// User-supplied R2 adapter table; empty = builtin Illumina table.
     pub adapters_r2: Vec<String>,
     /// SE adapter auto-detection when no user table is given (SE only,
     /// default false). When false every output is byte-identical to the
@@ -500,17 +500,20 @@ fn adapter_stage(rec: &mut Record, table: &[Vec<u8>], cnt: &mut Counters) -> boo
 /// Scientific semantics: a base is complemented regardless of case,
 /// preserving case (a<->t, c<->g); non-ACGT bytes pass through unchanged.
 fn revcomp(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&b| match b {
-        b'A' => b'T',
-        b'a' => b't',
-        b'C' => b'G',
-        b'c' => b'g',
-        b'G' => b'C',
-        b'g' => b'c',
-        b'T' => b'A',
-        b't' => b'a',
-        other => other,
-    }).collect()
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' => b'T',
+            b'a' => b't',
+            b'C' => b'G',
+            b'c' => b'g',
+            b'G' => b'C',
+            b'g' => b'c',
+            b'T' => b'A',
+            b't' => b'a',
+            other => other,
+        })
+        .collect()
 }
 
 /// Align rc(R2) against R1: offsets 0→+ first, then 0→− (read-through).
@@ -636,10 +639,7 @@ fn filter_end(
             FailReason::TooShort
         });
     }
-    let n = seq
-        .iter()
-        .filter(|&&c| c == b'N' || c == b'n')
-        .count();
+    let n = seq.iter().filter(|&&c| c == b'N' || c == b'n').count();
     if n > n_max {
         return Some(FailReason::TooManyN);
     }
@@ -1087,9 +1087,7 @@ fn detect_instrument(name: &[u8]) -> Option<String> {
         return None;
     }
     let tok = token.as_slice();
-    let two_colour = (tok.starts_with(b"A0")
-        && tok.len() >= 3
-        && tok[2].is_ascii_digit())
+    let two_colour = (tok.starts_with(b"A0") && tok.len() >= 3 && tok[2].is_ascii_digit())
         || tok.starts_with(b"NS5")
         || tok.starts_with(b"NB5")
         || windows_contains(name, b"NextSeq")
@@ -1266,8 +1264,7 @@ pub fn run(params: &QcParams) -> Result<(), QcError> {
     // SE adapter auto-detection (spec: "SE adapter auto-detection"). Default off; when
     // off, `backlog` stays empty and `se_table` is the resolved table, so
     // output is byte-identical to the feature being absent.
-    let detection_ran =
-        params.detect_adapter_se && adapter_enabled && !paired && user1.is_empty();
+    let detection_ran = params.detect_adapter_se && adapter_enabled && !paired && user1.is_empty();
     let mut backlog: std::collections::VecDeque<Record> = std::collections::VecDeque::new();
     let mut adapter_source: Option<&'static str> = None;
     let mut detected_adapter: Option<String> = None;
@@ -1307,7 +1304,7 @@ pub fn run(params: &QcParams) -> Result<(), QcError> {
         Some("none") if detection_ran => &[],
         _ => direct1,
     };
-let mut before = Stats::default();
+    let mut before = Stats::default();
     let mut after = Stats::default();
     let mut cnt = Counters::default();
 
