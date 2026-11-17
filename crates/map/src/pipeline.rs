@@ -464,6 +464,45 @@ pub fn run_pe(
                                 }
                             }
                         }
+                        // An apparently confident but discordant full-body
+                        // placement also needs pair arbitration. Both proposals
+                        // use the same original pair; conflicting directions
+                        // are refused rather than resolved by execution order.
+                        if cfg.discordant_pair_arbitration {
+                            if let (Some(old1), Some(old2), Some(c1), Some(c2)) =
+                                (&r1, &r2, cache1.as_ref(), cache2.as_ref())
+                            {
+                                let mut proposed_diag1 = None;
+                                let mut proposed_diag2 = None;
+                                let next1 = aligner.propose_discordant_pair(
+                                    seq1,
+                                    old1,
+                                    seq2,
+                                    old2,
+                                    c1,
+                                    diagnostics_enabled.then_some(&mut proposed_diag1),
+                                );
+                                let next2 = aligner.propose_discordant_pair(
+                                    seq2,
+                                    old2,
+                                    seq1,
+                                    old1,
+                                    c2,
+                                    diagnostics_enabled.then_some(&mut proposed_diag2),
+                                );
+                                match (next1, next2) {
+                                    (Some(next), None) => {
+                                        r1 = Some(next);
+                                        diag1 = proposed_diag1;
+                                    }
+                                    (None, Some(next)) => {
+                                        r2 = Some(next);
+                                        diag2 = proposed_diag2;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         // Pair-anchored arbitration: a mate whose own
                         // placement is poor (unplaced, mostly clipped, or
                         // below the pileup gate) is re-arbitrated with the
@@ -857,10 +896,12 @@ pub fn run_pe_2pass(
     let pair_substitution = out.config.pair_substitution;
     let weak_mate_proposals = out.config.weak_mate_proposals;
     let mate_window_score_ties = out.config.mate_window_score_ties;
+    let discordant_pair_arbitration = out.config.discordant_pair_arbitration;
     out.config.mate_short_body = false;
     out.config.pair_substitution = false;
     out.config.weak_mate_proposals = false;
     out.config.mate_window_score_ties = false;
+    out.config.discordant_pair_arbitration = false;
     let pass1_timer = StageTimer::start("primary.pe.2pass.pass1");
     let pass1 = run_pe(out, r1, r2, threads);
     drop(pass1_timer);
@@ -868,6 +909,7 @@ pub fn run_pe_2pass(
     out.config.pair_substitution = pair_substitution;
     out.config.weak_mate_proposals = weak_mate_proposals;
     out.config.mate_window_score_ties = mate_window_score_ties;
+    out.config.discordant_pair_arbitration = discordant_pair_arbitration;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;
@@ -1003,6 +1045,86 @@ mod fragment_integration;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discordant_pair_native_replay_is_final_only_and_mate_order_independent() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let mut target = genome[1000..1100].to_vec();
+        target[45] = if target[45] == b'A' { b'G' } else { b'A' };
+        genome[5000..5100].copy_from_slice(&target);
+        let mate = crate::align::revcomp(&genome[1300..1400]);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            crate::seed::SeedParams { k: 15, w: 5 },
+        );
+        let dir = std::env::temp_dir().join(format!("esp-discordant-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (r1, r2) = (dir.join("r1.fq"), dir.join("r2.fq"));
+        for (path, first, second) in [(&r1, &target, &mate), (&r2, &mate, &target)] {
+            let mut fastq = Vec::new();
+            for (i, seq) in [first, second].into_iter().enumerate() {
+                fastq.extend_from_slice(format!("@pair{i}\n").as_bytes());
+                fastq.extend_from_slice(seq);
+                fastq.extend_from_slice(b"\n+\n");
+                fastq.extend(vec![b'I'; seq.len()]);
+                fastq.push(b'\n');
+            }
+            std::fs::write(path, fastq).unwrap();
+        }
+        let mut old_library = None;
+        for enabled in [false, true] {
+            for threads in [1, 2] {
+                let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let mut config = AlignConfig::rna_default();
+                config.discordant_pair_arbitration = enabled;
+                let mut out = PipelineOut {
+                    bam: Some(Box::new(SharedSink(bytes.clone()))),
+                    unmapped_fq: Box::new(std::io::sink()),
+                    diagnostics: None,
+                    index: &index,
+                    config,
+                    jlib: None,
+                    l1: None,
+                };
+                let (_, discoveries, library, _) =
+                    run_pe_2pass(&mut out, &r1, &r2, threads).unwrap();
+                assert!(discoveries.is_empty());
+                if let Some(old) = &old_library {
+                    assert_eq!(old, &library);
+                } else {
+                    old_library = Some(library);
+                }
+                assert_eq!(out.config.discordant_pair_arbitration, enabled);
+                drop(out);
+                let data = bytes.lock().unwrap().clone();
+                let mut reader = noodles::bam::io::Reader::new(std::io::Cursor::new(data));
+                reader.read_header().unwrap();
+                let records: Vec<_> = reader.records().map(Result::unwrap).collect();
+                assert_eq!(records.len(), 4);
+                for (i, record) in records.iter().enumerate() {
+                    let is_target = i == 0 || i == 3;
+                    let expected = if is_target {
+                        if enabled {
+                            1001
+                        } else {
+                            5001
+                        }
+                    } else {
+                        1301
+                    };
+                    assert_eq!(
+                        usize::from(record.alignment_start().unwrap().unwrap()),
+                        expected
+                    );
+                    if enabled && is_target {
+                        assert_eq!(record.mapping_quality().unwrap().get(), PILEUP_GATE);
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn paired_fragment_pipeline_preserves_raw_records_and_recovers_short_body() {

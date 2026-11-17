@@ -25,6 +25,8 @@ use crate::splice::{
     align_spliced, intron_length_penalty, segment_chain, splice_signal, SpliceParams,
 };
 
+mod discordant_pair;
+
 /// Keep uncovered query ends available without increasing the maximum
 /// continuous-reference window width. Both verification paths use this geometry.
 fn continuous_extension_window(
@@ -77,6 +79,8 @@ pub struct AlignConfig {
     pub weak_mate_proposals: bool,
     /// Experimental mate-window score ties; final paired pass only, default off.
     pub mate_window_score_ties: bool,
+    /// Experimental re-arbitration of discordant full-body pairs, default off.
+    pub discordant_pair_arbitration: bool,
     /// Repeat-context complete-list posting budget (experimental ablation).
     pub context_posting_budget: usize,
     /// Repeat-context retained proposal budget (experimental ablation).
@@ -100,6 +104,7 @@ impl Default for AlignConfig {
             boundary_core: false,
             weak_mate_proposals: false,
             mate_window_score_ties: false,
+            discordant_pair_arbitration: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -123,6 +128,7 @@ impl AlignConfig {
             boundary_core: true,
             weak_mate_proposals: false,
             mate_window_score_ties: false,
+            discordant_pair_arbitration: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -4424,6 +4430,54 @@ mod tests {
             .expect("retain a full candidate as hyperediting evidence before dedup");
         assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
         assert_eq!(result.ea_ag, 70);
+    }
+
+    #[test]
+    fn discordant_pair_can_recover_a_reference_biased_full_body_at_pileup_gate() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let mut read = genome[1000..1100].to_vec();
+        read[45] = if read[45] == b'A' { b'G' } else { b'A' };
+        genome[5000..5100].copy_from_slice(&read);
+        let mate_seq = revcomp(&genome[1300..1400]);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        let mut config = AlignConfig::rna_default();
+        config.discordant_pair_arbitration = true;
+        let mut aligner = Aligner::new(&index, config);
+        let mut placements = vec![
+            placement(0, 5000, &[CigarOp::Match(100)]),
+            placement(0, 1000, &[CigarOp::Match(100)]),
+        ];
+        for p in &mut placements {
+            aligner.rescore_strict(&read, p);
+        }
+        let old = aligner
+            .arbitrate(&read, placements.clone(), 20, true)
+            .unwrap();
+        let mate = aligner.align_read(&mate_seq).unwrap();
+        assert_eq!(old.pos, 5000);
+        assert!(crate::mapq::mapq_of(&old) >= crate::mapq::PILEUP_GATE);
+        assert_eq!(mate.pos, 1300);
+        let cache = CachedPlacements {
+            placements,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let mut diagnostic = None;
+        let result = aligner
+            .propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, Some(&mut diagnostic))
+            .expect(
+                "a compatible cached locus must compete even when its independent score is lower",
+            );
+        assert_eq!(result.pos, 1000);
+        assert_eq!(result.score, 194);
+        assert!(result.rescued);
+        assert_eq!(crate::mapq::mapq_of(&result), crate::mapq::PILEUP_GATE);
+        assert_eq!(diagnostic.unwrap().stage, "discordant_pair_arbitration");
     }
 
     #[test]

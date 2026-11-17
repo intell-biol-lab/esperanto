@@ -1,5 +1,10 @@
 # Changelog
 
+- Add default-off discordant full-body pair arbitration using cached candidates,
+  exact disjoint mate support and the existing pileup-confidence ceiling.
+  Scientific qualification and independent generalization remain separate;
+  see `docs/discordant-pair-arbitration.md`.
+
 - Add a default-off `--experimental-mate-window-score-ties` candidate: allow
   exact full-length mate-window loci tied with the global score leader to reach
   final paired arbitration. Newly admitted placements remain MAPQ0. Preserve
