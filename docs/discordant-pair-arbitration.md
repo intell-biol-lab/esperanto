@@ -27,18 +27,23 @@ must reach the existing pileup gate. New results are marked rescued and capped
 at that gate. No MAPQ0 result is overridden upward. Conflicting proposals in
 both directions are refused using the original pair, without order effects.
 
-The supporting mate's cached candidates also provide negative evidence. If
-any positive primary-eligible candidate can form a disjoint proper fragment
-with the original target, relocation is refused. This reciprocal veto includes
-clipped paths and does not require their scores to be close enough for a
-positive proposal. A lower-scoring alternate mate can invalidate confidence
-in moving an exact target without itself being qualified for promotion.
+The supporting mate's cached candidates also provide negative evidence.
+Compare the proposed pair's ordinary score sum with each reciprocal proper
+fragment supporting the original target. If a positive primary-eligible
+reciprocal path leaves less than the existing UNIQUE_MARGIN of joint score
+separation, relocation is refused. Clipped paths count even when their own
+deficit is too large for a positive mate proposal. Weak alternatives outside
+that existing separation band do not veto a better-supported fragment.
+No sequence score, scoring parameter or MAPQ formula changes.
 
 The initial disjoint-only development replay gained 13,901 exact pairs but
 lost three exact reads and 250 correctly placed bases. Those losses rejected
 that candidate despite its positive net totals and ALT gains. They motivated
-the reciprocal veto; neither that replay nor regression tests qualify the
-revised build without a separate native replay.
+the reciprocal veto. An intermediate all-positive-path veto restored those
+reads but removed all seven-cell gains and was also rejected. The joint-score
+separation rule retains the existing ordinary margin rather than treating
+every low-score path as a credible competitor. None of those replays or
+regression tests qualify a revised build without a separate native replay.
 
 This is conditional reference-placement evidence. A mistaken supporting mate,
 absent true source or missed candidate can still invalidate the conclusion.

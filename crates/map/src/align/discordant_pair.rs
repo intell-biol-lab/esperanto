@@ -61,26 +61,6 @@ impl Aligner<'_> {
                 && p.cigar == old.cigar
                 && p.strict.score == old.score
         })?;
-        // The apparent exact mate may itself be at the wrong homolog. Any
-        // retained primary-eligible reciprocal path supporting the original
-        // target is conflicting fragment evidence, even if its score deficit
-        // is too large for a positive relocation proposal. Clipped paths count:
-        // refusing to move a correct target must not require restoring its mate.
-        if mate_cache.placements.iter().any(|p| {
-            p.primary_eligible(mate_seq.len())
-                && compatible(
-                    &ReadAlignment {
-                        contig: p.contig,
-                        pos: p.pos,
-                        strand: p.strand,
-                        cigar: p.cigar.clone(),
-                        ..Default::default()
-                    },
-                    old,
-                )
-        }) {
-            return None;
-        }
         let placements: Vec<_> = cache
             .placements
             .iter()
@@ -102,6 +82,28 @@ impl Aligner<'_> {
             || is_decoy_contig(self.index.reference, best.contig)
             || best.strict.score < original.strict.score - crate::mapq::UNIQUE_MARGIN
         {
+            return None;
+        }
+        // A mate at the wrong homolog can drag an exact target. Compare both
+        // fragment hypotheses in the unchanged ordinary score domain, including
+        // eligible clipped reciprocal paths. A competing pair must trail by
+        // at least the existing UNIQUE_MARGIN; weak remote paths alone cannot
+        // veto a separated pair. This never promotes the reciprocal path.
+        let proposed_pair_score = best.strict.score + mate.score;
+        if mate_cache.placements.iter().any(|p| {
+            p.primary_eligible(mate_seq.len())
+                && old.score + p.strict.score > proposed_pair_score - crate::mapq::UNIQUE_MARGIN
+                && compatible(
+                    &ReadAlignment {
+                        contig: p.contig,
+                        pos: p.pos,
+                        strand: p.strand,
+                        cigar: p.cigar.clone(),
+                        ..Default::default()
+                    },
+                    old,
+                )
+        }) {
             return None;
         }
         // Preserve within-fragment competitors in the ordinary scorer. A local
@@ -207,6 +209,86 @@ mod tests {
                 .is_none(),
             "a clipped reciprocal mate hypothesis must veto sacrificing an exact target, even though its score deficit exceeds the one-substitution proposal margin"
         );
+    }
+
+    #[test]
+    fn discordant_pair_keeps_separated_joint_support_despite_weak_reciprocal_path() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let mut read = genome[1000..1100].to_vec();
+        read[45] = if read[45] == b'A' { b'G' } else { b'A' };
+        genome[5000..5100].copy_from_slice(&read);
+        let mate_body = genome[1300..1400].to_vec();
+        genome[5300..5400].copy_from_slice(&mate_body);
+        for b in &mut genome[5396..5400] {
+            *b = if *b == b'A' { b'C' } else { b'A' };
+        }
+        let mate_seq = revcomp(&mate_body);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        let mut config = AlignConfig::rna_default();
+        config.discordant_pair_arbitration = true;
+        let mut aligner = Aligner::new(&index, config);
+        let mut targets = vec![
+            placement(0, 5000, &[CigarOp::Match(100)]),
+            placement(0, 1000, &[CigarOp::Match(100)]),
+        ];
+        let mut mates = vec![
+            placement(0, 1300, &[CigarOp::Match(100)]),
+            placement(0, 5300, &[CigarOp::Match(91), CigarOp::SoftClip(9)]),
+        ];
+        for p in &mut targets {
+            aligner.rescore_strict(&read, p);
+        }
+        for p in &mut mates {
+            p.strand = Strand::Minus;
+            aligner.rescore_strict(&mate_body, p);
+        }
+        let old = aligner.arbitrate(&read, targets.clone(), 20, true).unwrap();
+        let mate = aligner
+            .arbitrate(&mate_seq, mates.clone(), 20, true)
+            .unwrap();
+        assert_eq!((old.score, old.second_score), (200, 194));
+        assert_eq!((mate.score, mate.second_score), (200, 182));
+        let cache = CachedPlacements {
+            placements: targets,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let mate_cache = CachedPlacements {
+            placements: mates,
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        let result = aligner
+            .propose_discordant_pair(&read, &old, &mate_seq, &mate, &cache, &mate_cache, None)
+            .expect("a weak reciprocal382 pair must not veto separated proposed394 support");
+        assert_eq!(result.pos, 1000);
+        assert_eq!(crate::mapq::mapq_of(&result), crate::mapq::PILEUP_GATE);
+        for (aligned, accepted) in [(94, true), (96, false)] {
+            let mut alternate = mate_cache.placements[1].clone();
+            alternate.cigar = vec![CigarOp::Match(aligned), CigarOp::SoftClip(100 - aligned)];
+            aligner.rescore_strict(&mate_body, &mut alternate);
+            let mut alternatives = mate_cache.clone();
+            alternatives.placements[1] = alternate;
+            let supporting_mate = aligner
+                .arbitrate(&mate_seq, alternatives.placements.clone(), 20, true)
+                .unwrap();
+            let result = aligner.propose_discordant_pair(
+                &read,
+                &old,
+                &mate_seq,
+                &supporting_mate,
+                &cache,
+                &alternatives,
+                None,
+            );
+            assert_eq!(result.is_some(), accepted, "joint separation at {aligned}M");
+        }
     }
 
     #[test]

@@ -1,5 +1,10 @@
 # Changelog
 
+- Use the existing ordinary UNIQUE_MARGIN on joint fragment score separation
+  for reciprocal-conflict vetoes. An all-positive-path veto removed all native
+  pilot gains; retain credible clipped conflicts without admitting weak paths
+  as equal evidence. Scoring parameters and the MAPQ formula are unchanged.
+
 - Veto experimental discordant-pair relocation when a retained eligible mate
   path supports the original target, including clipped paths below the positive
   proposal margin. Refuse original targets below the existing pileup gate.
