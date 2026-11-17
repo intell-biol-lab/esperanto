@@ -856,15 +856,18 @@ pub fn run_pe_2pass(
     let mate_short_body = out.config.mate_short_body;
     let pair_substitution = out.config.pair_substitution;
     let weak_mate_proposals = out.config.weak_mate_proposals;
+    let mate_window_score_ties = out.config.mate_window_score_ties;
     out.config.mate_short_body = false;
     out.config.pair_substitution = false;
     out.config.weak_mate_proposals = false;
+    out.config.mate_window_score_ties = false;
     let pass1_timer = StageTimer::start("primary.pe.2pass.pass1");
     let pass1 = run_pe(out, r1, r2, threads);
     drop(pass1_timer);
     out.config.mate_short_body = mate_short_body;
     out.config.pair_substitution = pair_substitution;
     out.config.weak_mate_proposals = weak_mate_proposals;
+    out.config.mate_window_score_ties = mate_window_score_ties;
     let sink_unm = std::mem::replace(&mut out.unmapped_fq, real_unm);
     drop(sink_unm);
     out.bam = real_bam;

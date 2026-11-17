@@ -1,5 +1,11 @@
 # Changelog
 
+- Add a default-off `--experimental-mate-window-score-ties` candidate: allow
+  exact full-length mate-window loci tied with the global score leader to reach
+  final paired arbitration. Newly admitted placements remain MAPQ0. Preserve
+  discovery, old flow entry points and lower-score refusal. Scientific
+  evaluation and adoption remain separate; see `docs/mate-window-score-ties.md`.
+
 ## 1.1.1-dev.41 (unreleased)
 
 - Reject terminally soft-clipped experimental weak-mate proposals before they

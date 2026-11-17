@@ -75,6 +75,8 @@ pub struct AlignConfig {
     pub boundary_core: bool,
     /// Experimental extra loci from exact MAPQ0 mates; disabled by default.
     pub weak_mate_proposals: bool,
+    /// Experimental mate-window score ties; final paired pass only, default off.
+    pub mate_window_score_ties: bool,
     /// Repeat-context complete-list posting budget (experimental ablation).
     pub context_posting_budget: usize,
     /// Repeat-context retained proposal budget (experimental ablation).
@@ -97,6 +99,7 @@ impl Default for AlignConfig {
             pair_substitution: false,
             boundary_core: false,
             weak_mate_proposals: false,
+            mate_window_score_ties: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -119,6 +122,7 @@ impl AlignConfig {
             pair_substitution: true,
             boundary_core: true,
             weak_mate_proposals: false,
+            mate_window_score_ties: false,
             context_posting_budget: crate::repeat_context::POSTING_BUDGET,
             context_proposal_budget: crate::repeat_context::PROPOSAL_BUDGET,
         }
@@ -688,11 +692,33 @@ impl<'a> Aligner<'a> {
         }
         // The mate-window candidate must have won an eligible locus (dedup keeps the
         // better-scored of two same-locus candidates, so compare footprints).
-        if !placements
+        let window_won = placements
             .iter()
             .find(|p| p.primary_eligible(seq.len()))
-            .is_some_and(|p| footprint_overlap(p, &win_probe) >= 0.5)
-        {
+            .is_some_and(|p| footprint_overlap(p, &win_probe) >= 0.5);
+        // A deterministic remote tie must not veto an exact full-length
+        // window before the confident mate's existing reach filter runs.
+        // This experiment never promotes a lower score or a clipped path.
+        let window_tied = !window_won
+            && self.config.rna
+            && self.config.mate_window_score_ties
+            && win_probe.cigar == [CigarOp::Match(seq.len() as u32)]
+            && win_probe.strict.matches == seq.len() as u32
+            && !win_probe.ea_dir.is_on()
+            && placements
+                .iter()
+                .find(|p| p.primary_eligible(seq.len()))
+                .is_some_and(|best| {
+                    placements.iter().any(|p| {
+                        p.primary_eligible(seq.len())
+                            && p.contig == win_probe.contig
+                            && p.pos == win_probe.pos
+                            && p.strand == win_probe.strand
+                            && p.cigar == win_probe.cigar
+                            && p.strict.score == best.strict.score
+                    })
+                });
+        if !window_won && !window_tied {
             self.scratch.rc = rc_storage;
             return None;
         }
@@ -724,6 +750,10 @@ impl<'a> Aligner<'a> {
         // the L1-only last-resort policy does not apply here.
         let mut aln = self.arbitrate_with_budget(seq, placements, n_seeds, true, seed_budget)?;
         aln.rescued = true;
+        if window_tied {
+            // Conditional coordinate selection does not establish uniqueness.
+            crate::mapq::force_mapq0(&mut aln);
+        }
         Some(aln)
     }
 
@@ -4351,6 +4381,81 @@ mod tests {
             .expect("retain a full candidate as hyperediting evidence before dedup");
         assert_eq!(result.cigar, vec![CigarOp::Match(150)]);
         assert_eq!(result.ea_ag, 70);
+    }
+
+    #[test]
+    fn mate_window_score_tie_can_reach_pair_arbitration_only_when_enabled() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let read = genome[2000..2150].to_vec();
+        genome[5000..5150].copy_from_slice(&read);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        for enabled in [false, true] {
+            let mut config = AlignConfig::rna_default();
+            config.mate_window_score_ties = enabled;
+            let mut aligner = Aligner::new(&index, config);
+            let mut placements = vec![
+                placement(0, 2000, &[CigarOp::Match(150)]),
+                placement(0, 5000, &[CigarOp::Match(150)]),
+            ];
+            for p in &mut placements {
+                aligner.rescore_strict(&read, p);
+            }
+            let cache = CachedPlacements {
+                placements,
+                n_seeds: 20,
+                genomic_any: true,
+                seed_budget: None,
+            };
+            let mut diagnostic = None;
+            let result = aligner.align_read_with_mate_observed(
+                &read,
+                0,
+                5100,
+                Some(&cache),
+                Some(&mut diagnostic),
+            );
+            if enabled {
+                let result = result.expect("an equally scored mate-window locus can compete");
+                assert_eq!(result.pos, 5000);
+                assert!(result.rescued);
+                assert_eq!(crate::mapq::mapq_of(&result), 0);
+                assert_eq!(diagnostic.unwrap().stage, "mate_window_arbitration");
+            } else {
+                assert!(result.is_none(), "default preserves the previous policy");
+            }
+            assert_eq!(cache.placements.len(), 2);
+        }
+    }
+
+    #[test]
+    fn mate_window_score_ties_do_not_promote_a_lower_scoring_locus() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let read = genome[2000..2150].to_vec();
+        genome[5000..5150].copy_from_slice(&read);
+        genome[5070] = if read[70] == b'A' { b'C' } else { b'A' };
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(&[b">c\n".as_slice(), &genome, b"\n"].concat())
+                .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        let mut config = AlignConfig::rna_default();
+        config.mate_window_score_ties = true;
+        let mut aligner = Aligner::new(&index, config);
+        let mut remote = placement(0, 2000, &[CigarOp::Match(150)]);
+        aligner.rescore_strict(&read, &mut remote);
+        let cache = CachedPlacements {
+            placements: vec![remote],
+            n_seeds: 20,
+            genomic_any: true,
+            seed_budget: None,
+        };
+        assert!(aligner
+            .align_read_with_mate(&read, 0, 5100, Some(&cache))
+            .is_none());
     }
 
     #[test]

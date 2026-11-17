@@ -52,6 +52,9 @@ pub struct MapArgs {
     /// Experiment: exact MAPQ0 mates may propose a locus without pruning rivals.
     #[arg(long)]
     experimental_weak_mate_proposals: bool,
+    /// Experiment: admit score-tied mate-window loci in final paired arbitration.
+    #[arg(long)]
+    experimental_mate_window_score_ties: bool,
     /// Experiment: repeat-context complete-list posting budget.
     #[arg(long, default_value_t = 20_000, value_parser = clap::value_parser!(u32).range(1..))]
     experimental_context_postings: u32,
@@ -68,7 +71,7 @@ pub struct MapArgs {
 
 pub fn run(a: MapArgs) -> anyhow::Result<()> {
     let l1 = crate::resolve::l1_bundle(&a.l1_bundle, &a.index)?;
-    let (raw, _index, _l1) = esperanto_flow::map_stage_with_context_budget_options(
+    let (raw, _index, _l1) = esperanto_flow::map_stage_with_mate_window_tie_options(
         &a.index,
         a.gtf.as_deref(),
         Some(l1.as_path()),
@@ -87,6 +90,7 @@ pub fn run(a: MapArgs) -> anyhow::Result<()> {
         a.experimental_weak_mate_proposals,
         a.experimental_context_postings as usize,
         a.experimental_context_candidates as usize,
+        a.experimental_mate_window_score_ties,
     )?;
     eprintln!("[map] wrote {}", raw.display());
     Ok(())
@@ -154,6 +158,7 @@ mod tests {
         assert!(!default.map.no_fragment_endpoints);
         assert!(!default.map.no_context_background);
         assert!(!default.map.experimental_weak_mate_proposals);
+        assert!(!default.map.experimental_mate_window_score_ties);
     }
 
     #[test]
@@ -170,6 +175,22 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.map.experimental_weak_mate_proposals);
+    }
+    #[test]
+    fn mate_window_score_ties_require_explicit_opt_in() {
+        let parsed = Probe::try_parse_from([
+            "probe",
+            "--r1",
+            "r.fq",
+            "--index",
+            "r.paidx",
+            "--out",
+            "out",
+            "--experimental-mate-window-score-ties",
+        ])
+        .unwrap();
+        assert!(parsed.map.experimental_mate_window_score_ties);
+        assert!(!parsed.map.experimental_weak_mate_proposals);
     }
     #[test]
     fn context_background_has_independent_cli_ablation() {
