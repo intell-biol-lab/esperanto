@@ -36,7 +36,7 @@ pub fn relate(r1: &ReadAlignment, r2: &ReadAlignment) -> PairRelation {
 }
 
 /// Span of the pair on the transcript: reference span from R1 start to R2 end
-/// with intronic RefSkip (N) intervals removed. RNA mates routinely bridge
+/// with the union of intronic RefSkip (N) intervals removed. RNA mates routinely bridge
 /// kilobase introns; counting N toward the span would reject spliced proper
 /// pairs that are adjacent on the transcript.
 pub fn transcript_span(r1: &ReadAlignment, r2: &ReadAlignment) -> u32 {
@@ -45,7 +45,7 @@ pub fn transcript_span(r1: &ReadAlignment, r2: &ReadAlignment) -> u32 {
     if right <= left {
         return 0;
     }
-    let mut n_total = 0u64;
+    let mut skips = Vec::new();
     for aln in [r1, r2] {
         let mut p = aln.pos;
         for op in &aln.cigar {
@@ -54,13 +54,22 @@ pub fn transcript_span(r1: &ReadAlignment, r2: &ReadAlignment) -> u32 {
                     let s = p.max(left);
                     let e = (p + *n).min(right);
                     if e > s {
-                        n_total += u64::from(e - s);
+                        skips.push((s, e));
                     }
                     p += *n;
                 }
                 CigarOp::Match(n) | CigarOp::Del(n) => p += *n,
                 CigarOp::Ins(_) | CigarOp::SoftClip(_) => {}
             }
+        }
+    }
+    skips.sort_unstable();
+    let mut cursor = left;
+    let mut n_total = 0u64;
+    for (start, end) in skips {
+        if end > cursor {
+            n_total += u64::from(end - start.max(cursor));
+            cursor = end;
         }
     }
     ((right - left) as u64).saturating_sub(n_total) as u32
@@ -173,7 +182,11 @@ mod tests {
         let a = aln(
             1000,
             Strand::Plus,
-            vec![CigarOp::Match(100), CigarOp::RefSkip(5000), CigarOp::Match(50)],
+            vec![
+                CigarOp::Match(100),
+                CigarOp::RefSkip(5000),
+                CigarOp::Match(50),
+            ],
         );
         let b = aln(6200, Strand::Minus, vec![CigarOp::Match(150)]);
         assert_eq!(transcript_span(&a, &b), 350);
@@ -193,5 +206,174 @@ mod tests {
         let mut b = aln(1200, Strand::Minus, vec![CigarOp::Match(150)]);
         b.contig = 1;
         assert_eq!(relate(&a, &b), PairRelation::Discordant);
+    }
+
+    #[test]
+    fn intron_union_shared_skip_is_subtracted_once() {
+        for (strand1, strand2) in [(Strand::Plus, Strand::Minus), (Strand::Minus, Strand::Plus)] {
+            let a = aln(
+                100,
+                strand1,
+                vec![
+                    CigarOp::Match(50),
+                    CigarOp::RefSkip(2000),
+                    CigarOp::Match(30),
+                ],
+            );
+            let b = aln(
+                120,
+                strand2,
+                vec![
+                    CigarOp::Match(30),
+                    CigarOp::RefSkip(2000),
+                    CigarOp::Match(50),
+                ],
+            );
+            assert_eq!(transcript_span(&a, &b), 100);
+            assert_eq!(transcript_span(&b, &a), 100);
+            assert_eq!(template_length(&a, &b), 100);
+            assert_eq!(template_length(&b, &a), -100);
+            assert_eq!(relate(&a, &b), PairRelation::Proper);
+        }
+    }
+
+    #[test]
+    fn intron_union_partial_nested_and_disjoint_intervals() {
+        let cases = [
+            // a skips[150,2150); b skips[170,2170): union2020,span100.
+            (
+                120,
+                vec![
+                    CigarOp::Match(50),
+                    CigarOp::RefSkip(2000),
+                    CigarOp::Match(50),
+                ],
+                100,
+            ),
+            // b's skip[170,2070) is contained in a's.
+            (
+                120,
+                vec![
+                    CigarOp::Match(50),
+                    CigarOp::RefSkip(1900),
+                    CigarOp::Match(50),
+                ],
+                80,
+            ),
+            // b skips[2200,2300), disjoint from a.
+            (
+                2170,
+                vec![
+                    CigarOp::Match(30),
+                    CigarOp::RefSkip(100),
+                    CigarOp::Match(50),
+                ],
+                150,
+            ),
+            // b skips[2150,2250), touching a's end.
+            (
+                2130,
+                vec![
+                    CigarOp::Match(20),
+                    CigarOp::RefSkip(100),
+                    CigarOp::Match(50),
+                ],
+                100,
+            ),
+            // Query-only ops do not expand the reference span; D does.
+            (
+                120,
+                vec![
+                    CigarOp::SoftClip(10),
+                    CigarOp::Match(30),
+                    CigarOp::RefSkip(2000),
+                    CigarOp::Ins(3),
+                    CigarOp::Match(40),
+                    CigarOp::Del(10),
+                ],
+                100,
+            ),
+        ];
+        let a = aln(
+            100,
+            Strand::Plus,
+            vec![
+                CigarOp::Match(50),
+                CigarOp::RefSkip(2000),
+                CigarOp::Match(30),
+            ],
+        );
+        for (pos, cigar, expected) in cases {
+            let b = aln(pos, Strand::Minus, cigar);
+            assert_eq!(transcript_span(&a, &b), expected, "{b:?}");
+            assert_eq!(transcript_span(&b, &a), expected, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn intron_union_overlap_cannot_make_excessive_span_proper() {
+        let a = aln(
+            100,
+            Strand::Plus,
+            vec![
+                CigarOp::Match(50),
+                CigarOp::RefSkip(2000),
+                CigarOp::Match(30),
+            ],
+        );
+        let b = aln(
+            120,
+            Strand::Minus,
+            vec![
+                CigarOp::Match(30),
+                CigarOp::RefSkip(2000),
+                CigarOp::Match(1150),
+            ],
+        );
+        assert_eq!(transcript_span(&a, &b), 1200);
+        assert_eq!(relate(&a, &b), PairRelation::Discordant);
+        let edge = aln(
+            120,
+            Strand::Minus,
+            vec![
+                CigarOp::Match(30),
+                CigarOp::RefSkip(2000),
+                CigarOp::Match(950),
+            ],
+        );
+        assert_eq!(transcript_span(&a, &edge), 1000);
+        assert_eq!(relate(&a, &edge), PairRelation::Proper);
+    }
+
+    #[test]
+    fn intron_union_matches_independent_small_coordinate_mask() {
+        // Enumerate small legal CIGAR geometries; a base mask supplies a
+        // separate reference calculation without production merge helpers.
+        for p in [0, 3, 8] {
+            for q in [0, 4, 9] {
+                for gap1 in [0, 2, 7] {
+                    for gap2 in [0, 3, 8] {
+                        let cigar = |gap| {
+                            let mut ops = vec![CigarOp::Match(5)];
+                            if gap != 0 {
+                                ops.push(CigarOp::RefSkip(gap));
+                            }
+                            ops.push(CigarOp::Match(6));
+                            ops
+                        };
+                        let a = aln(p, Strand::Plus, cigar(gap1));
+                        let b = aln(q, Strand::Minus, cigar(gap2));
+                        let end = (p + 11 + gap1).max(q + 11 + gap2);
+                        let expected = (p.min(q)..end)
+                            .filter(|&x| {
+                                !(p + 5..p + 5 + gap1).contains(&x)
+                                    && !(q + 5..q + 5 + gap2).contains(&x)
+                            })
+                            .count() as u32;
+                        assert_eq!(transcript_span(&a, &b), expected);
+                    }
+                }
+            }
+        }
     }
 }

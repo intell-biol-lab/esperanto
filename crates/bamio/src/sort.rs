@@ -279,4 +279,3 @@ pub fn coordinate_sort(input: &Path, output: &Path, opts: &SortOptions) -> io::R
         chunks: paths.len(),
     })
 }
-

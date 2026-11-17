@@ -87,6 +87,14 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+mod mapped_tests;
+
+// Isolate the single mmap construction operation; all index access stays safe.
+#[allow(unsafe_code)]
+mod mapped;
+pub use mapped::{LookupHits, MappedTidx};
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -265,7 +273,8 @@ impl Tidx {
                 }));
             }
             for h in handles {
-                h.join().map_err(|_| io::Error::other("read thread panicked"))??;
+                h.join()
+                    .map_err(|_| io::Error::other("read thread panicked"))??;
             }
             Ok(())
         })?;
@@ -996,6 +1005,52 @@ fn parse_index(data: &[u8]) -> Result<Tidx> {
 }
 
 fn parse_index_inner(data: &[u8]) -> Result<Tidx> {
+    let parsed = parse_index_layout(data)?;
+    let keys: Vec<u64> = if parsed.key_width == 4 {
+        parsed
+            .keys
+            .par_chunks_exact(4)
+            .map(|c| u64::from(le32(c)))
+            .collect()
+    } else {
+        parsed.keys.par_chunks_exact(8).map(le64).collect()
+    };
+    let payloads: Vec<(u32, u32)> = parsed
+        .payloads
+        .par_chunks_exact(8)
+        .map(|c| {
+            let v = le64(c);
+            (v as u32, (v >> 32) as u32)
+        })
+        .collect();
+    Ok(Tidx {
+        k: parsed.k,
+        tx_count: parsed.tx_count,
+        ref_blake3: parsed.ref_blake3,
+        names: parsed.names,
+        bucket_offsets: parsed.bucket_offsets,
+        keys,
+        payloads,
+        key_mask: parsed.key_mask,
+        bucket_shift: parsed.bucket_shift,
+    })
+}
+
+/// Validated metadata and borrowed on-disk tables, shared by both readers.
+struct ParsedIndex<'a> {
+    k: u32,
+    tx_count: u32,
+    ref_blake3: [u8; 32],
+    names: Vec<String>,
+    bucket_offsets: Vec<u64>,
+    keys: &'a [u8],
+    payloads: &'a [u8],
+    key_width: usize,
+    key_mask: u64,
+    bucket_shift: u32,
+}
+
+fn parse_index_layout(data: &[u8]) -> Result<ParsedIndex<'_>> {
     if data.len() < HEADER_LEN {
         return Err(Error::Truncated(format!(
             "file is {} bytes, shorter than the {HEADER_LEN}-byte header",
@@ -1148,24 +1203,7 @@ fn parse_index_inner(data: &[u8]) -> Result<Tidx> {
         }
     }
 
-    // ---- keys & payloads -----------------------------------------------------
-    let keys: Vec<u64> = if version == 2 {
-        keys_seg
-            .par_chunks_exact(4)
-            .map(|c| u64::from(le32(c)))
-            .collect()
-    } else {
-        keys_seg.par_chunks_exact(8).map(le64).collect()
-    };
-    let payloads: Vec<(u32, u32)> = pay_seg
-        .par_chunks_exact(8)
-        .map(|c| {
-            let v = le64(c);
-            (v as u32, (v >> 32) as u32)
-        })
-        .collect();
-
-    Ok(Tidx {
+    Ok(ParsedIndex {
         k,
         tx_count,
         ref_blake3: data
@@ -1174,8 +1212,9 @@ fn parse_index_inner(data: &[u8]) -> Result<Tidx> {
             .ok_or_else(|| Error::Truncated("reference digest out of bounds".to_string()))?,
         names,
         bucket_offsets,
-        keys,
-        payloads,
+        keys: keys_seg,
+        payloads: pay_seg,
+        key_width: key_width as usize,
         key_mask: (1u64 << low_bits) - 1,
         bucket_shift: low_bits,
     })
