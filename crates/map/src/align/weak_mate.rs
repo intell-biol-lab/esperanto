@@ -441,7 +441,11 @@ fn has_terminal_soft_clip(cigar: &[CigarOp]) -> bool {
             .is_some_and(|op| matches!(op, CigarOp::SoftClip(n) if *n > 0))
 }
 
-fn exact_ordinary_path(aligner: &mut Aligner<'_>, sequence: &[u8], path: &ReadAlignment) -> bool {
+pub(super) fn exact_ordinary_path(
+    aligner: &mut Aligner<'_>,
+    sequence: &[u8],
+    path: &ReadAlignment,
+) -> bool {
     if sequence.is_empty()
         || sequence.len() > 256
         || path.cigar.is_empty()

@@ -637,7 +637,49 @@ impl<'a> Aligner<'a> {
         mate_contig: u32,
         mate_pos: u32,
         cached: Option<&CachedPlacements>,
+        diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
+    ) -> Option<ReadAlignment> {
+        self.align_read_with_mate_tie_support(seq, mate_contig, mate_pos, cached, diagnostic, false)
+    }
+
+    /// Final-pair entry point carrying the observed supporting mate.
+    pub(crate) fn align_read_with_supported_mate_observed(
+        &mut self,
+        seq: &[u8],
+        old: Option<&ReadAlignment>,
+        mate_seq: &[u8],
+        mate: &ReadAlignment,
+        cached: Option<&CachedPlacements>,
+        diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
+    ) -> Option<ReadAlignment> {
+        // Keep this experiment within an already shared contig and require
+        // sequence evidence from a complete ordinary unspliced supporting mate.
+        // A MAPQ margin alone can be driven by a wrong splice path or homolog.
+        let allow_score_ties = self.config.mate_window_score_ties
+            && old.is_some_and(|r| r.contig == mate.contig)
+            && !mate.rescued
+            && !mate.seed_search_limited
+            && crate::mapq::mapq_of(mate) >= crate::mapq::PILEUP_GATE
+            && mate.cigar == [CigarOp::Match(mate_seq.len() as u32)]
+            && weak_mate::exact_ordinary_path(self, mate_seq, mate);
+        self.align_read_with_mate_tie_support(
+            seq,
+            mate.contig,
+            mate.pos,
+            cached,
+            diagnostic,
+            allow_score_ties,
+        )
+    }
+
+    fn align_read_with_mate_tie_support(
+        &mut self,
+        seq: &[u8],
+        mate_contig: u32,
+        mate_pos: u32,
+        cached: Option<&CachedPlacements>,
         mut diagnostic: Option<&mut Option<crate::diagnostics::CandidatePool>>,
+        allow_score_ties: bool,
     ) -> Option<ReadAlignment> {
         if let Some(slot) = diagnostic.as_mut() {
             **slot = Some(crate::diagnostics::CandidatePool::capture(
@@ -702,6 +744,7 @@ impl<'a> Aligner<'a> {
         let window_tied = !window_won
             && self.config.rna
             && self.config.mate_window_score_ties
+            && allow_score_ties
             && win_probe.cigar == [CigarOp::Match(seq.len() as u32)]
             && win_probe.strict.matches == seq.len() as u32
             && !win_probe.ea_dir.is_on()
@@ -4411,12 +4454,13 @@ mod tests {
                 seed_budget: None,
             };
             let mut diagnostic = None;
-            let result = aligner.align_read_with_mate_observed(
+            let result = aligner.align_read_with_mate_tie_support(
                 &read,
                 0,
                 5100,
                 Some(&cache),
                 Some(&mut diagnostic),
+                true,
             );
             if enabled {
                 let result = result.expect("an equally scored mate-window locus can compete");
@@ -4428,6 +4472,74 @@ mod tests {
                 assert!(result.is_none(), "default preserves the previous policy");
             }
             assert_eq!(cache.placements.len(), 2);
+        }
+    }
+
+    #[test]
+    fn mate_window_score_ties_require_an_exact_same_contig_supporting_mate() {
+        let mut genome = crate::fragment::tests::body(8000);
+        let read = genome[2000..2150].to_vec();
+        genome[5000..5150].copy_from_slice(&read);
+        let mate_read = revcomp(&genome[5100..5250]);
+        let index = Index::build(
+            crate::fasta::parse_fasta_bytes(
+                &[b">c\n".as_slice(), &genome, b"\n>remote\n", &read, b"\n"].concat(),
+            )
+            .unwrap(),
+            SeedParams { k: 15, w: 5 },
+        );
+        for case in 0..8 {
+            let mut config = AlignConfig::rna_default();
+            config.mate_window_score_ties = true;
+            let mut aligner = Aligner::new(&index, config);
+            let mut remote = placement(0, 2000, &[CigarOp::Match(150)]);
+            aligner.rescore_strict(&read, &mut remote);
+            let cache = CachedPlacements {
+                placements: vec![remote],
+                n_seeds: 20,
+                genomic_any: true,
+                seed_budget: None,
+            };
+            let mut old = ReadAlignment {
+                contig: 0,
+                pos: 2000,
+                cigar: vec![CigarOp::Match(150)],
+                ..Default::default()
+            };
+            let mut mate = ReadAlignment {
+                contig: 0,
+                pos: 5100,
+                strand: Strand::Minus,
+                cigar: vec![CigarOp::Match(150)],
+                score: 300,
+                mapq_override: Some(crate::mapq::PILEUP_GATE),
+                ..Default::default()
+            };
+            let mut sequence = mate_read.clone();
+            match case {
+                1 => old.contig = 1,
+                2 => sequence[20] = if sequence[20] == b'A' { b'C' } else { b'A' },
+                3 => {
+                    mate.cigar = vec![CigarOp::Match(75), CigarOp::RefSkip(10), CigarOp::Match(75)]
+                }
+                4 => mate.rescued = true,
+                5 => mate.seed_search_limited = true,
+                6 => mate.mapq_override = Some(0),
+                _ => {}
+            }
+            let result = aligner.align_read_with_supported_mate_observed(
+                &read,
+                (case != 7).then_some(&old),
+                &sequence,
+                &mate,
+                Some(&cache),
+                None,
+            );
+            assert_eq!(result.is_some(), case == 0, "support case {case}");
+            if let Some(result) = result {
+                assert_eq!(result.pos, 5000);
+                assert_eq!(crate::mapq::mapq_of(&result), 0);
+            }
         }
     }
 
@@ -4454,7 +4566,7 @@ mod tests {
             seed_budget: None,
         };
         assert!(aligner
-            .align_read_with_mate(&read, 0, 5100, Some(&cache))
+            .align_read_with_mate_tie_support(&read, 0, 5100, Some(&cache), None, true)
             .is_none());
     }
 

@@ -474,11 +474,11 @@ pub fn run_pe(
                                 .is_some_and(|m| !m.rescued && mapq_of(m) >= PILEUP_GATE)
                         };
                         if placement_poor(&r1, seq1.len()) && confident(&r2) {
-                            let (mc, mp) = r2.as_ref().map(|m| (m.contig, m.pos)).unwrap();
-                            if let Some(n) = aligner.align_read_with_mate_observed(
+                            if let Some(n) = aligner.align_read_with_supported_mate_observed(
                                 seq1,
-                                mc,
-                                mp,
+                                r1.as_ref(),
+                                seq2,
+                                r2.as_ref().unwrap(),
                                 cache1.as_ref(),
                                 diagnostics_enabled.then_some(&mut diag1),
                             ) {
@@ -486,11 +486,11 @@ pub fn run_pe(
                             }
                         }
                         if placement_poor(&r2, seq2.len()) && confident(&r1) {
-                            let (mc, mp) = r1.as_ref().map(|m| (m.contig, m.pos)).unwrap();
-                            if let Some(n) = aligner.align_read_with_mate_observed(
+                            if let Some(n) = aligner.align_read_with_supported_mate_observed(
                                 seq2,
-                                mc,
-                                mp,
+                                r2.as_ref(),
+                                seq1,
+                                r1.as_ref().unwrap(),
                                 cache2.as_ref(),
                                 diagnostics_enabled.then_some(&mut diag2),
                             ) {
