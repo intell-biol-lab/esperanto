@@ -225,7 +225,11 @@ impl TxMap {
             // Legacy files written by the old tool may contain inverted
             // `(end, start)` entries for minus-strand transcripts; normalize
             // on load (new files always store forward intervals).
-            let (start, end) = if start <= end { (start, end) } else { (end, start) };
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             junction_list.push(Junction {
                 contig_id,
                 start,
