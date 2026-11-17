@@ -43,3 +43,34 @@ candidate generation is not exhaustive. Synthetic tests establish the
 mechanism, not human read origin, confidence calibration or general mapper
 superiority. Native diagnostic replay, independent interface audits and
 per-read adverse accounting remain required before adoption.
+
+## Rejected first native candidate
+
+Candidate `6b08c75972fd8bb385b5a3956a91fce86f3823b8` passed the software
+gate and recovered the intended synthetic splice. In a post hoc HG001 replay,
+252 of 261 selected hotspot cases placed the same source base at STAR's
+RPS27 coordinate, and 248 matched STAR's full supporting alignment. Both
+281-pair BAMs passed the independent full-sequence/quality/SAM contract.
+This is a mechanism result, not per-read origin truth. One previously mapped
+read became unmapped; the small replay differs from the full run's junction
+discovery context for that template.
+
+Seven reused simulated development cells (872,459 pairs) rejected general
+adoption: 59 ancestral-exact reads gained versus 19 lost; 5,493 correct bases
+gained versus 451 lost; 17 correctly projected RNA-event bases gained versus
+11 lost; 16 new false-positive junctions and 16 new false-positive deletions.
+Net improvements cannot replace these gross loss gates. Every input remains
+in the independent scorer denominator. The option remains disabled by default
+and must not be described as a qualified improvement.
+
+One observed adverse mechanism is terminal mismatch clipping: a supplementary
+partial splice can outscore an existing full transcript path after discarding
+an edited terminal base. A new discovery proposal must account for the
+existing transcript and genomic explanations together, with adverse
+source-base and event projection controls. Simply lowering the chain gate,
+forcing the mate locus, or changing the downstream evaluator would not resolve
+this failure.
+
+Private evidence is retained outside Git under
+`experiments/esp-short-exon-library-20261117-attempt01` in the research
+workspace, including every changed/adverse score row and the rejected gate.

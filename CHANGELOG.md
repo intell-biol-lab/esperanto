@@ -4,6 +4,8 @@
   the ordinary chain/extension work and scoring; supplement bounded short
   chains only when existing library junctions yield a sequence-supported
   split. Require native replay and independent adverse accounting.
+  The first seven-cell replay is rejected: preserve its 19 exact-read losses,
+  451 correct-base losses and new false-positive junctions. No adoption.
 
 - Require an independent exact discordant-pair anchor to outrank the existing
   rescue-confidence ceiling, without quality overrides. Permit natural global
