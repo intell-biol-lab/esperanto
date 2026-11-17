@@ -102,7 +102,11 @@ impl TranscriptRecord {
             .windows(2)
             .map(|w| {
                 let (a, b) = (w[0].g_end, w[1].g_start);
-                if a <= b { (a, b) } else { (b, a) }
+                if a <= b {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
             })
             .collect()
     }

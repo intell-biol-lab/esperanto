@@ -23,7 +23,8 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut take = |name: &str| -> Result<String> {
-            args.next().with_context(|| format!("missing value for {name}"))
+            args.next()
+                .with_context(|| format!("missing value for {name}"))
         };
         match arg.as_str() {
             "--bam" => bam = Some(PathBuf::from(take("--bam")?)),
@@ -79,6 +80,11 @@ fn main() -> Result<()> {
             }
         }
     }
-    eprintln!("wrote {} rows ({} errors) to {}", sites.len(), errors, out.display());
+    eprintln!(
+        "wrote {} rows ({} errors) to {}",
+        sites.len(),
+        errors,
+        out.display()
+    );
     Ok(())
 }

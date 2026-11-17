@@ -63,7 +63,7 @@ fn nm_of(a: &ReadAlignment) -> i32 {
 }
 
 /// ReadAlignment → bamio reference-frame view; fixed tag order
-/// NH → NM → XS → EA → EK → RE.
+/// NH → NM → XS → EA → EK → optional XB → RE.
 ///
 /// NH/NM lead because samtools, GATK and REDItools all expect them; the
 /// esperanto-specific tags follow. NH is always 1: only the primary placement
@@ -87,8 +87,28 @@ pub(crate) fn aln_view(a: &ReadAlignment) -> AlnView {
         tags.push(RawTag(*b"EA", TagValue::Int(a.ea_count() as i32)));
     }
     tags.push(RawTag(*b"EK", TagValue::Str(evidence_tag(a))));
+    if let Some((start, length)) = a.boundary_core_uncertainty {
+        tags.push(RawTag(
+            *b"XB",
+            TagValue::Str(format!(
+                "query_start={start};length={length};assignment=unknown"
+            )),
+        ));
+    }
     if a.rescued {
-        tags.push(RawTag(*b"RE", TagValue::Str("unmapped".into())));
+        tags.push(RawTag(
+            *b"RE",
+            TagValue::Str(
+                if a.short_body_qualified {
+                    "mate_short_body"
+                } else if a.pair_substitution_qualified {
+                    "pair_substitution"
+                } else {
+                    "unmapped"
+                }
+                .into(),
+            ),
+        ));
     }
     AlnView {
         contig: a.contig,
@@ -145,6 +165,7 @@ pub fn record_se(name: &[u8], seq: &[u8], qual: &[u8], aln: Option<&ReadAlignmen
         flag: flag_bits,
         mapq: q,
         aln: aln.map(aln_view),
+        unmapped_tags: Vec::new(),
         seq,
         qual,
         mate: None,
@@ -191,6 +212,11 @@ mod tests {
             n_seeds: 14,
             rescued,
             mapq_override: None,
+            seed_search_limited: false,
+            exact_path_ambiguous: false,
+            short_body_qualified: false,
+            pair_substitution_qualified: false,
+            boundary_core_uncertainty: None,
             origin: crate::mapq::Origin::Genomic,
             n_cands: 1,
         }
