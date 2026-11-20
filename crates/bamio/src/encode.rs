@@ -7,7 +7,7 @@
 
 use std::io;
 
-use crate::{AlnView, CigarOp, OutRecord, TagValue};
+use crate::{CigarOp, OutRecord, RawTag, TagValue};
 
 // § 4.2.3 "SEQ and QUAL encoding" — case-insensitive base → 4-bit code table.
 const SEQ_CODES: [u8; 256] = build_seq_codes();
@@ -156,9 +156,11 @@ fn encode(buf: &mut Vec<u8>, rec: &OutRecord, n_cigar: usize) -> io::Result<()> 
     }
 
     // --- tags (written verbatim in the order given by RawTag) ---
-    if let Some(aln) = &rec.aln {
-        write_tags(buf, aln);
-    }
+    let tags = rec
+        .aln
+        .as_ref()
+        .map_or(rec.unmapped_tags.as_slice(), |a| a.tags.as_slice());
+    write_tags(buf, tags);
 
     Ok(())
 }
@@ -174,8 +176,8 @@ fn cigar_code(op: &CigarOp) -> (u32, u32) {
     }
 }
 
-fn write_tags(buf: &mut Vec<u8>, aln: &AlnView) {
-    for crate::RawTag(tag, value) in &aln.tags {
+fn write_tags(buf: &mut Vec<u8>, tags: &[RawTag]) {
+    for RawTag(tag, value) in tags {
         match value {
             TagValue::Char(c) => {
                 buf.extend_from_slice(tag);
