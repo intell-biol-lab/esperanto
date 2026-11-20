@@ -30,7 +30,8 @@ struct Observation {
     gap_nearness: f64,
 }
 
-type Window = HashMap<i64, HashMap<Vec<u8>, Observation>>;
+type TemplateId = u32;
+type Window = HashMap<i64, HashMap<TemplateId, Observation>>;
 
 #[derive(Clone, Debug)]
 struct IntervalIndex {
@@ -339,9 +340,14 @@ fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> R
         .tid(chrom.as_bytes())
         .context("contig absent from BAM")?;
     bam.fetch((tid, left, right))?;
-    let mut templates: HashMap<Vec<u8>, HashMap<i64, Observation>> = HashMap::new();
+    let mut template_ids: HashMap<Vec<u8>, TemplateId> = HashMap::new();
+    let mut positions: Window = HashMap::new();
     for record in bam.records() {
         let record = record?;
+        let evidence = read_observations(&record, left, right);
+        if evidence.is_empty() {
+            continue;
+        }
         let mut name = record
             .aux(b"RG")
             .ok()
@@ -352,29 +358,26 @@ fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> R
             .unwrap_or_default();
         name.push(0);
         name.extend_from_slice(&template_name(record.qname()));
-        let observations = templates.entry(name).or_default();
-        for (pos, observation) in read_observations(&record, left, right) {
-            if let Some(old) = observations.get_mut(&pos) {
+        let next =
+            TemplateId::try_from(template_ids.len()).context("too many templates in window")?;
+        let id = *template_ids.entry(name).or_insert(next);
+        for (pos, observation) in evidence {
+            let observations = positions.entry(pos).or_default();
+            if let Some(old) = observations.get_mut(&id) {
                 merge_observation(old, observation);
             } else {
-                observations.insert(pos, observation);
+                observations.insert(id, observation);
             }
         }
     }
-    let mut positions: Window = HashMap::new();
-    for (name, observations) in templates {
-        for (pos, observation) in observations {
-            if base_index(observation.base).is_some() {
-                positions
-                    .entry(pos)
-                    .or_default()
-                    .insert(name.clone(), observation);
-            }
-        }
+    // Keep conflicting intermediate observations until every record has merged:
+    // a later higher-quality observation can resolve an earlier conflict.
+    for observations in positions.values_mut() {
+        observations.retain(|_, observation| base_index(observation.base).is_some());
     }
+    positions.retain(|_, observations| !observations.is_empty());
     Ok(positions)
 }
-
 /// Independent informative A/C/G/T template counts using the frozen molecular
 /// observation reader. None denotes a contig absent from the BAM dictionary.
 /// Windows are bounded to 4096 reference bases; output follows input order.
@@ -685,7 +688,7 @@ fn feature_vector(
     let mut weighted_alt_sites = 0.0;
     let mut all_weighted_depth = 0.0;
     let mut all_weighted_other = 0.0;
-    let mut template_contributions: HashMap<Vec<u8>, u32> = HashMap::new();
+    let mut template_contributions: HashMap<TemplateId, u32> = HashMap::new();
     for p in (pos - RADIUS).max(reference_start)
         ..=(pos + RADIUS).min(reference_start + ref_seq.len() as i64 - 1)
     {
@@ -720,7 +723,7 @@ fn feature_vector(
             weighted_alt_sites += w;
             for (name, o) in local_obs {
                 if o.base == alt {
-                    *template_contributions.entry(name.clone()).or_default() += 1;
+                    *template_contributions.entry(*name).or_default() += 1;
                 }
             }
         }
@@ -882,7 +885,7 @@ pub fn feature_matrix(
     let mut order: Vec<usize> = (0..sites.len()).collect();
     order.sort_by(|&a, &b| sites[a].cmp(&sites[b]));
     const MAX_GROUP_SITES: usize = 512;
-    const MAX_GROUP_SPAN: i64 = 400_000;
+    const MAX_GROUP_SPAN: i64 = 401;
     let mut groups = Vec::new();
     let mut start = 0;
     while start < order.len() {
@@ -1061,4 +1064,95 @@ pub fn discover_sites(
     }
     std::fs::write(out, text)?;
     Ok(all.len())
+}
+
+#[cfg(test)]
+mod memory_regression {
+    use super::*;
+    #[test]
+    fn position_keys_do_not_own_repeated_template_names() {
+        let observation = Observation {
+            base: b'G',
+            bq: 30,
+            mapq: 60.0,
+            end_fraction: 0.5,
+            orientation: 0,
+            softclip_fraction: 0.0,
+            gap_nearness: 0.0,
+        };
+        let mut window = Window::new();
+        window.entry(10).or_default().insert(0, observation.clone());
+        let key = window.get(&10).unwrap().keys().next().unwrap();
+        assert!(
+            std::mem::size_of_val(key) <= 8,
+            "each position stores an owned template name; compact identity required"
+        );
+    }
+}
+
+#[cfg(test)]
+mod window_semantic_regression {
+    use super::*;
+    use rust_htslib::bam::{
+        self,
+        header::HeaderRecord,
+        record::{Cigar, CigarString},
+        Header,
+    };
+    #[test]
+    fn interning_retains_rg_mates_conflicts_and_late_resolution() {
+        let path =
+            std::env::temp_dir().join(format!("esp-window-intern-{}.bam", std::process::id()));
+        let mut header = Header::new();
+        header.push_record(
+            HeaderRecord::new(b"SQ")
+                .push_tag(b"SN", "chr1")
+                .push_tag(b"LN", 1000),
+        );
+        {
+            let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+            for (name, rg, base, quality, flag) in [
+                ("same/1", "A", b'A', 30, 0),
+                ("same/2", "A", b'G', 30, 0),
+                ("same/1", "A", b'G', 40, 0),
+                ("same/1", "B", b'A', 30, 0),
+                ("conflict/1", "A", b'A', 30, 0),
+                ("conflict/2", "A", b'G', 30, 0),
+                ("secondary", "A", b'G', 40, 256),
+            ] {
+                let mut record = bam::Record::new();
+                record.set(
+                    name.as_bytes(),
+                    Some(&CigarString(vec![Cigar::Match(2)])),
+                    &[base; 2],
+                    &[quality; 2],
+                );
+                record.set_tid(0);
+                record.set_pos(100);
+                record.set_mapq(60);
+                record.set_flags(flag);
+                record
+                    .push_aux(b"RG", bam::record::Aux::String(rg))
+                    .unwrap();
+                writer.write(&record).unwrap();
+            }
+        }
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
+        let mut bam = IndexedReader::from_path(&path).unwrap();
+        let window = read_window(&mut bam, "chr1", 99, 104).unwrap();
+        for position in [100, 101] {
+            let observations = &window[&position];
+            assert_eq!(observations.len(), 2);
+            assert_eq!(
+                observations
+                    .values()
+                    .filter(|o| o.base == b'G' && o.bq == 40)
+                    .count(),
+                1
+            );
+            assert_eq!(observations.values().filter(|o| o.base == b'A').count(), 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(format!("{}.bai", path.display())).unwrap();
+    }
 }

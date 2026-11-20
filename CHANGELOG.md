@@ -1,5 +1,9 @@
 # Changelog
 
+- Intern molecular feature template identities and merge directly into position
+  maps; limit export grouping span without dropping reads. Native27 parity and
+  high-depth memory qualification remain required.
+
 - Reuse immutable seed lookup results within budgeted anchor collection; preserve
   complete/overflow ordering, whole-list budgets and omission accounting. No
   search/scoring/model change; native qualification remains separate.
