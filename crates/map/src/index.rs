@@ -307,18 +307,52 @@ pub fn collect_anchors_budgeted_into(
     budget: usize,
     anchors: &mut Vec<crate::seed::Anchor>,
 ) -> AnchorBudget {
+    collect_anchors_budgeted_with(
+        |kmer| index.query(kmer),
+        read_mins,
+        read_len,
+        k,
+        occ_cap,
+        budget,
+        anchors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_anchors_budgeted_with<'a>(
+    mut query: impl FnMut(u64) -> IndexHit<'a>,
+    read_mins: &[Minimizer],
+    read_len: u32,
+    k: u32,
+    occ_cap: u32,
+    budget: usize,
+    anchors: &mut Vec<crate::seed::Anchor>,
+) -> AnchorBudget {
     anchors.clear();
     let mut seeds = Vec::new();
     let mut eligible_anchors = 0usize;
     for (i, m) in read_mins.iter().enumerate() {
-        let count = index.query(m.kmer).count;
+        let hit = query(m.kmer);
+        let count = hit.count;
         if count > 0 && count <= occ_cap {
-            seeds.push((i, count as usize));
+            seeds.push((i, hit));
             eligible_anchors = eligible_anchors.saturating_add(count as usize);
         }
     }
     if eligible_anchors <= budget {
-        collect_anchors_into(index, read_mins, read_len, k, occ_cap, anchors);
+        for &(i, ref hit) in &seeds {
+            let m = &read_mins[i];
+            for &p in hit.positions {
+                let (contig, rpos, rstrand) = unpack_pos(p);
+                let strand = Strand::xor(m.strand, rstrand);
+                anchors.push(crate::seed::Anchor {
+                    qpos: anchor_qpos(strand, m, read_len, k),
+                    rpos,
+                    contig,
+                    strand,
+                });
+            }
+        }
         return AnchorBudget {
             eligible_anchors,
             retained_anchors: anchors.len(),
@@ -326,18 +360,18 @@ pub fn collect_anchors_budgeted_into(
             repeat_context: None,
         };
     }
-    seeds.sort_unstable_by_key(|&(i, count)| {
+    seeds.sort_unstable_by_key(|&(i, ref hit)| {
         let m = read_mins[i];
-        (count, m.pos, m.kmer, m.strand as u8)
+        (hit.count as usize, m.pos, m.kmer, m.strand as u8)
     });
     let mut omitted_seeds = 0;
-    for (i, count) in seeds {
-        if count > budget - anchors.len() {
+    for (i, hit) in seeds {
+        if hit.count as usize > budget - anchors.len() {
             omitted_seeds += 1;
             continue;
         }
         let m = &read_mins[i];
-        for &p in index.query(m.kmer).positions {
+        for &p in hit.positions {
             let (contig, rpos, rstrand) = unpack_pos(p);
             let strand = Strand::xor(m.strand, rstrand);
             anchors.push(crate::seed::Anchor {
@@ -521,6 +555,166 @@ mod budget_tests {
         .map(|(kmer, pos, strand)| Minimizer { kmer, pos, strand })
         .to_vec();
         (index, mins)
+    }
+
+    // Frozen parent implementation: independent differential oracle.
+    fn legacy_budgeted(
+        index: &Index,
+        read_mins: &[Minimizer],
+        read_len: u32,
+        k: u32,
+        occ_cap: u32,
+        budget: usize,
+        anchors: &mut Vec<crate::seed::Anchor>,
+    ) -> AnchorBudget {
+        anchors.clear();
+        let mut seeds = Vec::new();
+        let mut eligible_anchors = 0usize;
+        for (i, m) in read_mins.iter().enumerate() {
+            let count = index.query(m.kmer).count;
+            if count > 0 && count <= occ_cap {
+                seeds.push((i, count as usize));
+                eligible_anchors = eligible_anchors.saturating_add(count as usize);
+            }
+        }
+        if eligible_anchors <= budget {
+            collect_anchors_into(index, read_mins, read_len, k, occ_cap, anchors);
+            return AnchorBudget {
+                eligible_anchors,
+                retained_anchors: anchors.len(),
+                omitted_seeds: 0,
+                repeat_context: None,
+            };
+        }
+        seeds.sort_unstable_by_key(|&(i, count)| {
+            let m = read_mins[i];
+            (count, m.pos, m.kmer, m.strand as u8)
+        });
+        let mut omitted_seeds = 0;
+        for (i, count) in seeds {
+            if count > budget - anchors.len() {
+                omitted_seeds += 1;
+                continue;
+            }
+            let m = &read_mins[i];
+            for &p in index.query(m.kmer).positions {
+                let (contig, rpos, rstrand) = unpack_pos(p);
+                let strand = Strand::xor(m.strand, rstrand);
+                anchors.push(crate::seed::Anchor {
+                    qpos: anchor_qpos(strand, m, read_len, k),
+                    rpos,
+                    contig,
+                    strand,
+                });
+            }
+        }
+        AnchorBudget {
+            eligible_anchors,
+            retained_anchors: anchors.len(),
+            omitted_seeds,
+            repeat_context: None,
+        }
+    }
+
+    #[test]
+    fn budget_lookup_reuse_matches_parent_for_permutations_caps_and_stale_buffers() {
+        let (index, original) = fixture();
+        let mut state = 20261120u64;
+        for _ in 0..256 {
+            let mut mins = original.clone();
+            for _ in 0..12 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                mins.push(Minimizer {
+                    kmer: state % 7,
+                    pos: ((state >> 8) % 100) as u32,
+                    strand: if state & 1 == 0 {
+                        Strand::Plus
+                    } else {
+                        Strand::Minus
+                    },
+                });
+            }
+            if state & 2 != 0 {
+                mins.reverse();
+            }
+            for cap in [0, 1, 2, 3, 4, 5, 6, u32::MAX] {
+                for budget in [0, 1, 2, 4, 5, 8, 9, 12, 20, 100, usize::MAX] {
+                    let mut expected = vec![
+                        Anchor {
+                            contig: 0,
+                            qpos: 0,
+                            rpos: 0,
+                            strand: Strand::Plus
+                        };
+                        3
+                    ];
+                    let mut actual = expected.clone();
+                    let a = legacy_budgeted(&index, &mins, 150, 15, cap, budget, &mut expected);
+                    let b = collect_anchors_budgeted_into(
+                        &index,
+                        &mins,
+                        150,
+                        15,
+                        cap,
+                        budget,
+                        &mut actual,
+                    );
+                    assert_eq!(actual, expected, "cap={cap}, budget={budget}");
+                    assert_eq!(
+                        serde_json::to_value(a).unwrap(),
+                        serde_json::to_value(b).unwrap()
+                    );
+                }
+            }
+        }
+        let mut actual = vec![
+            Anchor {
+                contig: 0,
+                qpos: 0,
+                rpos: 0,
+                strand: Strand::Plus
+            };
+            3
+        ];
+        let b = collect_anchors_budgeted_into(&index, &[], 150, 15, 5, 0, &mut actual);
+        assert!(actual.is_empty());
+        assert!(!b.limited());
+    }
+
+    #[test]
+    fn budget_queries_each_seed_once_without_changing_order_or_limits() {
+        let (index, mut mins) = fixture();
+        mins.push(Minimizer {
+            kmer: 99,
+            pos: 80,
+            strand: Strand::Minus,
+        });
+        mins.push(mins[0]);
+        for budget in [0, 1, 5, 9, 13, 20000] {
+            let mut calls = 0;
+            let mut actual = Vec::new();
+            let status = collect_anchors_budgeted_with(
+                |key| {
+                    calls += 1;
+                    index.query(key)
+                },
+                &mins,
+                150,
+                15,
+                5,
+                budget,
+                &mut actual,
+            );
+            assert_eq!(calls, mins.len(), "budget={budget}: duplicate index lookup");
+            assert_eq!(status.eligible_anchors, 13);
+            assert!(actual.len() <= budget);
+            if budget >= 13 {
+                assert_eq!(actual, collect_anchors(&index, &mins, 150, 15, 5).0);
+                assert!(!status.limited());
+            }
+        }
     }
 
     #[test]

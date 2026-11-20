@@ -1,5 +1,9 @@
 # Changelog
 
+- Reuse immutable seed lookup results within budgeted anchor collection; preserve
+  complete/overflow ordering, whole-list budgets and omission accounting. No
+  search/scoring/model change; native qualification remains separate.
+
 - Repair experimental short-exon qualification after common scoring across both
   genomic and L1 candidates, preserving existing informative high-coverage paths.
 - Require supplemental splice-tail sequence gain to beat the existing constant
