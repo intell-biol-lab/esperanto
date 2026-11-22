@@ -438,14 +438,14 @@ fn log_likelihood(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) 
         .iter()
         .map(|obs| {
             let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
+            let (zero, one) = if obs.base == ref_base {
+                (1.0 - error, error / 3.0)
             } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
+                (error / 3.0, 1.0 - error)
             } else {
-                (error / 3.0, 0.0)
+                (error / 3.0, error / 3.0)
             };
-            (a + b * p).max(1e-300).ln()
+            ((1.0 - p) * zero + p * one).max(1e-300).ln()
         })
         .sum()
 }
@@ -455,14 +455,14 @@ fn likelihood_derivative(observations: &[&Observation], ref_base: u8, alt: u8, p
         .iter()
         .map(|obs| {
             let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
+            let (zero, one) = if obs.base == ref_base {
+                (1.0 - error, error / 3.0)
             } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
+                (error / 3.0, 1.0 - error)
             } else {
-                (error / 3.0, 0.0)
+                (error / 3.0, error / 3.0)
             };
-            b / (a + b * p).max(1e-300)
+            (one - zero) / ((1.0 - p) * zero + p * one).max(1e-300)
         })
         .sum()
 }
@@ -472,17 +472,36 @@ fn likelihood_curvature(observations: &[&Observation], ref_base: u8, alt: u8, p:
         .iter()
         .map(|obs| {
             let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
+            let (zero, one) = if obs.base == ref_base {
+                (1.0 - error, error / 3.0)
             } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
+                (error / 3.0, 1.0 - error)
             } else {
-                (error / 3.0, 0.0)
+                (error / 3.0, error / 3.0)
             };
-            let denominator = (a + b * p).max(1e-300);
-            (b / denominator).powi(2)
+            let denominator = ((1.0 - p) * zero + p * one).max(1e-300);
+            ((one - zero) / denominator).powi(2)
         })
         .sum()
+}
+
+fn log_add_exp(left: f64, right: f64) -> f64 {
+    if !left.is_finite() {
+        return right;
+    }
+    if !right.is_finite() {
+        return left;
+    }
+    let high = left.max(right);
+    high + (left.min(right) - high).exp().ln_1p()
+}
+
+fn log_uniform_likelihood(observations: &[&Observation], ref_base: u8, alt: u8) -> f64 {
+    GL32_X
+        .iter()
+        .zip(GL32_W.iter())
+        .map(|(&x, w)| log_likelihood(observations, ref_base, alt, x) + w.ln())
+        .fold(f64::NEG_INFINITY, log_add_exp)
 }
 
 /// 32-point Gauss-Legendre nodes and weights on [0, 1]. Used for every
@@ -580,12 +599,7 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     let log_zero = log_likelihood(observations, ref_base, alt, 0.0);
     let log_one = log_likelihood(observations, ref_base, alt, 1.0);
     if observations.len() <= 63 {
-        let log_uniform = GL32_X
-            .iter()
-            .zip(GL32_W.iter())
-            .map(|(&x, w)| (log_likelihood(observations, ref_base, alt, x) + w.ln()).exp())
-            .sum::<f64>()
-            .ln();
+        let log_uniform = log_uniform_likelihood(observations, ref_base, alt);
         return (log_uniform - log_zero, log_uniform - log_one);
     }
     let derivative_zero = likelihood_derivative(observations, ref_base, alt, 0.0);
@@ -609,7 +623,16 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     };
     let peak = log_likelihood(observations, ref_base, alt, mode);
     let scale = if mode == 0.0 || mode == 1.0 {
-        1.0 / derivative_zero.abs().max(derivative_one.abs()).max(1.0)
+        let derivative = if mode == 0.0 {
+            derivative_zero.abs()
+        } else {
+            derivative_one.abs()
+        };
+        // The opposite endpoint can have an arbitrarily steep slope. Near a
+        // flat boundary, curvature rather than slope controls the mass width.
+        1.0 / derivative
+            .max(likelihood_curvature(observations, ref_base, alt, mode).sqrt())
+            .max(1.0)
     } else {
         1.0 / likelihood_curvature(observations, ref_base, alt, mode)
             .max(1.0)
@@ -1064,6 +1087,105 @@ pub fn discover_sites(
     }
     std::fs::write(out, text)?;
     Ok(all.len())
+}
+
+#[cfg(test)]
+mod likelihood_numerical_regression {
+    use super::*;
+
+    fn observations(groups: &[(u8, u8, usize)]) -> Vec<Observation> {
+        groups
+            .iter()
+            .flat_map(|&(base, bq, count)| {
+                std::iter::repeat_n(
+                    Observation {
+                        base,
+                        bq,
+                        mapq: 60.0,
+                        end_fraction: 0.5,
+                        orientation: 0,
+                        softclip_fraction: 0.0,
+                        gap_nearness: 0.0,
+                    },
+                    count,
+                )
+            })
+            .collect()
+    }
+
+    fn check(groups: &[(u8, u8, usize)], expected: (f64, f64)) {
+        let owned = observations(groups);
+        let refs: Vec<_> = owned.iter().collect();
+        let actual = likelihood_features(&refs, b'A', b'G');
+        for (a, e) in [(actual.0, expected.0), (actual.1, expected.1)] {
+            assert!(
+                a.is_finite() && (a - e).abs() < 2e-6,
+                "groups={groups:?}: actual={actual:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn low_depth_third_bases_do_not_underflow() {
+        // Independent integral: all third-base factors are constant in p.
+        check(&[(b'C', 93, 63)], (0.0, 0.0));
+        // Three ALT factors integrate to ((1-e)^4-(e/3)^4)/(4*(1-4e/3)).
+        check(
+            &[(b'C', 93, 60), (b'G', 93, 3)],
+            (66.15166659808187, -1.386294360952661),
+        );
+    }
+
+    #[test]
+    fn boundary_mass_is_not_lost_at_high_depth() {
+        // Independently checked by scipy quadrature AND incomplete beta form.
+        check(
+            &[(b'A', 30, 9997), (b'G', 30, 3)],
+            (-8.254418713486338, 79997.38405204924),
+        );
+        check(
+            &[(b'A', 30, 3), (b'G', 30, 9997)],
+            (79997.38405204924, -8.254418713486338),
+        );
+        // Almost-flat boundary: derivative alone is not a local width.
+        check(
+            &[(b'A', 30, 2997), (b'G', 30, 1)],
+            (-7.3125532755095435, 23976.767180405215),
+        );
+    }
+
+    #[test]
+    fn mixed_quality_and_third_base_oracle() {
+        check(
+            &[
+                (b'A', 20, 6000),
+                (b'A', 41, 3980),
+                (b'G', 20, 10),
+                (b'G', 41, 5),
+                (b'C', 30, 5),
+            ],
+            (4.272870200591683, 76002.77702414071),
+        );
+    }
+
+    #[test]
+    fn pure_ref_and_alt_have_closed_form_boundary_integrals() {
+        for n in [63, 64, 1000, 10000] {
+            for q in [13, 20, 30, 60, 93] {
+                let e = 10_f64.powf(-(q as f64) / 10.0);
+                let high = 1.0 - e;
+                let low = e / 3.0;
+                // Integral (high - (high-low)*p)^n dp on [0,1].
+                let log_z = (n as f64 + 1.0) * high.ln()
+                    + (-(low / high).powi(n as i32 + 1)).ln_1p()
+                    - (high - low).ln()
+                    - (n as f64 + 1.0).ln();
+                let expected = (log_z - n as f64 * high.ln(), log_z - n as f64 * low.ln());
+                check(&[(b'A', q, n)], expected);
+                check(&[(b'G', q, n)], (expected.1, expected.0));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

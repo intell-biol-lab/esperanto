@@ -1,5 +1,11 @@
 # Known scientific qualification issues
 
+Native27 dev.42 corrects low-depth likelihood underflow, boundary quadrature
+mass loss and high-BQ endpoint cancellation; see
+[the correction contract](native27-corrections.md). A software test pass is
+not model calibration or mapping qualification. Equal-BQ same-base template
+metadata remains input-order dependent at this numerical-only revision.
+
 The experimental short-exon candidate supplement addresses a discovery gap
 between a subthreshold exon seed chain and the best-only tail rescue stage.
 It preserves existing scoring and adds no genotype or mate-anchor exception.

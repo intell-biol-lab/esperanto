@@ -1,5 +1,11 @@
 # Changelog
 
+- Stabilize native27 uniform-likelihood integration in log space at low depth,
+  and use the actual mode's slope/curvature for high-depth boundary mass.
+  Evaluate endpoint mixtures without subtractive cancellation at high BQ.
+  The likelihood/prior, 27-column schema and bundled model are unchanged;
+  corrected features require a separately identified training/inference build.
+
 - Intern molecular feature template identities and merge directly into position
   maps; limit export grouping span without dropping reads. Native27 parity and
   high-depth memory qualification remain required.
