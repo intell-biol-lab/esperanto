@@ -4,7 +4,10 @@ Native27 dev.42 corrects low-depth likelihood underflow, boundary quadrature
 mass loss and high-BQ endpoint cancellation; see
 [the correction contract](native27-corrections.md). A software test pass is
 not model calibration or mapping qualification. Equal-BQ same-base template
-metadata remains input-order dependent at this numerical-only revision.
+metadata remains input-order dependent at the numerical-only dev.42 revision.
+Dev.43 separately applies commutative composite metadata reduction to same-base
+ties; that removes this order dependence but changes the feature contract and
+requires real-data impact/label-admitted model evaluation, not silent adoption.
 
 The experimental short-exon candidate supplement addresses a discovery gap
 between a subthreshold exon seed chain and the best-only tail rescue stage.

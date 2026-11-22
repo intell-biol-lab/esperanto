@@ -38,3 +38,25 @@ semantic correction; it is not addressed by dev.42. Existing low-depth
 third-base edge failures are not evidence that already accepted data contains
 infinite values. Fixed-node quadrature still needs independently quantified
 precision/runtime over any expanded operational domain.
+
+## Deterministic template metadata (dev.43; separate stacked change)
+
+At equal maximum BQ, reduce auxiliary fields for same-base observations as
+well as different-base conflicts. Use maximum finite MAPQ (NaN if all unknown),
+maximum read-end fraction, minimum softclip/gap-nearness fractions, and
+orientation consensus (`-1` when inconsistent). These operators already applied
+to the conflicting-base branch; extending them to same-base ties makes the
+metadata reduction commutative and associative. The result is explicitly
+**composite template evidence**, not metadata of a selected physical read.
+
+Base/BQ are unchanged: unequal-BQ observations keep the highest-BQ observation,
+equal-BQ different bases conflict, and only a strictly higher BQ can resolve
+an existing conflict. Counts, VAF, likelihoods, neighborhood counts, sequence
+and annotations must remain unchanged relative to dev.42. Potentially changed
+columns are ALT mean MAPQ/end-fraction/softclip/gap-nearness and strand bias.
+Unknown orientation is not assigned to either direction by the strand statistic.
+
+This is a semantic change, kept as a separate commit/build/PR and not claimed
+to match the frozen model's training distribution. Real-BAM impact must be
+reported separately from numerical corrections. No old Parquet or model
+is overwritten and no model is fit or scored as part of this correction.

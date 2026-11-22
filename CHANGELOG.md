@@ -1,5 +1,9 @@
 # Changelog
 
+- Make equal-maximum-BQ template metadata deterministic with fieldwise
+  max/min/orientation consensus, retaining existing conflict/late-resolution
+  rules. This is a separately identified semantic change from dev.42.
+
 - Stabilize native27 uniform-likelihood integration in log space at low depth,
   and use the actual mode's slope/curvature for high-depth boundary mass.
   Evaluate endpoint mixtures without subtractive cancellation at high BQ.

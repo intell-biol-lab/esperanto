@@ -210,8 +210,13 @@ fn base_index(base: u8) -> Option<usize> {
 fn merge_observation(old: &mut Observation, new: Observation) {
     if new.bq > old.bq {
         *old = new;
-    } else if new.bq == old.bq && old.base != new.base {
-        old.base = b'N';
+    } else if new.bq == old.bq {
+        // Reduce all maximum-BQ evidence, not only discordant bases. These
+        // fieldwise summaries are a composite template observation, not a
+        // selected physical read. N remains absorbing at the same BQ.
+        if old.base != new.base {
+            old.base = b'N';
+        }
         old.mapq = if old.mapq.is_finite() {
             old.mapq.max(new.mapq)
         } else {
@@ -1087,6 +1092,87 @@ pub fn discover_sites(
     }
     std::fs::write(out, text)?;
     Ok(all.len())
+}
+
+#[cfg(test)]
+mod template_tie_regression {
+    use super::*;
+
+    fn obs(base: u8, bq: u8, mapq: f64, orientation: i8) -> Observation {
+        Observation {
+            base,
+            bq,
+            mapq,
+            end_fraction: mapq / 100.0,
+            orientation,
+            softclip_fraction: (100.0 - mapq) / 100.0,
+            gap_nearness: (100.0 - mapq) / 100.0,
+        }
+    }
+
+    fn signature(value: &Observation) -> Vec<u64> {
+        vec![
+            value.base as u64,
+            value.bq as u64,
+            if value.mapq.is_nan() {
+                u64::MAX
+            } else {
+                value.mapq.to_bits()
+            },
+            value.end_fraction.to_bits(),
+            (value.orientation as i64) as u64,
+            value.softclip_fraction.to_bits(),
+            value.gap_nearness.to_bits(),
+        ]
+    }
+
+    #[test]
+    fn equal_bq_same_base_metadata_is_commutative_and_associative() {
+        let records = [
+            obs(b'G', 30, 20.0, 0),
+            obs(b'G', 30, 60.0, 1),
+            obs(b'G', 30, f64::NAN, 1),
+        ];
+        let mut expected = None;
+        for i in 0..3 {
+            for j in 0..3 {
+                if i == j {
+                    continue;
+                }
+                let k = 3 - i - j;
+                let mut left = records[i].clone();
+                merge_observation(&mut left, records[j].clone());
+                merge_observation(&mut left, records[k].clone());
+                let mut right = records[j].clone();
+                merge_observation(&mut right, records[k].clone());
+                let mut grouped = records[i].clone();
+                merge_observation(&mut grouped, right);
+                assert_eq!(signature(&left), signature(&grouped));
+                if let Some(ref e) = expected {
+                    assert_eq!(&signature(&left), e, "input-order metadata change");
+                } else {
+                    expected = Some(signature(&left));
+                }
+                assert_eq!(left.mapq, 60.0);
+                assert_eq!(left.orientation, -1);
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_is_absorbing_until_a_strictly_higher_bq_resolves_it() {
+        let mut ambiguous = obs(b'A', 30, 20.0, 0);
+        merge_observation(&mut ambiguous, obs(b'G', 30, 60.0, 1));
+        assert_eq!(ambiguous.base, b'N');
+        merge_observation(&mut ambiguous, obs(b'A', 30, 40.0, 0));
+        assert_eq!(ambiguous.base, b'N');
+        let winner = obs(b'G', 35, 40.0, 0);
+        merge_observation(&mut ambiguous, winner.clone());
+        assert_eq!(signature(&ambiguous), signature(&winner));
+        // Lower-BQ ties/metadata cannot contaminate the maximum-BQ winner.
+        merge_observation(&mut ambiguous, obs(b'A', 30, 60.0, 1));
+        assert_eq!(signature(&ambiguous), signature(&winner));
+    }
 }
 
 #[cfg(test)]
