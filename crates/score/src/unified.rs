@@ -37,6 +37,15 @@ type Window = HashMap<i64, HashMap<TemplateId, Observation>>;
 #[path = "reader_reuse_tests.rs"]
 mod reader_reuse_tests;
 
+#[cfg(test)]
+#[path = "likelihood_cache_tests.rs"]
+mod likelihood_cache_tests;
+
+#[cfg(test)]
+thread_local! {
+    static LIKELIHOOD_WORK: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) };
+}
+
 #[derive(Clone, Debug)]
 struct IntervalIndex {
     starts: Vec<i64>,
@@ -442,56 +451,64 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
-fn log_likelihood(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
-        .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (zero, one) = if obs.base == ref_base {
-                (1.0 - error, error / 3.0)
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - error)
-            } else {
-                (error / 3.0, error / 3.0)
-            };
-            ((1.0 - p) * zero + p * one).max(1e-300).ln()
-        })
-        .sum()
+/// Observation-specific mixture endpoints, prepared once and visited in the
+/// original order for every likelihood/derivative/curvature sum. Do not group
+/// equal observations: regrouping would change floating-point addition order.
+struct Likelihood {
+    probabilities: Vec<(f64, f64)>,
 }
 
-fn likelihood_derivative(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
-        .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (zero, one) = if obs.base == ref_base {
-                (1.0 - error, error / 3.0)
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - error)
-            } else {
-                (error / 3.0, error / 3.0)
-            };
-            (one - zero) / ((1.0 - p) * zero + p * one).max(1e-300)
-        })
-        .sum()
-}
+impl Likelihood {
+    fn new(observations: &[&Observation], ref_base: u8, alt: u8) -> Self {
+        let probabilities = observations
+            .iter()
+            .map(|obs| {
+                #[cfg(test)]
+                LIKELIHOOD_WORK.with(|work| {
+                    let (p, d) = work.get();
+                    work.set((p + 1, d));
+                });
+                let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
+                if obs.base == ref_base {
+                    (1.0 - error, error / 3.0)
+                } else if obs.base == alt {
+                    (error / 3.0, 1.0 - error)
+                } else {
+                    (error / 3.0, error / 3.0)
+                }
+            })
+            .collect();
+        Self { probabilities }
+    }
 
-fn likelihood_curvature(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
-        .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (zero, one) = if obs.base == ref_base {
-                (1.0 - error, error / 3.0)
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - error)
-            } else {
-                (error / 3.0, error / 3.0)
-            };
-            let denominator = ((1.0 - p) * zero + p * one).max(1e-300);
-            ((one - zero) / denominator).powi(2)
-        })
-        .sum()
+    fn log(&self, p: f64) -> f64 {
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| ((1.0 - p) * zero + p * one).max(1e-300).ln())
+            .sum()
+    }
+
+    fn derivative(&self, p: f64) -> f64 {
+        #[cfg(test)]
+        LIKELIHOOD_WORK.with(|work| {
+            let (p, d) = work.get();
+            work.set((p, d + 1));
+        });
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| (one - zero) / ((1.0 - p) * zero + p * one).max(1e-300))
+            .sum()
+    }
+
+    fn curvature(&self, p: f64) -> f64 {
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| {
+                let denominator = ((1.0 - p) * zero + p * one).max(1e-300);
+                ((one - zero) / denominator).powi(2)
+            })
+            .sum()
+    }
 }
 
 fn log_add_exp(left: f64, right: f64) -> f64 {
@@ -505,11 +522,11 @@ fn log_add_exp(left: f64, right: f64) -> f64 {
     high + (left.min(right) - high).exp().ln_1p()
 }
 
-fn log_uniform_likelihood(observations: &[&Observation], ref_base: u8, alt: u8) -> f64 {
+fn log_uniform_likelihood(likelihood: &Likelihood) -> f64 {
     GL32_X
         .iter()
         .zip(GL32_W.iter())
-        .map(|(&x, w)| log_likelihood(observations, ref_base, alt, x) + w.ln())
+        .map(|(&x, w)| likelihood.log(x) + w.ln())
         .fold(f64::NEG_INFINITY, log_add_exp)
 }
 
@@ -605,14 +622,15 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     if observations.is_empty() {
         return (0.0, 0.0);
     }
-    let log_zero = log_likelihood(observations, ref_base, alt, 0.0);
-    let log_one = log_likelihood(observations, ref_base, alt, 1.0);
+    let likelihood = Likelihood::new(observations, ref_base, alt);
+    let log_zero = likelihood.log(0.0);
+    let log_one = likelihood.log(1.0);
     if observations.len() <= 63 {
-        let log_uniform = log_uniform_likelihood(observations, ref_base, alt);
+        let log_uniform = log_uniform_likelihood(&likelihood);
         return (log_uniform - log_zero, log_uniform - log_one);
     }
-    let derivative_zero = likelihood_derivative(observations, ref_base, alt, 0.0);
-    let derivative_one = likelihood_derivative(observations, ref_base, alt, 1.0);
+    let derivative_zero = likelihood.derivative(0.0);
+    let derivative_one = likelihood.derivative(1.0);
     let mode = if derivative_zero <= 0.0 {
         0.0
     } else if derivative_one >= 0.0 {
@@ -622,7 +640,13 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
         let mut hi = 1.0;
         for _ in 0..100 {
             let mid = (lo + hi) / 2.0;
-            if likelihood_derivative(observations, ref_base, alt, mid) > 0.0 {
+            // A midpoint rounded to an endpoint cannot move the final rounded
+            // midpoint: later updates either keep these bounds or collapse to
+            // that endpoint. Retain the original 100-iteration ceiling.
+            if mid == lo || mid == hi {
+                break;
+            }
+            if likelihood.derivative(mid) > 0.0 {
                 lo = mid;
             } else {
                 hi = mid;
@@ -630,7 +654,7 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
         }
         (lo + hi) / 2.0
     };
-    let peak = log_likelihood(observations, ref_base, alt, mode);
+    let peak = likelihood.log(mode);
     let scale = if mode == 0.0 || mode == 1.0 {
         let derivative = if mode == 0.0 {
             derivative_zero.abs()
@@ -639,13 +663,9 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
         };
         // The opposite endpoint can have an arbitrarily steep slope. Near a
         // flat boundary, curvature rather than slope controls the mass width.
-        1.0 / derivative
-            .max(likelihood_curvature(observations, ref_base, alt, mode).sqrt())
-            .max(1.0)
+        1.0 / derivative.max(likelihood.curvature(mode).sqrt()).max(1.0)
     } else {
-        1.0 / likelihood_curvature(observations, ref_base, alt, mode)
-            .max(1.0)
-            .sqrt()
+        1.0 / likelihood.curvature(mode).max(1.0).sqrt()
     };
     let mut points = vec![0.0, 1.0];
     for multiple in [1.0, 4.0, 16.0, 64.0] {
@@ -659,13 +679,7 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     points.dedup_by(|a, b| a == b);
     let integral = points
         .windows(2)
-        .map(|window| {
-            integrate(
-                |p| (log_likelihood(observations, ref_base, alt, p) - peak).exp(),
-                window[0],
-                window[1],
-            )
-        })
+        .map(|window| integrate(|p| (likelihood.log(p) - peak).exp(), window[0], window[1]))
         .sum::<f64>();
     (
         peak + integral.ln() - log_zero,

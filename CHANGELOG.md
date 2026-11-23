@@ -1,5 +1,11 @@
 # Changelog
 
+- Prepare native27 observation-specific likelihood probabilities once per site,
+  preserving traversal, sum order and quadrature arithmetic. Stop mode bisection
+  when its rounded f64 midpoint reaches an endpoint; retain the original
+  iteration ceiling and final midpoint. Feature, model and threshold contracts
+  are unchanged; exact parity and resource qualification remain separate gates.
+
 - Reuse native27 BAM/FASTA readers within rayon export tasks. Preserve each
   site's independent window, input order, duplicate rows and feature/error
   semantics. Extraction performance and all-column parity require separate
