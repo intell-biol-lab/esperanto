@@ -1,5 +1,11 @@
 # Changelog
 
+- Traverse native27 center observations in stable window-template ID order for
+  likelihood and metadata reductions. This explicitly changes floating-point
+  accumulation order: historical f32 values can differ at rounding boundaries.
+  Preserve all evidence and merging rules; require separate deterministic-output
+  qualification and record all historical differences before any adoption.
+
 - Prepare native27 observation-specific likelihood probabilities once per site,
   preserving traversal, sum order and quadrature arithmetic. Stop mode bisection
   when its rounded f64 midpoint reaches an endpoint; retain the original

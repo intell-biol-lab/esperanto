@@ -42,6 +42,10 @@ mod reader_reuse_tests;
 mod likelihood_cache_tests;
 
 #[cfg(test)]
+#[path = "deterministic_order_tests.rs"]
+mod deterministic_order_tests;
+
+#[cfg(test)]
 thread_local! {
     static LIKELIHOOD_WORK: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) };
 }
@@ -687,6 +691,22 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     )
 }
 
+// Center reductions must have a reproducible observation traversal.
+fn center_observations(window: &Window, pos: i64) -> Vec<&Observation> {
+    let mut observations: Vec<_> = window
+        .get(&pos)
+        .into_iter()
+        .flat_map(|x| x.iter())
+        .collect();
+    // IDs are interned in BAM traversal order, independent of HashMap seeds.
+    // Sort only the center reduction sequence; retain every merged observation.
+    observations.sort_unstable_by_key(|&(id, _)| *id);
+    observations
+        .into_iter()
+        .map(|(_, observation)| observation)
+        .collect()
+}
+
 fn feature_vector(
     site: &(String, i64),
     ref_seq: &[u8],
@@ -703,11 +723,7 @@ fn feature_vector(
         b'T' => b'C',
         _ => bail!("unsupported reference base at {chrom}:{pos1}"),
     };
-    let obs: Vec<&Observation> = window
-        .get(&pos)
-        .into_iter()
-        .flat_map(|x| x.values())
-        .collect();
+    let obs = center_observations(window, pos);
     let alt_obs: Vec<_> = obs.iter().copied().filter(|o| o.base == alt).collect();
     let ref_obs: Vec<_> = obs.iter().copied().filter(|o| o.base == ref_base).collect();
     let depth = obs.len() as f64;
