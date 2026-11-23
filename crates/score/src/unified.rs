@@ -33,6 +33,10 @@ struct Observation {
 type TemplateId = u32;
 type Window = HashMap<i64, HashMap<TemplateId, Observation>>;
 
+#[cfg(test)]
+#[path = "reader_reuse_tests.rs"]
+mod reader_reuse_tests;
+
 #[derive(Clone, Debug)]
 struct IntervalIndex {
     starts: Vec<i64>,
@@ -902,13 +906,28 @@ pub type FeatureRow = std::result::Result<[f32; FEATURE_COUNT], String>;
 ///
 /// Groups are additionally capped in size/span for rayon load balance; this
 /// does not change any feature value (a site's window depends only on its own
-/// +-RADIUS neighbourhood).
+/// +-RADIUS neighbourhood). BAM and FASTA handles are reused within each rayon
+/// task; every group still fetches its original independent window.
 pub fn feature_matrix(
     bam_path: &Path,
     fasta_path: &Path,
     alu: &AluIndex,
     sites: &[(String, i64)],
     threads: usize,
+) -> Result<Vec<FeatureRow>> {
+    feature_matrix_with_readers(alu, sites, threads, || {
+        Ok((
+            IndexedReader::from_path(bam_path)?,
+            rust_htslib::faidx::Reader::from_path(fasta_path)?,
+        ))
+    })
+}
+
+fn feature_matrix_with_readers(
+    alu: &AluIndex,
+    sites: &[(String, i64)],
+    threads: usize,
+    open: impl Fn() -> Result<(IndexedReader, rust_htslib::faidx::Reader)> + Sync,
 ) -> Result<Vec<FeatureRow>> {
     let mut order: Vec<usize> = (0..sites.len()).collect();
     order.sort_by(|&a, &b| sites[a].cmp(&sites[b]));
@@ -943,15 +962,18 @@ pub fn feature_matrix(
     let results = pool.install(|| {
         groups
             .par_iter()
-            .map(
-                |&(lo, hi, ref chrom, left)| -> Result<Vec<(usize, FeatureRow)>> {
+            .map_init(
+                || None,
+                |readers, &(lo, hi, ref chrom, left)| -> Result<Vec<(usize, FeatureRow)>> {
                     let right = sites[order[hi - 1]].1 - 1 + RADIUS + 1;
-                    let mut bam = IndexedReader::from_path(bam_path)?;
-                    let fasta = rust_htslib::faidx::Reader::from_path(fasta_path)?;
+                    if readers.is_none() {
+                        *readers = Some(open()?);
+                    }
+                    let (bam, fasta) = readers.as_mut().expect("readers initialized above");
                     let ref_start = left.max(0);
                     let reference =
                         fasta.fetch_seq(chrom, ref_start as usize, (right - 1) as usize)?;
-                    let window = read_window(&mut bam, chrom, ref_start, right)?;
+                    let window = read_window(bam, chrom, ref_start, right)?;
                     let mut result = Vec::with_capacity(hi - lo);
                     for &i in &order[lo..hi] {
                         result.push((

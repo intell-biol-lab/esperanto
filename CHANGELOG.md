@@ -1,5 +1,10 @@
 # Changelog
 
+- Reuse native27 BAM/FASTA readers within rayon export tasks. Preserve each
+  site's independent window, input order, duplicate rows and feature/error
+  semantics. Extraction performance and all-column parity require separate
+  qualification on pinned inputs; this does not adopt a model or label set.
+
 - Make equal-maximum-BQ template metadata deterministic with fieldwise
   max/min/orientation consensus, retaining existing conflict/late-resolution
   rules. This is a separately identified semantic change from dev.42.
