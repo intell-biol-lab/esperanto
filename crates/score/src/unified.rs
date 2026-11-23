@@ -46,6 +46,10 @@ mod likelihood_cache_tests;
 mod deterministic_order_tests;
 
 #[cfg(test)]
+#[path = "template_merge_tests.rs"]
+mod template_merge_tests;
+
+#[cfg(test)]
 thread_local! {
     static LIKELIHOOD_WORK: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) };
 }
@@ -209,14 +213,14 @@ impl Model {
     }
 }
 
-fn template_name(qname: &[u8]) -> Vec<u8> {
+fn template_name(qname: &[u8]) -> &[u8] {
     if qname.len() >= 2
         && qname[qname.len() - 2] == b'/'
         && matches!(qname[qname.len() - 1], b'1' | b'2')
     {
-        qname[..qname.len() - 2].to_vec()
+        &qname[..qname.len() - 2]
     } else {
-        qname.to_vec()
+        qname
     }
 }
 
@@ -356,6 +360,21 @@ fn read_observations(
     out
 }
 
+fn merge_template<S: std::hash::BuildHasher>(
+    observations: &mut HashMap<TemplateId, Observation, S>,
+    id: TemplateId,
+    observation: Observation,
+) {
+    match observations.entry(id) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            merge_observation(entry.get_mut(), observation);
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(observation);
+        }
+    }
+}
+
 fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> Result<Window> {
     let tid = bam
         .header()
@@ -379,17 +398,13 @@ fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> R
             })
             .unwrap_or_default();
         name.push(0);
-        name.extend_from_slice(&template_name(record.qname()));
+        name.extend_from_slice(template_name(record.qname()));
         let next =
             TemplateId::try_from(template_ids.len()).context("too many templates in window")?;
         let id = *template_ids.entry(name).or_insert(next);
         for (pos, observation) in evidence {
             let observations = positions.entry(pos).or_default();
-            if let Some(old) = observations.get_mut(&id) {
-                merge_observation(old, observation);
-            } else {
-                observations.insert(id, observation);
-            }
+            merge_template(observations, id, observation);
         }
     }
     // Keep conflicting intermediate observations until every record has merged:

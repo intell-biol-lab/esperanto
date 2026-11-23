@@ -1,5 +1,9 @@
 # Changelog
 
+- Reduce native27 template merging to one hash lookup per observation and borrow
+  normalized query names when constructing RG/template keys. Preserve molecular
+  identity, conflict resolution, BAM traversal and center reduction order.
+
 - Traverse native27 center observations in stable window-template ID order for
   likelihood and metadata reductions. This explicitly changes floating-point
   accumulation order: historical f32 values can differ at rounding boundaries.
