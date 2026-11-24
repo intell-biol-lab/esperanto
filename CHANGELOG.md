@@ -1,5 +1,44 @@
 # Changelog
 
+- Reduce native27 template merging to one hash lookup per observation and borrow
+  normalized query names when constructing RG/template keys. Preserve molecular
+  identity, conflict resolution, BAM traversal and center reduction order.
+
+- Traverse native27 center observations in stable window-template ID order for
+  likelihood and metadata reductions. This explicitly changes floating-point
+  accumulation order: historical f32 values can differ at rounding boundaries.
+  Preserve all evidence and merging rules; require separate deterministic-output
+  qualification and record all historical differences before any adoption.
+
+- Prepare native27 observation-specific likelihood probabilities once per site,
+  preserving traversal, sum order and quadrature arithmetic. Stop mode bisection
+  when its rounded f64 midpoint reaches an endpoint; retain the original
+  iteration ceiling and final midpoint. Feature, model and threshold contracts
+  are unchanged; exact parity and resource qualification remain separate gates.
+
+- Reuse native27 BAM/FASTA readers within rayon export tasks. Preserve each
+  site's independent window, input order, duplicate rows and feature/error
+  semantics. Extraction performance and all-column parity require separate
+  qualification on pinned inputs; this does not adopt a model or label set.
+
+- Make equal-maximum-BQ template metadata deterministic with fieldwise
+  max/min/orientation consensus, retaining existing conflict/late-resolution
+  rules. This is a separately identified semantic change from dev.42.
+
+- Stabilize native27 uniform-likelihood integration in log space at low depth,
+  and use the actual mode's slope/curvature for high-depth boundary mass.
+  Evaluate endpoint mixtures without subtractive cancellation at high BQ.
+  The likelihood/prior, 27-column schema and bundled model are unchanged;
+  corrected features require a separately identified training/inference build.
+
+- Intern molecular feature template identities and merge directly into position
+  maps; limit export grouping span without dropping reads. Native27 parity and
+  high-depth memory qualification remain required.
+
+- Reuse immutable seed lookup results within budgeted anchor collection; preserve
+  complete/overflow ordering, whole-list budgets and omission accounting. No
+  search/scoring/model change; native qualification remains separate.
+
 - Repair experimental short-exon qualification after common scoring across both
   genomic and L1 candidates, preserving existing informative high-coverage paths.
 - Require supplemental splice-tail sequence gain to beat the existing constant

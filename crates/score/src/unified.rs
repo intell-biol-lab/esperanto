@@ -30,7 +30,29 @@ struct Observation {
     gap_nearness: f64,
 }
 
-type Window = HashMap<i64, HashMap<Vec<u8>, Observation>>;
+type TemplateId = u32;
+type Window = HashMap<i64, HashMap<TemplateId, Observation>>;
+
+#[cfg(test)]
+#[path = "reader_reuse_tests.rs"]
+mod reader_reuse_tests;
+
+#[cfg(test)]
+#[path = "likelihood_cache_tests.rs"]
+mod likelihood_cache_tests;
+
+#[cfg(test)]
+#[path = "deterministic_order_tests.rs"]
+mod deterministic_order_tests;
+
+#[cfg(test)]
+#[path = "template_merge_tests.rs"]
+mod template_merge_tests;
+
+#[cfg(test)]
+thread_local! {
+    static LIKELIHOOD_WORK: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) };
+}
 
 #[derive(Clone, Debug)]
 struct IntervalIndex {
@@ -191,14 +213,14 @@ impl Model {
     }
 }
 
-fn template_name(qname: &[u8]) -> Vec<u8> {
+fn template_name(qname: &[u8]) -> &[u8] {
     if qname.len() >= 2
         && qname[qname.len() - 2] == b'/'
         && matches!(qname[qname.len() - 1], b'1' | b'2')
     {
-        qname[..qname.len() - 2].to_vec()
+        &qname[..qname.len() - 2]
     } else {
-        qname.to_vec()
+        qname
     }
 }
 
@@ -209,8 +231,13 @@ fn base_index(base: u8) -> Option<usize> {
 fn merge_observation(old: &mut Observation, new: Observation) {
     if new.bq > old.bq {
         *old = new;
-    } else if new.bq == old.bq && old.base != new.base {
-        old.base = b'N';
+    } else if new.bq == old.bq {
+        // Reduce all maximum-BQ evidence, not only discordant bases. These
+        // fieldwise summaries are a composite template observation, not a
+        // selected physical read. N remains absorbing at the same BQ.
+        if old.base != new.base {
+            old.base = b'N';
+        }
         old.mapq = if old.mapq.is_finite() {
             old.mapq.max(new.mapq)
         } else {
@@ -333,15 +360,35 @@ fn read_observations(
     out
 }
 
+fn merge_template<S: std::hash::BuildHasher>(
+    observations: &mut HashMap<TemplateId, Observation, S>,
+    id: TemplateId,
+    observation: Observation,
+) {
+    match observations.entry(id) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            merge_observation(entry.get_mut(), observation);
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(observation);
+        }
+    }
+}
+
 fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> Result<Window> {
     let tid = bam
         .header()
         .tid(chrom.as_bytes())
         .context("contig absent from BAM")?;
     bam.fetch((tid, left, right))?;
-    let mut templates: HashMap<Vec<u8>, HashMap<i64, Observation>> = HashMap::new();
+    let mut template_ids: HashMap<Vec<u8>, TemplateId> = HashMap::new();
+    let mut positions: Window = HashMap::new();
     for record in bam.records() {
         let record = record?;
+        let evidence = read_observations(&record, left, right);
+        if evidence.is_empty() {
+            continue;
+        }
         let mut name = record
             .aux(b"RG")
             .ok()
@@ -351,30 +398,23 @@ fn read_window(bam: &mut IndexedReader, chrom: &str, left: i64, right: i64) -> R
             })
             .unwrap_or_default();
         name.push(0);
-        name.extend_from_slice(&template_name(record.qname()));
-        let observations = templates.entry(name).or_default();
-        for (pos, observation) in read_observations(&record, left, right) {
-            if let Some(old) = observations.get_mut(&pos) {
-                merge_observation(old, observation);
-            } else {
-                observations.insert(pos, observation);
-            }
+        name.extend_from_slice(template_name(record.qname()));
+        let next =
+            TemplateId::try_from(template_ids.len()).context("too many templates in window")?;
+        let id = *template_ids.entry(name).or_insert(next);
+        for (pos, observation) in evidence {
+            let observations = positions.entry(pos).or_default();
+            merge_template(observations, id, observation);
         }
     }
-    let mut positions: Window = HashMap::new();
-    for (name, observations) in templates {
-        for (pos, observation) in observations {
-            if base_index(observation.base).is_some() {
-                positions
-                    .entry(pos)
-                    .or_default()
-                    .insert(name.clone(), observation);
-            }
-        }
+    // Keep conflicting intermediate observations until every record has merged:
+    // a later higher-quality observation can resolve an earlier conflict.
+    for observations in positions.values_mut() {
+        observations.retain(|_, observation| base_index(observation.base).is_some());
     }
+    positions.retain(|_, observations| !observations.is_empty());
     Ok(positions)
 }
-
 /// Independent informative A/C/G/T template counts using the frozen molecular
 /// observation reader. None denotes a contig absent from the BAM dictionary.
 /// Windows are bounded to 4096 reference bases; output follows input order.
@@ -430,56 +470,83 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
-fn log_likelihood(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
-        .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
-            } else {
-                (error / 3.0, 0.0)
-            };
-            (a + b * p).max(1e-300).ln()
-        })
-        .sum()
+/// Observation-specific mixture endpoints, prepared once and visited in the
+/// original order for every likelihood/derivative/curvature sum. Do not group
+/// equal observations: regrouping would change floating-point addition order.
+struct Likelihood {
+    probabilities: Vec<(f64, f64)>,
 }
 
-fn likelihood_derivative(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
-        .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
-            } else {
-                (error / 3.0, 0.0)
-            };
-            b / (a + b * p).max(1e-300)
-        })
-        .sum()
+impl Likelihood {
+    fn new(observations: &[&Observation], ref_base: u8, alt: u8) -> Self {
+        let probabilities = observations
+            .iter()
+            .map(|obs| {
+                #[cfg(test)]
+                LIKELIHOOD_WORK.with(|work| {
+                    let (p, d) = work.get();
+                    work.set((p + 1, d));
+                });
+                let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
+                if obs.base == ref_base {
+                    (1.0 - error, error / 3.0)
+                } else if obs.base == alt {
+                    (error / 3.0, 1.0 - error)
+                } else {
+                    (error / 3.0, error / 3.0)
+                }
+            })
+            .collect();
+        Self { probabilities }
+    }
+
+    fn log(&self, p: f64) -> f64 {
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| ((1.0 - p) * zero + p * one).max(1e-300).ln())
+            .sum()
+    }
+
+    fn derivative(&self, p: f64) -> f64 {
+        #[cfg(test)]
+        LIKELIHOOD_WORK.with(|work| {
+            let (p, d) = work.get();
+            work.set((p, d + 1));
+        });
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| (one - zero) / ((1.0 - p) * zero + p * one).max(1e-300))
+            .sum()
+    }
+
+    fn curvature(&self, p: f64) -> f64 {
+        self.probabilities
+            .iter()
+            .map(|&(zero, one)| {
+                let denominator = ((1.0 - p) * zero + p * one).max(1e-300);
+                ((one - zero) / denominator).powi(2)
+            })
+            .sum()
+    }
 }
 
-fn likelihood_curvature(observations: &[&Observation], ref_base: u8, alt: u8, p: f64) -> f64 {
-    observations
+fn log_add_exp(left: f64, right: f64) -> f64 {
+    if !left.is_finite() {
+        return right;
+    }
+    if !right.is_finite() {
+        return left;
+    }
+    let high = left.max(right);
+    high + (left.min(right) - high).exp().ln_1p()
+}
+
+fn log_uniform_likelihood(likelihood: &Likelihood) -> f64 {
+    GL32_X
         .iter()
-        .map(|obs| {
-            let error = 10_f64.powf(-(obs.bq as f64) / 10.0);
-            let (a, b) = if obs.base == ref_base {
-                (1.0 - error, -(1.0 - 4.0 * error / 3.0))
-            } else if obs.base == alt {
-                (error / 3.0, 1.0 - 4.0 * error / 3.0)
-            } else {
-                (error / 3.0, 0.0)
-            };
-            let denominator = (a + b * p).max(1e-300);
-            (b / denominator).powi(2)
-        })
-        .sum()
+        .zip(GL32_W.iter())
+        .map(|(&x, w)| likelihood.log(x) + w.ln())
+        .fold(f64::NEG_INFINITY, log_add_exp)
 }
 
 /// 32-point Gauss-Legendre nodes and weights on [0, 1]. Used for every
@@ -574,19 +641,15 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     if observations.is_empty() {
         return (0.0, 0.0);
     }
-    let log_zero = log_likelihood(observations, ref_base, alt, 0.0);
-    let log_one = log_likelihood(observations, ref_base, alt, 1.0);
+    let likelihood = Likelihood::new(observations, ref_base, alt);
+    let log_zero = likelihood.log(0.0);
+    let log_one = likelihood.log(1.0);
     if observations.len() <= 63 {
-        let log_uniform = GL32_X
-            .iter()
-            .zip(GL32_W.iter())
-            .map(|(&x, w)| (log_likelihood(observations, ref_base, alt, x) + w.ln()).exp())
-            .sum::<f64>()
-            .ln();
+        let log_uniform = log_uniform_likelihood(&likelihood);
         return (log_uniform - log_zero, log_uniform - log_one);
     }
-    let derivative_zero = likelihood_derivative(observations, ref_base, alt, 0.0);
-    let derivative_one = likelihood_derivative(observations, ref_base, alt, 1.0);
+    let derivative_zero = likelihood.derivative(0.0);
+    let derivative_one = likelihood.derivative(1.0);
     let mode = if derivative_zero <= 0.0 {
         0.0
     } else if derivative_one >= 0.0 {
@@ -596,7 +659,13 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
         let mut hi = 1.0;
         for _ in 0..100 {
             let mid = (lo + hi) / 2.0;
-            if likelihood_derivative(observations, ref_base, alt, mid) > 0.0 {
+            // A midpoint rounded to an endpoint cannot move the final rounded
+            // midpoint: later updates either keep these bounds or collapse to
+            // that endpoint. Retain the original 100-iteration ceiling.
+            if mid == lo || mid == hi {
+                break;
+            }
+            if likelihood.derivative(mid) > 0.0 {
                 lo = mid;
             } else {
                 hi = mid;
@@ -604,13 +673,18 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
         }
         (lo + hi) / 2.0
     };
-    let peak = log_likelihood(observations, ref_base, alt, mode);
+    let peak = likelihood.log(mode);
     let scale = if mode == 0.0 || mode == 1.0 {
-        1.0 / derivative_zero.abs().max(derivative_one.abs()).max(1.0)
+        let derivative = if mode == 0.0 {
+            derivative_zero.abs()
+        } else {
+            derivative_one.abs()
+        };
+        // The opposite endpoint can have an arbitrarily steep slope. Near a
+        // flat boundary, curvature rather than slope controls the mass width.
+        1.0 / derivative.max(likelihood.curvature(mode).sqrt()).max(1.0)
     } else {
-        1.0 / likelihood_curvature(observations, ref_base, alt, mode)
-            .max(1.0)
-            .sqrt()
+        1.0 / likelihood.curvature(mode).max(1.0).sqrt()
     };
     let mut points = vec![0.0, 1.0];
     for multiple in [1.0, 4.0, 16.0, 64.0] {
@@ -624,18 +698,28 @@ fn likelihood_features(observations: &[&Observation], ref_base: u8, alt: u8) -> 
     points.dedup_by(|a, b| a == b);
     let integral = points
         .windows(2)
-        .map(|window| {
-            integrate(
-                |p| (log_likelihood(observations, ref_base, alt, p) - peak).exp(),
-                window[0],
-                window[1],
-            )
-        })
+        .map(|window| integrate(|p| (likelihood.log(p) - peak).exp(), window[0], window[1]))
         .sum::<f64>();
     (
         peak + integral.ln() - log_zero,
         peak + integral.ln() - log_one,
     )
+}
+
+// Center reductions must have a reproducible observation traversal.
+fn center_observations(window: &Window, pos: i64) -> Vec<&Observation> {
+    let mut observations: Vec<_> = window
+        .get(&pos)
+        .into_iter()
+        .flat_map(|x| x.iter())
+        .collect();
+    // IDs are interned in BAM traversal order, independent of HashMap seeds.
+    // Sort only the center reduction sequence; retain every merged observation.
+    observations.sort_unstable_by_key(|&(id, _)| *id);
+    observations
+        .into_iter()
+        .map(|(_, observation)| observation)
+        .collect()
 }
 
 fn feature_vector(
@@ -654,11 +738,7 @@ fn feature_vector(
         b'T' => b'C',
         _ => bail!("unsupported reference base at {chrom}:{pos1}"),
     };
-    let obs: Vec<&Observation> = window
-        .get(&pos)
-        .into_iter()
-        .flat_map(|x| x.values())
-        .collect();
+    let obs = center_observations(window, pos);
     let alt_obs: Vec<_> = obs.iter().copied().filter(|o| o.base == alt).collect();
     let ref_obs: Vec<_> = obs.iter().copied().filter(|o| o.base == ref_base).collect();
     let depth = obs.len() as f64;
@@ -685,7 +765,7 @@ fn feature_vector(
     let mut weighted_alt_sites = 0.0;
     let mut all_weighted_depth = 0.0;
     let mut all_weighted_other = 0.0;
-    let mut template_contributions: HashMap<Vec<u8>, u32> = HashMap::new();
+    let mut template_contributions: HashMap<TemplateId, u32> = HashMap::new();
     for p in (pos - RADIUS).max(reference_start)
         ..=(pos + RADIUS).min(reference_start + ref_seq.len() as i64 - 1)
     {
@@ -720,7 +800,7 @@ fn feature_vector(
             weighted_alt_sites += w;
             for (name, o) in local_obs {
                 if o.base == alt {
-                    *template_contributions.entry(name.clone()).or_default() += 1;
+                    *template_contributions.entry(*name).or_default() += 1;
                 }
             }
         }
@@ -871,7 +951,8 @@ pub type FeatureRow = std::result::Result<[f32; FEATURE_COUNT], String>;
 ///
 /// Groups are additionally capped in size/span for rayon load balance; this
 /// does not change any feature value (a site's window depends only on its own
-/// +-RADIUS neighbourhood).
+/// +-RADIUS neighbourhood). BAM and FASTA handles are reused within each rayon
+/// task; every group still fetches its original independent window.
 pub fn feature_matrix(
     bam_path: &Path,
     fasta_path: &Path,
@@ -879,10 +960,24 @@ pub fn feature_matrix(
     sites: &[(String, i64)],
     threads: usize,
 ) -> Result<Vec<FeatureRow>> {
+    feature_matrix_with_readers(alu, sites, threads, || {
+        Ok((
+            IndexedReader::from_path(bam_path)?,
+            rust_htslib::faidx::Reader::from_path(fasta_path)?,
+        ))
+    })
+}
+
+fn feature_matrix_with_readers(
+    alu: &AluIndex,
+    sites: &[(String, i64)],
+    threads: usize,
+    open: impl Fn() -> Result<(IndexedReader, rust_htslib::faidx::Reader)> + Sync,
+) -> Result<Vec<FeatureRow>> {
     let mut order: Vec<usize> = (0..sites.len()).collect();
     order.sort_by(|&a, &b| sites[a].cmp(&sites[b]));
     const MAX_GROUP_SITES: usize = 512;
-    const MAX_GROUP_SPAN: i64 = 400_000;
+    const MAX_GROUP_SPAN: i64 = 401;
     let mut groups = Vec::new();
     let mut start = 0;
     while start < order.len() {
@@ -912,15 +1007,18 @@ pub fn feature_matrix(
     let results = pool.install(|| {
         groups
             .par_iter()
-            .map(
-                |&(lo, hi, ref chrom, left)| -> Result<Vec<(usize, FeatureRow)>> {
+            .map_init(
+                || None,
+                |readers, &(lo, hi, ref chrom, left)| -> Result<Vec<(usize, FeatureRow)>> {
                     let right = sites[order[hi - 1]].1 - 1 + RADIUS + 1;
-                    let mut bam = IndexedReader::from_path(bam_path)?;
-                    let fasta = rust_htslib::faidx::Reader::from_path(fasta_path)?;
+                    if readers.is_none() {
+                        *readers = Some(open()?);
+                    }
+                    let (bam, fasta) = readers.as_mut().expect("readers initialized above");
                     let ref_start = left.max(0);
                     let reference =
                         fasta.fetch_seq(chrom, ref_start as usize, (right - 1) as usize)?;
-                    let window = read_window(&mut bam, chrom, ref_start, right)?;
+                    let window = read_window(bam, chrom, ref_start, right)?;
                     let mut result = Vec::with_capacity(hi - lo);
                     for &i in &order[lo..hi] {
                         result.push((
@@ -1061,4 +1159,275 @@ pub fn discover_sites(
     }
     std::fs::write(out, text)?;
     Ok(all.len())
+}
+
+#[cfg(test)]
+mod template_tie_regression {
+    use super::*;
+
+    fn obs(base: u8, bq: u8, mapq: f64, orientation: i8) -> Observation {
+        Observation {
+            base,
+            bq,
+            mapq,
+            end_fraction: mapq / 100.0,
+            orientation,
+            softclip_fraction: (100.0 - mapq) / 100.0,
+            gap_nearness: (100.0 - mapq) / 100.0,
+        }
+    }
+
+    fn signature(value: &Observation) -> Vec<u64> {
+        vec![
+            value.base as u64,
+            value.bq as u64,
+            if value.mapq.is_nan() {
+                u64::MAX
+            } else {
+                value.mapq.to_bits()
+            },
+            value.end_fraction.to_bits(),
+            (value.orientation as i64) as u64,
+            value.softclip_fraction.to_bits(),
+            value.gap_nearness.to_bits(),
+        ]
+    }
+
+    #[test]
+    fn equal_bq_same_base_metadata_is_commutative_and_associative() {
+        let records = [
+            obs(b'G', 30, 20.0, 0),
+            obs(b'G', 30, 60.0, 1),
+            obs(b'G', 30, f64::NAN, 1),
+        ];
+        let mut expected = None;
+        for i in 0..3 {
+            for j in 0..3 {
+                if i == j {
+                    continue;
+                }
+                let k = 3 - i - j;
+                let mut left = records[i].clone();
+                merge_observation(&mut left, records[j].clone());
+                merge_observation(&mut left, records[k].clone());
+                let mut right = records[j].clone();
+                merge_observation(&mut right, records[k].clone());
+                let mut grouped = records[i].clone();
+                merge_observation(&mut grouped, right);
+                assert_eq!(signature(&left), signature(&grouped));
+                if let Some(ref e) = expected {
+                    assert_eq!(&signature(&left), e, "input-order metadata change");
+                } else {
+                    expected = Some(signature(&left));
+                }
+                assert_eq!(left.mapq, 60.0);
+                assert_eq!(left.orientation, -1);
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_is_absorbing_until_a_strictly_higher_bq_resolves_it() {
+        let mut ambiguous = obs(b'A', 30, 20.0, 0);
+        merge_observation(&mut ambiguous, obs(b'G', 30, 60.0, 1));
+        assert_eq!(ambiguous.base, b'N');
+        merge_observation(&mut ambiguous, obs(b'A', 30, 40.0, 0));
+        assert_eq!(ambiguous.base, b'N');
+        let winner = obs(b'G', 35, 40.0, 0);
+        merge_observation(&mut ambiguous, winner.clone());
+        assert_eq!(signature(&ambiguous), signature(&winner));
+        // Lower-BQ ties/metadata cannot contaminate the maximum-BQ winner.
+        merge_observation(&mut ambiguous, obs(b'A', 30, 60.0, 1));
+        assert_eq!(signature(&ambiguous), signature(&winner));
+    }
+}
+
+#[cfg(test)]
+mod likelihood_numerical_regression {
+    use super::*;
+
+    fn observations(groups: &[(u8, u8, usize)]) -> Vec<Observation> {
+        groups
+            .iter()
+            .flat_map(|&(base, bq, count)| {
+                std::iter::repeat_n(
+                    Observation {
+                        base,
+                        bq,
+                        mapq: 60.0,
+                        end_fraction: 0.5,
+                        orientation: 0,
+                        softclip_fraction: 0.0,
+                        gap_nearness: 0.0,
+                    },
+                    count,
+                )
+            })
+            .collect()
+    }
+
+    fn check(groups: &[(u8, u8, usize)], expected: (f64, f64)) {
+        let owned = observations(groups);
+        let refs: Vec<_> = owned.iter().collect();
+        let actual = likelihood_features(&refs, b'A', b'G');
+        for (a, e) in [(actual.0, expected.0), (actual.1, expected.1)] {
+            assert!(
+                a.is_finite() && (a - e).abs() < 2e-6,
+                "groups={groups:?}: actual={actual:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn low_depth_third_bases_do_not_underflow() {
+        // Independent integral: all third-base factors are constant in p.
+        check(&[(b'C', 93, 63)], (0.0, 0.0));
+        // Three ALT factors integrate to ((1-e)^4-(e/3)^4)/(4*(1-4e/3)).
+        check(
+            &[(b'C', 93, 60), (b'G', 93, 3)],
+            (66.15166659808187, -1.386294360952661),
+        );
+    }
+
+    #[test]
+    fn boundary_mass_is_not_lost_at_high_depth() {
+        // Independently checked by scipy quadrature AND incomplete beta form.
+        check(
+            &[(b'A', 30, 9997), (b'G', 30, 3)],
+            (-8.254418713486338, 79997.38405204924),
+        );
+        check(
+            &[(b'A', 30, 3), (b'G', 30, 9997)],
+            (79997.38405204924, -8.254418713486338),
+        );
+        // Almost-flat boundary: derivative alone is not a local width.
+        check(
+            &[(b'A', 30, 2997), (b'G', 30, 1)],
+            (-7.3125532755095435, 23976.767180405215),
+        );
+    }
+
+    #[test]
+    fn mixed_quality_and_third_base_oracle() {
+        check(
+            &[
+                (b'A', 20, 6000),
+                (b'A', 41, 3980),
+                (b'G', 20, 10),
+                (b'G', 41, 5),
+                (b'C', 30, 5),
+            ],
+            (4.272870200591683, 76002.77702414071),
+        );
+    }
+
+    #[test]
+    fn pure_ref_and_alt_have_closed_form_boundary_integrals() {
+        for n in [63, 64, 1000, 10000] {
+            for q in [13, 20, 30, 60, 93] {
+                let e = 10_f64.powf(-(q as f64) / 10.0);
+                let high = 1.0 - e;
+                let low = e / 3.0;
+                // Integral (high - (high-low)*p)^n dp on [0,1].
+                let log_z = (n as f64 + 1.0) * high.ln()
+                    + (-(low / high).powi(n as i32 + 1)).ln_1p()
+                    - (high - low).ln()
+                    - (n as f64 + 1.0).ln();
+                let expected = (log_z - n as f64 * high.ln(), log_z - n as f64 * low.ln());
+                check(&[(b'A', q, n)], expected);
+                check(&[(b'G', q, n)], (expected.1, expected.0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod memory_regression {
+    use super::*;
+    #[test]
+    fn position_keys_do_not_own_repeated_template_names() {
+        let observation = Observation {
+            base: b'G',
+            bq: 30,
+            mapq: 60.0,
+            end_fraction: 0.5,
+            orientation: 0,
+            softclip_fraction: 0.0,
+            gap_nearness: 0.0,
+        };
+        let mut window = Window::new();
+        window.entry(10).or_default().insert(0, observation.clone());
+        let key = window.get(&10).unwrap().keys().next().unwrap();
+        assert!(
+            std::mem::size_of_val(key) <= 8,
+            "each position stores an owned template name; compact identity required"
+        );
+    }
+}
+
+#[cfg(test)]
+mod window_semantic_regression {
+    use super::*;
+    use rust_htslib::bam::{
+        self,
+        header::HeaderRecord,
+        record::{Cigar, CigarString},
+        Header,
+    };
+    #[test]
+    fn interning_retains_rg_mates_conflicts_and_late_resolution() {
+        let path =
+            std::env::temp_dir().join(format!("esp-window-intern-{}.bam", std::process::id()));
+        let mut header = Header::new();
+        header.push_record(
+            HeaderRecord::new(b"SQ")
+                .push_tag(b"SN", "chr1")
+                .push_tag(b"LN", 1000),
+        );
+        {
+            let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+            for (name, rg, base, quality, flag) in [
+                ("same/1", "A", b'A', 30, 0),
+                ("same/2", "A", b'G', 30, 0),
+                ("same/1", "A", b'G', 40, 0),
+                ("same/1", "B", b'A', 30, 0),
+                ("conflict/1", "A", b'A', 30, 0),
+                ("conflict/2", "A", b'G', 30, 0),
+                ("secondary", "A", b'G', 40, 256),
+            ] {
+                let mut record = bam::Record::new();
+                record.set(
+                    name.as_bytes(),
+                    Some(&CigarString(vec![Cigar::Match(2)])),
+                    &[base; 2],
+                    &[quality; 2],
+                );
+                record.set_tid(0);
+                record.set_pos(100);
+                record.set_mapq(60);
+                record.set_flags(flag);
+                record
+                    .push_aux(b"RG", bam::record::Aux::String(rg))
+                    .unwrap();
+                writer.write(&record).unwrap();
+            }
+        }
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
+        let mut bam = IndexedReader::from_path(&path).unwrap();
+        let window = read_window(&mut bam, "chr1", 99, 104).unwrap();
+        for position in [100, 101] {
+            let observations = &window[&position];
+            assert_eq!(observations.len(), 2);
+            assert_eq!(
+                observations
+                    .values()
+                    .filter(|o| o.base == b'G' && o.bq == 40)
+                    .count(),
+                1
+            );
+            assert_eq!(observations.values().filter(|o| o.base == b'A').count(), 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(format!("{}.bai", path.display())).unwrap();
+    }
 }
