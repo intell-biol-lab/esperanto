@@ -12,9 +12,8 @@
 //! ```
 //!
 //! All little-endian, no timestamps or randomness: two builds from the same
-//! input are byte-identical. Loading mmaps and leaks the file; tables point
-//! straight into mapped pages via `bytemuck::cast_slice` (alignment is
-//! guaranteed by the pad computations).
+//! input are byte-identical. OwnedIndex provides scoped mmap storage; legacy
+//! load retains process-lifetime storage. Both share strict layout validation.
 
 use crate::error::AlignError;
 use crate::fasta::{Contig, Interval, Reference};
@@ -113,7 +112,7 @@ pub fn encode(index: &Index) -> Result<Vec<u8>, AlignError> {
 }
 
 /// Load a paidx v1 index: mmap + leak; strict validation throughout.
-pub fn load(path: &Path) -> Result<Index, AlignError> {
+pub fn load(path: &Path) -> Result<Index<'static>, AlignError> {
     let file = File::open(path).map_err(|_| AlignError::IndexIo)?;
     let mmap = unsafe { Mmap::map(&file) }.map_err(|_| AlignError::IndexIo)?;
     let mmap: &'static Mmap = Box::leak(Box::new(mmap));
@@ -121,8 +120,121 @@ pub fn load(path: &Path) -> Result<Index, AlignError> {
     decode(data, &path.display().to_string())
 }
 
+/// Owns a validated mmap and decoded reference. Views cannot outlive this owner.
+///
+/// Unlike the legacy process-lifetime loader, dropping this value releases both
+/// resources. The mmap file must remain immutable while any reader is alive.
+///
+/// ```compile_fail
+/// use esperanto_map::index_io::OwnedIndex;
+/// let owner = OwnedIndex::open(std::path::Path::new("ref.paidx")).unwrap();
+/// let view = owner.index();
+/// drop(owner);
+/// println!("{}", view.kmers.len());
+/// ```
+///
+/// ```compile_fail
+/// use esperanto_map::index_io::OwnedIndex;
+/// let owner = OwnedIndex::open(std::path::Path::new("ref.paidx")).unwrap();
+/// let hits = owner.index().query(0).positions;
+/// drop(owner);
+/// println!("{}", hits.len());
+/// ```
+pub struct OwnedIndex {
+    mmap: Mmap,
+    reference: Reference,
+    params: SeedParams,
+    version: u32,
+    freq_cutoff: u32,
+    kmers: std::ops::Range<usize>,
+    offsets: std::ops::Range<usize>,
+    counts: std::ops::Range<usize>,
+    positions: std::ops::Range<usize>,
+}
+
+impl OwnedIndex {
+    /// Open with exactly the same strict format/table checks as `load`.
+    pub fn open(path: &Path) -> Result<Self, AlignError> {
+        let file = File::open(path).map_err(|_| AlignError::IndexIo)?;
+        // Safety: the caller must keep the index file immutable, as for load().
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|_| AlignError::IndexIo)?;
+        let parts = decode_parts(&mmap, &path.display().to_string())?;
+        let range = |ptr: *const u8, bytes: usize| {
+            let start = ptr as usize - mmap.as_ptr() as usize;
+            start..start + bytes
+        };
+        let kmers = range(
+            parts.kmers.as_ptr().cast(),
+            std::mem::size_of_val(parts.kmers),
+        );
+        let offsets = range(
+            parts.offsets.as_ptr().cast(),
+            std::mem::size_of_val(parts.offsets),
+        );
+        let counts = range(
+            parts.counts.as_ptr().cast(),
+            std::mem::size_of_val(parts.counts),
+        );
+        let positions = range(
+            parts.positions.as_ptr().cast(),
+            std::mem::size_of_val(parts.positions),
+        );
+        Ok(Self {
+            reference: parts.reference,
+            params: parts.params,
+            version: parts.version,
+            freq_cutoff: parts.freq_cutoff,
+            kmers,
+            offsets,
+            counts,
+            positions,
+            mmap,
+        })
+    }
+
+    /// Borrow a zero-copy index; Rust ties every table/reference to this owner.
+    pub fn index(&self) -> Index<'_> {
+        Index {
+            params: self.params,
+            version: self.version,
+            freq_cutoff: self.freq_cutoff,
+            reference: &self.reference,
+            // decode_parts already checked alignment, table size and bounds.
+            kmers: bytemuck::cast_slice(&self.mmap[self.kmers.clone()]),
+            offsets: bytemuck::cast_slice(&self.mmap[self.offsets.clone()]),
+            counts: bytemuck::cast_slice(&self.mmap[self.counts.clone()]),
+            positions: bytemuck::cast_slice(&self.mmap[self.positions.clone()]),
+        }
+    }
+}
+
 /// Decode paidx v1 bytes (already leaked/mapped, `'static`) into an `Index`.
-pub fn decode(data: &'static [u8], file: &str) -> Result<Index, AlignError> {
+pub fn decode(data: &'static [u8], file: &str) -> Result<Index<'static>, AlignError> {
+    let parts = decode_parts(data, file)?;
+    Ok(Index {
+        params: parts.params,
+        version: parts.version,
+        freq_cutoff: parts.freq_cutoff,
+        reference: Box::leak(Box::new(parts.reference)),
+        kmers: parts.kmers,
+        offsets: parts.offsets,
+        counts: parts.counts,
+        positions: parts.positions,
+    })
+}
+
+struct Parts<'a> {
+    params: SeedParams,
+    version: u32,
+    freq_cutoff: u32,
+    reference: Reference,
+    kmers: &'a [u64],
+    offsets: &'a [u64],
+    counts: &'a [u32],
+    positions: &'a [u64],
+}
+
+fn decode_parts<'a>(data: &'a [u8], file: &str) -> Result<Parts<'a>, AlignError> {
     let bad = |msg: &str| AlignError::IndexFormat {
         msg: msg.to_string(),
     };
@@ -194,9 +306,9 @@ pub fn decode(data: &'static [u8], file: &str) -> Result<Index, AlignError> {
     }
 
     // Tables: kmers/offsets/counts (u64/u64/u32).
-    let kmers: &'static [u64] = cast_table(&mut cur, kmer_count * 8, &bad, 8)?;
-    let offsets: &'static [u64] = cast_table(&mut cur, kmer_count * 8, &bad, 8)?;
-    let counts: &'static [u32] = cast_table(&mut cur, kmer_count * 4, &bad, 4)?;
+    let kmers: &'a [u64] = cast_table(&mut cur, table_bytes(kmer_count, 8)?, &bad, 8)?;
+    let offsets: &'a [u64] = cast_table(&mut cur, table_bytes(kmer_count, 8)?, &bad, 8)?;
+    let counts: &'a [u32] = cast_table(&mut cur, table_bytes(kmer_count, 4)?, &bad, 4)?;
 
     // pad2 must exist and be zero.
     let pad2 = (8
@@ -208,7 +320,7 @@ pub fn decode(data: &'static [u8], file: &str) -> Result<Index, AlignError> {
         return Err(bad("pad2 not zero"));
     }
 
-    let positions: &'static [u64] = cast_table(&mut cur, positions_count * 8, &bad, 8)?;
+    let positions: &'a [u64] = cast_table(&mut cur, table_bytes(positions_count, 8)?, &bad, 8)?;
 
     if cur.remaining() != 0 {
         return Err(bad("trailing bytes after positions table"));
@@ -224,17 +336,19 @@ pub fn decode(data: &'static [u8], file: &str) -> Result<Index, AlignError> {
     for i in 0..offsets.len() {
         let o = offsets[i];
         let c = counts[i] as u64;
-        if o + c > positions.len() as u64 {
+        if o.checked_add(c)
+            .is_none_or(|end| end > positions.len() as u64)
+        {
             return Err(bad("offset+count exceeds positions table"));
         }
     }
 
-    let reference: &'static Reference = Box::leak(Box::new(Reference {
+    let reference = Reference {
         contigs,
         fasta_sha256,
-    }));
+    };
 
-    Ok(Index {
+    Ok(Parts {
         params: SeedParams { k, w },
         version,
         freq_cutoff,
@@ -246,13 +360,13 @@ pub fn decode(data: &'static [u8], file: &str) -> Result<Index, AlignError> {
     })
 }
 
-struct Cursor {
-    data: &'static [u8],
+struct Cursor<'a> {
+    data: &'a [u8],
     pos: usize,
 }
 
-impl Cursor {
-    fn new(data: &'static [u8]) -> Cursor {
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Cursor<'a> {
         Cursor { data, pos: 0 }
     }
 
@@ -260,11 +374,7 @@ impl Cursor {
         self.data.len() - self.pos
     }
 
-    fn take(
-        &mut self,
-        n: usize,
-        bad: &dyn Fn(&str) -> AlignError,
-    ) -> Result<&'static [u8], AlignError> {
+    fn take(&mut self, n: usize, bad: &dyn Fn(&str) -> AlignError) -> Result<&'a [u8], AlignError> {
         if self.remaining() < n {
             return Err(bad("unexpected end of file"));
         }
@@ -288,12 +398,12 @@ impl Cursor {
 
 /// Take `n` bytes aligned to `align` and cast them in place to the element
 /// type `T` (caller chooses the output slice type).
-fn cast_table<T: bytemuck::AnyBitPattern>(
-    cur: &mut Cursor,
+fn cast_table<'a, T: bytemuck::AnyBitPattern>(
+    cur: &mut Cursor<'a>,
     n: usize,
     bad: &dyn Fn(&str) -> AlignError,
     align: usize,
-) -> Result<&'static [T], AlignError> {
+) -> Result<&'a [T], AlignError> {
     if !n.is_multiple_of(std::mem::size_of::<T>()) {
         return Err(bad("table size not a multiple of element size"));
     }
@@ -302,4 +412,12 @@ fn cast_table<T: bytemuck::AnyBitPattern>(
     }
     let bytes = cur.take(n, bad)?;
     Ok(bytemuck::cast_slice(bytes))
+}
+
+fn table_bytes(count: usize, width: usize) -> Result<usize, AlignError> {
+    count
+        .checked_mul(width)
+        .ok_or_else(|| AlignError::IndexFormat {
+            msg: "table byte length overflow".into(),
+        })
 }
